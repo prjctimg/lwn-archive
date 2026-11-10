@@ -1,0 +1,171 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The Big Kernel Semaphore? [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The Big Kernel Semaphore?">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Much of the latency reduction work spearheaded by Ingo Molnar is reaching a state of completion [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/101414/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The Big Kernel Semaphore?</h1>
+<div class="Byline">[Posted September 15, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Much of the latency reduction work spearheaded by Ingo Molnar is reaching a
+state of completion; a lengthy set of patches has been posted which breaks
+up long lock hold times and adds "voluntary preemption" points at strategic
+places.  With these patches in place, most of the worst latency problems in
+the 2.6 kernel have been addressed, even when kernel preemption is not
+enabled.  That is good news for multimedia users and others who feel that
+their needs have been passed over in the 2.5/2.6 development period.
+<p>
+
+One issue remains, however: there are some old parts of the kernel which
+still rely on the Big Kernel Lock (BKL) for mutual exclusion.  Code which
+uses the BKL is not performance critical itself (all such uses have been
+fixed for a while).  But the BKL is a lock, and code which holds the BKL
+will not be preempted.  That can mean long latencies if a code path holds
+the BKL for a long time - and there are a few such paths.
+<p>
+
+Interest in eradicating use of the BKL has waned in the last year or two,
+for a few reasons.  Any code whose performance was seriously impacted
+by the BKL has been fixed.  And, perhaps more to the point, much of the
+remaining code is ancient, crufty, and brittle.  Finally, as Alan Cox (who
+holds the dubious fame of having created the BKL) <a
+href="/Articles/102254/">points out</a>, the BKL is not a traditional lock:
+<p>
+<div class="BigQuote">
+	The BKL turns on old style unix non-pre-emptive sematics between
+	all code that is within lock_kernel sections, that is it. That also
+	makes it hard to clean up because lock_kernel is delimiting code
+	properties (its essentially almost a function attribute) and
+	spin_lock/down/up and friends are real locks and lock data.
+</div>
+<p>
+Fixing the remaining code is not an exercise for the timid.  In most cases,
+the prudent course has been to simply leave things alone.  The latency
+problem may just force this issue, however; by increasing latency,
+BKL-protected code is harming the higher-performance parts of the kernel.
+<p>
+
+The BKL has one very interesting property which distinguishes it from an
+ordinary spinlock: code holding the BKL can call <tt>schedule()</tt> at any
+time.  When that happens, the kernel releases the lock until the scheduling
+thread is returned to the processor.  If code holding the lock can
+schedule, it ought to be preemptible as well - at least under some
+circumstances.
+<p>
+
+Ingo Molnar has decided to mitigate the BKL problem by turning it into the
+Big Kernel Semaphore.  As seen in <a href="/Articles/102216/">his
+patch</a>, the BKS is a special sort of semaphore; it is recursive (as is
+the BKL), and it is released when the thread holding it voluntarily
+schedules.  The key difference from the BKL, however, is that a process
+holding the BKS can be preempted - but the semaphore is not released in
+that case.  So code which uses <tt>lock_kernel()</tt> is still protected
+against other such code, just like it is now.  But that code can be
+preempted (as long as it does not take any spinlocks).  That change should
+be sufficient to address the latency problems caused by long BKL hold
+times. 
+<p>
+
+Whether this patch will be accepted remains to be seen.  Linus <a
+href="/Articles/102257/">doesn't like it</a>, but Ingo <a
+href="/Articles/102258/">has reasonable responses</a> to his objections.
+Including Ingo's patch would mitigate the current problems caused by the
+BKL, which may have an undesirable effect: once again, there will be little
+motivation to truly fix users of the BKL.  Some developers may prefer to
+simply bite the bullet and eliminate those final BKL users for real.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Big kernel lock</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Latency</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/102253/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor102390"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Big Kernel Semaphore?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2004 12:11 UTC (Thu)
+                               by <b>wli</b> (guest, #20327)
+                              [<a href="/Articles/102390/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wli" />
+                <input type="hidden" name="return" value="/Articles/102253/#CommAnchor102390" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Yes, I was the one who mentioned that the code still under the BKL was ancient and buggy.<br>
+<p>
+Moving on, since I've rewritten a fair amount of kernel/ and mm/ between 2.6.9-rc1 and 2.6.9-rc2 with the rewrites either in Linus' bk or in -mm now and LWN has yet to take notice, are you writing this stuff based on lkml archives from an account that has me procmailed to /dev/null or something?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/102390/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,192 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>LSFMM: Reducing io_submit() latency [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="LSFMM: Reducing io_submit() latency">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" At the 2013 LSFMM Summit, Ankit Jain led a discussion of ways to reduce the latency in the io_ [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>LSFMM: Reducing io_submit() latency</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>May 1, 2013</br>
+           <hr>
+<a href="/Articles/LSFMM2013/">LSFMM Summit 2013</a>
+</div>
+<p>
+At the 2013 LSFMM Summit, Ankit Jain led a discussion of ways to reduce the
+latency in the <tt>io_submit()</tt> system call which is used to submit asynchronous
+I/O operations to the kernel.  He doesn't have a solution to
+the problem that <tt>io_submit()</tt> can sometimes sleep especially when
+allocating new blocks, so he was
+interested in hearing from attendees on what kinds of solutions might be
+available. 
+</p>
+
+<p>
+Jain described a "naïve" approach he took that offloaded the processing of
+all <tt>iocbs</tt> (I/O control blocks that are used to track asynchronous
+I/O requests)
+to workqueues. That way, the workqueue thread would block, but
+<tt>io_submit()</tt> would not.  That didn't work very well for modern
+flash disks.  It also 
+depends on the submitter's context, and may need to be integrated with
+control groups.  That led him to look at other solutions such as
+filesystem-specific approaches, <a href="/Articles/261473/">syslets</a>, or
+<a href="../219954/index.html">fibrils</a>.  Jain said that
+fibrils were a "neat solution" and he was not sure why they were not accepted.
+</p>
+
+<p>
+Zach Brown cautioned that there is "no quick fix" for handling this problem.
+There are "no magic workqueue tricks" that will solve the problem and any
+path to a solution is "incredibly painful".  Beyond that, though, there is
+no consensus among kernel developers as to the right direction.  Fibrils
+have pain points; syslets have a different set, as do thread pools.
+Essentially, Jain is asking for a "consensus that hasn't existed for five
+years".  Al Viro suggested that five years was far too low; that the
+consensus had eluded the kernel community for much longer than that.
+</p>
+
+<p>
+Brown said that "arguably" the filesystem-specific solution is the least
+work.  For ext4, allocation data structures can be pinned in memory so that
+they don't need to be read at <tt>io_submit()</tt> time.  Ted Ts'o
+said that solving the general case problem was so painful that it may
+really make no sense to do so.  He has a solution that will eliminate
+waits in block allocation as long as the file is not being extended.
+There will be an occasional sleep in <tt>kmalloc()</tt>, but if that can
+be lived with, his ext4-specific solution may be enough.
+</p>
+
+<p>
+Solving the general problem will be very expensive in terms of development
+cost, Ts'o said.  But it may also cause a lot of "spillover pain" to the
+community, which may make it difficult to get it merged.  Lots of people
+have looked at the problem over the years and "decided to hack it" for
+their specific use case, he said.
+</p>
+
+<p>
+But David Howells said that he is looking at reworking the Linux I/O
+subsystem into an event-based framework.  Filesystem I/O would be broken up
+into individual state machines, which would make asynchronous I/O simpler
+and "completely async" rather than "semi-async".  There is quite a bit of
+work to do, he said, but he thinks he can make it work and asked others who
+were interested to talk to him later.
+</p>
+
+<p>
+Dave Chinner stepped back to say that it was impossible to solve the
+problem of knowing when an allocation will block.  There are locks taken at
+multiple levels throughout the I/O stack, and rolling back a transaction
+because it will block could also require locks, which could cause
+blocking.  Overall, there are complex interactions that are specific to the
+filesystem in question, so you would end up with "ten different solutions".
+</p>
+
+<p>
+Jain suggested that fibrils would avoid those problems, but Brown said it
+would just shift the problem to "scarier things".  Sharing a <tt>task</tt>
+struct between multiple threads requires a code audit to ensure there
+aren't concurrent access issues.  But even if that were done, it would
+require eternal vigilance whenever new code is added that touches those
+structures, Ts'o said.  Fibrils are a fragile solution.
+</p>
+
+<p>
+Is this really a problem that needs to be solved, James Bottomley asked,
+since no one has been 
+bitten by it hard enough to provide resources to solve it?  Boaz Harrosh
+said that threads could handle most asynchronous work as long as you don't
+need "10,000 operations in parallel" because that would require too many
+threads.  In general, the complaints come from database companies about the
+latency of asynchronous I/O, Jan Kara said.
+</p>
+
+<p>
+In the end, the database companies just want a way to submit writes to many
+disjoint blocks, Brown said.  If there were an interface like
+<tt>writev()</tt> that 
+also did file positioning in addition to scatter-gather, that would
+probably be good enough.  The database companies just want to be able to kick
+off many concurrent asynchronous I/O operations, so a new system call to do
+so would likely keep them happy.
+</p>
+
+<p>
+There was a bit of talk about various patches that might or might not help
+the problem, but the overall sense was that there is no easy (or even hard)
+solution to 
+Jain's problem.
+</p>
+
+<p>
+[ Thanks are due to Elena Zannoni, whose detailed notes were a nice
+supplement to my own. ]
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Asynchronous I/O</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Syslets</a></td></tr>
+            <tr><td><a href="../../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2013</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/548352/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

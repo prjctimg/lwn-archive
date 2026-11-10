@@ -1,0 +1,461 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>128-Bit page tables for Arm [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="128-Bit page tables for Arm">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The size of a processor's page-table entries directly limits how much physical memory that proc [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;128-Bit page tables for Arm&quot;" href="https://lwn.net/headlines/1088125/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1088566/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>128-Bit page tables for Arm</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 13, 2026</br>
+           </div>
+The size of a processor's page-table entries directly limits how much
+physical memory that processor is able to access.  Back in the 32-bit days,
+that limit was 4GB, an amount of memory that once seemed nearly infinite,
+but which would now struggle to hold a basic AI-enabled "hello world" app.
+The expansion to 64&nbsp;bits on most popular architectures would seem to
+have removed those limits now; some Arm systems, for example, can use
+56&nbsp;of those bits to access up to 72PB of memory.  So it might be
+surprising that the Arm architecture is evolving to support even larger
+page-table entries (PTEs).  <a
+href="/ml/all/20260729122452.3797443-1-anshuman.khandual@arm.com">This
+patch set</a> from Anshuman Khandual adds support for 128-bit PTEs, but
+who will benefit from this capability is not entirely clear.
+<p>
+The information of most interest in a PTE is a physical address — the
+address of the actual memory for bottom-level entries, or the address of
+the next table for higher levels.  Not all of the bits in the PTE hold that
+address, though; if nothing else, the lowest bits, which correspond to
+the offset within the page in a virtual address, can be used for other
+purposes.
+Our article "<a href="/Articles/1064861/">On pages and folios</a>"
+describes PTE entries in some detail; this diagram, showing how a 64-bit
+PTE might be divided, is taken from that article:
+<p>
+<blockquote>
+<img src="../../_static/images/2026/address-structure1.svg" alt="[Simple address
+structure]" class="forcewhite" width=600>
+</blockquote>
+<p>
+On a modern, 64-bit Arm system configured for 56-bit addresses and
+4096-byte pages, a maximum of 44&nbsp;bits of the PTE can be used to
+represent the physical address of a page in memory, while 12&nbsp;bits are
+available for housekeeping purposes.
+<p>
+Expanding a PTE to 128 bits obviously makes it possible to store more
+information in that entry, but at a cost: doubling the size of PTEs will,
+clearly, double the size of the page tables.  For some workloads, page
+tables already occupy more memory than users would like; every page
+occupied by a page table is unavailable for use by the system's workloads.
+Since one page can only hold half as many PTEs as before, there are
+implications for huge pages; a 2MB PMD-level huge page on a 64-bit-PTE
+system drops to 1MB when PTEs grow to 128&nbsp;bits, and PUD-level huge
+pages shrink from 1GB to 256MB — a factor of four, since there are two
+levels of page tables that are eliminated for those pages.  The sizes of
+multi-size transparent huge pages that can be coalesced for faster
+translation lookaside buffer (TLB) access also drop by similar factors.
+For workloads that are heavily dependent on huge pages for performance,
+those reductions could prove painful.
+<p>
+Given that there are clear costs involved with going to larger PTE sizes,
+one would expect that there would be gains in other areas; otherwise, there
+would be little point in making the change.  To understand those gains, it
+is worth looking more closely at the new format.  The details of what
+128-bit Arm PTEs look like can be seen on <a
+href="https://support.arm.com/documentation/ddi0487/mb/-Part-D-The-AArch64-System-Level-Architecture/-Chapter-D8-The-AArch64-Virtual-Memory-System-Architecture/-D8-3-Translation-table-descriptor-formats/-D8-3-2-VMSAv9-128-descriptor-formats">this
+page</a>; the bottom-level PTE format looks like this:
+<p>
+<blockquote>
+<img src="../../_static/images/2026/128-bit-pte.svg" alt="[128-bit PTE format]"
+class="forcewhite" width=700>
+</blockquote>
+<p>
+One thing that jumps out immediately is that the address portion of the
+PTE, stretching from bits 12&nbsp;to&nbsp;55, is only 44&nbsp;bits in
+length.  Add in the 12&nbsp;offset bits, and the maximum address size is
+56&nbsp;bits, the same that is currently possible with 64-bit PTEs.  So
+expanding the range of physical memory that can be addressed is not an
+immediate goal of this change.  That said, it is worth noting all of the
+reserved bits — the bits shown in gray and without labels.  There are
+35&nbsp;reserved bits above the most-significant address bit, leaving quite
+a bit of room for future expansion of the address field.
+<p>
+There are ten bits of the PTE that are not interpreted by the hardware at
+all; they are reserved for software use.  That is double the five bits that
+are available on Arm systems with 64-bit PTEs.  Five extra bits may not
+seem like a lot, but the kernel should eventually be able to make good use
+of them for memory management.
+<p>
+Bits 109 and 110 are the "skip level" (SKL) field.  This field, which is
+present at all page-table levels, controls how the page-table-traversal
+process works.  On most systems, the page-table hierarchy is rigid, with
+the expected number of levels (usually between three and five) always
+present.  The one exception is for huge pages, where one or more levels are
+removed at the end of the search.  Consider the PMD, which sits one level
+above the final page-table level; one entry in the PMD points to an entire
+page of PTEs, and covers (typically)&nbsp;2MB of address space.  By setting
+a bit in the PMD entry, though, the kernel can indicate that the entire 2MB
+has been assigned in a single page — a PMD-level huge page.
+<p>
+The SKL field generalizes this mechanism somewhat; it can indicate that the
+following step in the lookup process is a huge page, even if it is another
+level in the page-table hierarchy rather than the final step.  That feature
+would appear to open the door to using huge pages for the page tables
+themselves, which would have the potential of speeding address
+translation and reducing TLB use.
+<p>
+The kernel changes required to support 128-bit PTEs are relatively small,
+consisting mostly of a set of macro definitions describing where the
+various fields and bits are.  The most disruptive part has to do with
+page-table manipulation.  When working through entries at various levels of
+the page-table hierarchy, it is important to read them atomically, so that
+the entire entry is coherent.  That reading is done with
+<tt>READ_ONCE()</tt> in current kernels, but <tt>READ_ONCE()</tt> depends
+on atomic operations, and Arm CPUs do not have 128-bit atomic operations.
+Similar concerns apply to the modification of PTEs as well.  The patch
+series wraps these accesses with a new pair of functions
+(<tt>ptval_get()</tt> and <tt>ptval_set()</tt>) that default to
+<tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt>, but which can be overridden
+by the architecture if need be.  For Arm systems built for 128-bit PTEs,
+those functions are implemented with atomic <tt>ldp</tt> and <tt>stp</tt>
+(load-pair and set-pair) instructions.
+<p>
+In the current implementation, at least, the kernel must be specifically
+built for 128-bit PTEs, and kernels built that way will be unable to boot
+on CPUs that do not support that PTE size.  That will make life harder for
+distributors; they have strong incentives to keep the number of kernels
+they build to a minimum.  Fixing this problem will almost certainly involve
+a fair amount of boot-time code patching, but that may be required before
+distributors will consider enabling support for the larger PTEs.
+<p>
+This series has been through a few RFC iterations and appears to be
+stabilizing somewhat.  Of course, relatively few people have hardware that
+supports 128-bit PTEs, so the amount of in-the-field testing of this work
+is necessarily limited.  By the time that hardware becomes more widely
+available, though, Linux may well be ready to support it.  But, in the
+short term, it is not at all clear that many systems will benefit from
+making use of this feature.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Architectures/Arm</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1088125/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1088768"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomics?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 14:53 UTC (Thu)
+                               by <b>jgg</b> (subscriber, #55211)
+                              [<a href="/Articles/1088768/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jgg" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1088768" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The text is a bit confusing, the implementation does use instruction level 128 bit atomics (ldp, stp, swpp) and arm does define casp for compare and swap so what does "Arm CPUs do not have 128-bit atomic operations." mean?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088768/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1088769"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomics?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 15:14 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1088769/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1088769" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I struggled with figuring out how to express that...not helped by not being all that strong on Arm instructions.  In short, it means "<tt>READ_ONCE()</tt> doesn't work with them".
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088769/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1088772"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomics?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 15:56 UTC (Thu)
+                               by <b>pm215</b> (subscriber, #98099)
+                              [<a href="/Articles/1088772/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pm215" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1088772" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The commit message in patch 2 -- <a href="https://lwn.net/ml/all/20260729122452.3797443-3-anshuman.khandual@arm.com/">https://lwn.net/ml/all/20260729122452.3797443-3-anshuman....</a> -- was usefully clarifying for me:<br>
+<p>
+"Load Pair/Store Pair (ldp/stp) are only single copy atomic if FEAT_LSE128 is supported (which is required when FEAT_D128 is supported). Currently 128 bit pgtables is a compile time decision - so we could have chosen to extend READ_ONCE()/WRITE_ONCE() to allow 128 bit for this configuration. But then it's a general purpose API and we were concerned that other users might eventually creep in that expect 128 and then fail to compile in the other configs.<br>
+<p>
+But worse, we are considering eventually making D128 a boot time option, at which point we'd have to make READ_ONCE() always allow 128 bit at compile time but then it might silently tear at runtime."<br>
+<p>
+-- so because the 128-bit atomic insns can only be guaranteed to be present when 128-bit page tables are, the authors preferred to encapsulate them in a page-table-specific set of APIs rather than adding them to the fully generic READ_ONCE/WRITE_ONCE APIs.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088772/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1088775"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The return of HIGHMEM, now for 64/128b</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 16:52 UTC (Thu)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1088775/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joib" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1088775" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So just when the maintainers are starting to think about getting rid of HIGHMEM support as everything which needs more memory has migrated to 64-bit platforms, highmem is set to return, this time to handle 64-bit pointers and 128-bit page tables! Figures..<br>
+<p>
+(Yes, I realize from the article this isn't exactly the HIGHMEM of yore. Just give it time.. :) )<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088775/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1088813"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The return of HIGHMEM, now for 64/128b</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 23:51 UTC (Thu)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/1088813/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ejr" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1088813" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's had decades. The AS/400 never will die. CHERI pointers also can be 128b-wide. Also any other SW renditions for accessing a full system's memory directly from any node. Some of those also have HW assist within interconnects.<br>
+<p>
+I am curious why ARM has blessed this one partitioning of 128b pointers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088813/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1088978"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Max PA Width</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2026 10:59 UTC (Sat)
+                               by <b>ryanroberts</b> (subscriber, #115262)
+                              [<a href="/Articles/1088978/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ryanroberts" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1088978" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Add in the 12 offset bits, and the maximum address size is 56 bits, the same that is currently possible with 64-bit PTEs.</p>
+</blockquote>
+<p>That’s not quite correct; Arm’s 64 bit PTE format has a maximum PA width of 52 bits. The 128 bit format extends it to 56 bits. Although, IIRC, this initial series sticks with the 52 bit limit regardless of the chosen PTE format.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088978/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1088982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What are all the extra bits used for?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2026 16:28 UTC (Sat)
+                               by <b>ralfj</b> (subscriber, #172874)
+                              [<a href="/Articles/1088982/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ralfj" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1088982" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+After reading the article I am left rather confused. Surely ARM wouldn't do this juts to add some new software-defined bits and this SKL thing, so what about all the rest? The image has some more acronyms but the article doesn't explain what any of them are/do.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1089647"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">For the feature completion, I guess</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2026 12:55 UTC (Thu)
+                               by <b>jpeisach</b> (subscriber, #181966)
+                              [<a href="/Articles/1089647/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jpeisach" />
+                <input type="hidden" name="return" value="/Articles/1088125/#CommAnchor1089647" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From the patch set:<br>
+<span class="QuotedText">&gt; FEAT_D128 is an optional feature from ARMV9.3 onwards.</span><br>
+arm64 platforms with FEAT_D128 enabled will now have two different memory<br>
+translation systems i.e VMSAv8-64 and VMSAv9-128.<br>
+<p>
+I guess it doesn't hurt to have for the sake of completeness. Again, still not sure what the use is.. but if it makes a group of people happier, sure thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1089647/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

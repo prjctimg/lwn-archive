@@ -1,0 +1,376 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Interrupt mitigation in the block layer [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Interrupt mitigation in the block layer">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The overhead of interrupt handling has not generally been considered to be a huge problem for t [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/345533/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Interrupt mitigation in the block layer</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 10, 2009</br>
+           </div>
+Network device drivers have been using the increasingly misnamed NAPI ("new
+API") interface for some time now.  NAPI allows a network driver to
+turn off interrupts from an interface and go into a polling mode.  Polling
+is often seen as a bad thing, but it's really only a problem when poll
+attempts turn up no useful work to do.  With a busy network interface,
+there will always be new packets to process; "polling," in this situation, really means
+"going off to deal with the accumulated work."  When there is always work
+to do, interrupts informing the system of that fact are really just added
+noise.  Your editor likes to compare the situation to email notifications;
+anybody who gets a reasonable volume of email is quite likely to turn such
+notifications off.  They are distracting, and there is probably always
+email waiting whenever one gets around to checking.
+<p>
+
+NAPI is well suited to network drivers, since high packet rates can lead to
+high interrupt rates, but it has not spread to other parts of the kernel,
+where interrupt rates are lower.  That situation could change
+in 2.6.32, though, if Jens Axboe follows through with his plan to merge the
+new <a href="http://lwn.net/Articles/346187/">blk-iopoll</a>
+infrastructure into the mainline.  In short, blk-iopoll is NAPI for block
+devices; indeed, some of the core code was borrowed from the NAPI
+implementation. 
+<p>
+
+Converting a block driver to the blk-iopoll is straightforward.  Each
+interrupting device needs to have a <tt>struct blk_iopoll</tt> structure
+defined for it, presumably in the structure which describes the device
+within the driver.  This structure should be initialized with:
+<p>
+<pre>
+    #include &lt;linux/blk-iopoll.h&gt;
+
+    typedef int (blk_iopoll_fn)(struct blk_iopoll *, int);
+
+    void blk_iopoll_init(struct blk_iopoll *iop, int weight, blk_iopoll_fn *poll_fn);
+</pre>
+<p>
+The <tt>weight</tt> value describes the relative importance of the device;
+a higher weight results in more requests being processed in each polling
+cycle.  As with NAPI, there is no definitive guidance as to what
+<tt>weight</tt> should be; in Jens's initial patch, it is set to 32.  The
+<tt>poll_fn()</tt> will be called when the block subsystem decides that it's
+time to poll for completed requests.
+<p>
+I/O polling for a device is controlled with:
+<p>
+<pre>
+    void blk_iopoll_enable(struct blk_iopoll *iop);
+    void blk_iopoll_disable(struct blk_iopoll *iop);
+</pre>
+<p>
+A call to <tt>blk_iopoll_enable()</tt> must be made by the driver before
+any polling of the device will happen.  Enabling polling allows that
+polling to occur, but does not <i>cause</i> it to happen.  There is no
+point in polling a device which is not doing any work, so the block layer
+will not actually poll a given device until the driver informs it that
+there may be a reason to do so.
+<p>
+That normally happens when the device is actually interrupting.  The driver
+can, in its interrupt handler, switch over to polling mode through a
+three-step process.  The first is to check the global variable
+<tt>blk_iopoll_enabled</tt>; if it is zero, block I/O polling cannot be
+used.  Assuming polling is enabled, the driver should  prepare the
+<tt>blk_iopoll</tt> structure with:
+<p>
+<pre>
+    int blk_iopoll_sched_prep(struct blk_iopoll *iop);
+</pre>
+<p>
+In the first version of the patch, a return value of zero means that the
+preparation "failed," either because polling is disabled or because the
+device is already in polling mode.  In future versions, the sense of the
+return value is likely to be inverted to the more standard "zero means
+success" mode.  If <tt>blk_iopoll_sched_prep()</tt> succeeds, the
+driver can then call:
+<p>
+<pre>
+    void blk_iopoll_sched(struct blk_iopoll *iop);
+</pre>
+<p>
+At this point, polling mode has been entered; the driver need only disable
+interrupts from its device and return.  The "disable interrupts" step
+should, of course, be done at the device itself; masking the IRQ line would
+be an antisocial act in a world where those lines are shared.
+<p>
+Later on, the block layer will call the <tt>poll_fn()</tt> which was
+provided to <tt>blk_iopoll_init()</tt>.  The prototype for this function
+is:
+<p>
+<pre>
+        typedef int (blk_iopoll_fn)(struct blk_iopoll *iop, int budget);
+</pre>
+<p>
+The polling function is called (in software interrupt context) with
+<tt>iop</tt> being the related 
+<tt>blk_iopoll</tt> structure, and <tt>budget</tt> being the maximum number
+of requests that the poll function should process.  In normal usage, the
+driver's device-specific structure can be obtained from <tt>iop</tt> with
+<tt>container_of()</tt>.  The <tt>budget</tt> value is just the
+<tt>weight</tt> that was specified back at initialization time.
+<p>
+The return value should be the number of requests actually processed.
+If the device consumes less than the given <tt>budget</tt>, it should turn
+off further polling with:
+<p>
+<pre>
+    void blk_iopoll_complete(struct blk_iopoll *iopoll);
+</pre>
+<p>
+Interrupts from the device should be re-enabled, since further polling
+will not happen.  Note that the block layer assumes that a driver will
+<i>not</i> call <tt>blk_iopoll_complete()</tt> if it has consumed its
+full budget.  If it's necessary to return to interrupt mode despite having
+exhausted the budget, the driver should either (1)&nbsp;use
+<tt>blk_iopoll_disable()</tt>, or (2)&nbsp;lie about the number of requests
+processed when returning from the polling function.
+<p>
+
+One might well wonder about the motivation behind all of this work.  Block
+device interrupt handling has not traditionally been a performance
+bottleneck.  The problem is the rapid improvement in solid-state storage
+devices.  It is expected that, before too long, these devices will be
+operating in the range of 100,000 I/O operations per second - far beyond
+anything that rotating storage can do.  When dealing with that many I/O
+operations, the kernel must take care to minimize the per-operation
+overhead in any way possible.  As others have observed, the block layer
+needs to become more like the network layer, with the per-request cost
+squeezed to a bare minimum.  The blk-iopoll code is a step in that
+direction.
+<p>
+How big a step?  Jens has posted <a href="/Articles/346256/">some
+preliminary numbers</a> showing significant reductions in system time on a
+random-read disk benchmark.  More testing will certainly be required; in
+particular, some developers are concerned about the possibility of
+increasing I/O latency.  But the initial numbers suggest that this work has
+improved the efficiency of the block subsystem under load.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/346219/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor346302"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Interrupt mitigation in the block layer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2009 23:35 UTC (Mon)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/346302/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dlang" />
+                <input type="hidden" name="return" value="/Articles/346219/#CommAnchor346302" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+there are already SSD devices out there that claim to be able to do &gt; 100,000 IOPs/sec, so it's good to see this option showing up in the kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/346302/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor347214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Interrupt mitigation in the block layer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2009 18:53 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/347214/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/346219/#CommAnchor347214" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+There's also rotating storage that does more than 100,000 IOPS today.  Hint: there are lots of spindles and heads.
+<p>
+The Linux systems where performance matters most aren't personal computers with a couple of disk drives.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/347214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor346325"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Interrupt mitigation in the block layer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 11, 2009 2:53 UTC (Tue)
+                               by <b>newren</b> (guest, #5160)
+                              [<a href="/Articles/346325/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="newren" />
+                <input type="hidden" name="return" value="/Articles/346219/#CommAnchor346325" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"has not spread to other parts of the kernel, where interrupt rates rates are lower"<br>
+<p>
+I suspect you didn't mean to have both of those "rates" there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/346325/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor346330"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Interrupt mitigation in the block layer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 11, 2009 4:07 UTC (Tue)
+                               by <b>jake</b> (editor, #205)
+                              [<a href="/Articles/346330/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jake" />
+                <input type="hidden" name="return" value="/Articles/346219/#CommAnchor346330" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I suspect you didn't mean to have both of those "rates" there.</font><br>
+<p>
+Yeah, three 'rates' in that sentence is probably enough :)<br>
+<p>
+thanks, fixed now ...<br>
+<p>
+jake<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/346330/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor346911"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Interrupt mitigation in the block layer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2009 13:17 UTC (Thu)
+                               by <b>ctg</b> (guest, #3459)
+                              [<a href="/Articles/346911/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ctg" />
+                <input type="hidden" name="return" value="/Articles/346219/#CommAnchor346911" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"the increasingly misnamed NAPI ("new API")"<br>
+<p>
+In the village where my Father lives, there is a road called "New Road".  It was built in 1740.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/346911/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

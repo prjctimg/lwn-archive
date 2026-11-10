@@ -1,0 +1,458 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Block-layer bounce buffering bounces out of the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Block-layer bounce buffering bounces out of the kernel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="As the end of the 1990s approached, a lot of kernel-development effort was going into improving [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1022980/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Block-layer bounce buffering bounces out of the kernel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 29, 2025</br>
+           </div>
+As the end of the 1990s approached, a lot of kernel-development effort was
+going into improving support for <span class="nobreak">32-bit systems</span>
+with shockingly large amounts of memory installed.  This being the 1990s,
+having more than 1GB of memory in such a system was deemed to be shocking.
+Many of the compromises made to support such inconceivably large systems
+have remained in the kernel to this day.  One of those compromises —
+bounce buffering of I/O requests in the block layer — has finally been
+eased out for the 6.16 release, more than a quarter-century after its
+introduction.
+<p>
+A 32-bit pointer can only address 4GB of memory, putting a hard limit on
+the size of the address space that a program on such a system can use.  Linux,
+though, includes a couple of architectural choices that limited the amount
+of useful memory much more severely.  The 4GB virtual address space
+contained both user and kernel-space memory; separating those spaces would
+have made more virtual address space available, but at a huge performance
+cost.  The kernel also mapped all of physical memory into its portion of
+the address space, making it easy for the kernel to directly access every
+page in the system.  That meant that the kernel's portion of the address
+space had to be larger than the amount of physical memory that the kernel
+managed. 
+<p>
+Most configurations in those days set aside the uppermost 1GB of virtual
+address space for the kernel, leaving 3GB for user space.  But, since the
+kernel required that all of physical memory be mapped into its space, it
+could only make use of rather less than 1GB of physical memory — some of
+its 1GB had to be used for the kernel itself, the vmalloc area, and so on.
+By the late 1990s, systems with more memory than that were becoming widely
+available; indeed, through <a
+href="https://en.wikipedia.org/wiki/Physical_Address_Extension">some
+hardware hackery</a>, it was possible to put more than 4GB of physical
+memory into a 32-bit system.  But Linux could not use that memory; this was
+generally seen as a bad thing.
+<p>
+The solution that was adopted at the time was a concept that was termed
+"high memory".  Any memory beyond that which the kernel could address
+directly was placed in this class; it could be mapped into user space, but
+the kernel could not access it directly without creating an explicit (and
+temporary) mapping.  As a result, high memory was generally unusable for
+any sort of kernel data structures.  Making that memory available to user
+space solved a pressing problem, but it did not take long for the kernel's
+inability to use high memory for its own purposes to create problems of its
+own; there just wasn't enough low memory for the system to operate
+efficiently.
+<p>
+The 2.3.27 kernel release in November 1999 included a significant step
+toward mitigating this problem; specifically, it moved the page cache (a
+large kernel data structure) into high memory.  There were many challenges
+that had to be handled to make this move work, one of which was that, at
+that time, there were many block drivers in use, and none of them had been
+written with high memory in mind.  If one of those drivers were to be
+presented with a buffer that was not in directly accessible memory, the
+resulting explosion would not be pretty.  Even for a development kernel (as
+2.3.27 was), that was generally seen as a bad thing.
+<p>
+Fixing all of the drivers was not something that could be done in short
+order, so a workaround was required.  Thus, with this release, the block
+layer gained the concept of bounce buffering.  If an I/O request involved a
+buffer in high memory, and the driver destined to handle that request could
+not cope with high memory, the data would be copied ("bounced") into a
+low-memory buffer.  For writes, the bouncing would happen prior to handing
+the buffer to the driver; for reads, the driver would be given a low-memory
+buffer that would be copied back to high memory after the operation
+completed.  The data could live (long-term) in high memory, and the driver
+could continue to work unmodified.
+<p>
+Bounce buffering is the sort of solution that nobody likes.  Copying data
+before or after I/O operations can only make those operations slower.  The
+bounce buffer also increases the memory used by the operation, which can be
+especially problematic if the system is under memory pressure and the data
+is being written so that the pages it occupies can be reclaimed and reused.
+But, bounce buffering made it possible to move the page cache out of low
+memory, so it was a cost that the development community was willing to pay.
+<p>
+Amusingly, the bounce-buffering code added to 2.3.27 <a
+href="https://elixir.bootlin.com/linux/2.3.27/source/mm/highmem.c#L246">included
+a comment</a> that it would be "<q>moved to the block layer in 2.5</q>",
+when a big rewrite of the block code was planned.  That rewrite was indeed
+done as one of the first changes in the 2.5 development series (which began
+in late 2001), but this particular move only <a
+href="https://git.kernel.org/linus/719c555f4424">happened</a> for the 3.16
+kernel in 2014.
+<p>
+In 2025, it is rare to find a system that needs the high-memory concept;
+developers have been <a href="/Articles/813201/">talking about removing
+high memory support altogether</a> for some years, but there is still a
+need for it on some 32-bit systems.  There is no use for high memory on
+64-bit systems, though, since the kernel is once again able to fit even
+shockingly large amounts of memory into its address space.
+<p>
+Beyond that, the number of block drivers in active use has fallen over the
+years, and those that remain tend to not need bounce buffering.  A modern
+driver that uses the kernel's DMA API need not worry about where a given
+buffer is placed; the driver will almost certainly not access that buffer
+directly, and the DMA layer ensures that buffers are properly placed.
+Drivers for older hardware might still need to operate directly on a
+buffer; they can be taught to create temporary mappings in the high-memory
+case, avoiding the need for a bounce buffer.  So the number of users for
+the bounce-buffering machinery has dropped, but the block layer has
+continued to support that functionality.
+<p>
+When Christoph Hellwig looked at bounce buffering in early May, he found
+that only four drivers still used it; all but one are for ancient devices
+(two are parallel-port drivers, for example) that may no longer exist in
+the wild.  Even the bounce-buffer-using driver that is still in heavy use —
+the USB storage driver — only needs bounce buffers for archaic host
+controllers that use programmed I/O.  So Hellwig put together <a
+href="/ml/all/20250502064930.2981820-1-hch@lst.de">a patch set</a> causing
+all four drivers to fail to load on systems where high-memory support is
+configured, dropping the number of bounce-buffer users to zero.  At that
+point, the bounce-buffering code itself could be (and was) removed.
+<p>
+Even after Hellwig's series, the kernel is not devoid of bounce buffering;
+there are times when it cannot be avoided.  The remaining bouncing is
+generally handled in the DMA and <a
+href="https://docs.kernel.org/core-api/swiotlb.html">swiotlb</a> layers,
+though, and is available beyond the block layer when it is needed.
+<p>
+The patch series, which was included in one of the first merges for the 6.16
+release, removes nearly 300 lines of code from the kernel and, perhaps more
+importantly, takes an annoying special case out of the block-I/O paths.  An
+old relic from the high-memory era has been removed, perhaps getting the
+kernel one step closer to the point where high-memory support can be
+removed entirely.  These are all generally seen as good things.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Memory management/High memory</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Releases/6.16</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1022655/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1023134"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">writes vs. reads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2025 21:39 UTC (Thu)
+                               by <b>bugfood</b> (subscriber, #124228)
+                              [<a href="/Articles/1023134/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bugfood" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023134" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interesting article; thank you. I had never heard of this before.<br>
+<p>
+<span class="QuotedText">&gt; If an I/O request involved a buffer in high memory, and the driver destined to handle that request could not cope with high memory, the data would be copied ("bounced") into a low-memory buffer. For writes, the bouncing would happen prior to handing the buffer to the driver; for reads, the driver would be given a low-memory buffer that would be copied back to high memory after the operation completed.</span><br>
+<p>
+At first, I thought that the descriptions for reads and writes were transposed, but then I figured that maybe my perspective was wrong. Is this what you mean? My additions are in [brackets]:<br>
+<p>
+<span class="QuotedText">&gt; For writes [to a device], the bouncing would happen prior to handing the buffer to the driver[, so the driver could read from low memory]; for reads [from a device], the driver would be given a low-memory buffer [to fill] that would be copied back to high memory after the operation completed.</span><br>
+<p>
+Thanks,<br>
+Corey<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023134/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1023173"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">writes vs. reads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2025 12:10 UTC (Fri)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1023173/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023173" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, I believe your bracketed version is correct. In the block layer, "a write" usually means "a write to a device", but on re-reading I can see how our wording was potentially unclear.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023173/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1023260"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">writes vs. reads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2025 12:19 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1023260/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023260" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      In other words, "a write" means "somebody called <tt>write()</tt>".
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023260/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1023310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don't we need bounce buffers for 32-bit cards as well ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2025 17:36 UTC (Fri)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1023310/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023310" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was wondering if a PCI RAID card plugged into a 32-bit PCI slot running a 64-bit system doesn't also need bounce buffers, and the related question, are we also going to drop support for such devices ? Because 32-bit PCI storage devices have been quite numerous (SCSI, RAID, SATA etc) and 64-bit systems featuring regular parallel PCI/PCI-X slots have existed for a long time, typically during the Pentium4/Core2 era.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1023312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don't we need bounce buffers for 32-bit cards as well ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2025 17:46 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1023312/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023312" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      64 bit systems never used the block layer bounce buffers, just the DMA layer bounce buffers, and should be unaffected by the removal of block layer bounce buffers.
+<p>The DMA layer bounce buffers (swiotlb) handle the case where you don't have an IOMMU to do IO to physical address translation, but do have a device that can't directly access the entire 64 bit address space (e.g. a PCI RAID card that can't do dual address cycles to access 64 bit address spaces from a 32 bit slot). This is staying, since there's lots of things that need this, and it's also a good way to bring up a system before you've written an IOMMU driver for it.
+<p>The block layer bounce buffers (now removed) allowed drivers to access highmem pages, even if they assumed that all of memory was in the direct map. 64 bit systems never had highmem, so never used them.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1023338"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don't we need bounce buffers for 32-bit cards as well ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2025 12:29 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1023338/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023338" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The bus width is independent of the address space size supported. If you send a 64-bit address across a 64-bit PCI bus, you do what's called a Dual Address Cycle where you transmit the full 64-bit address on the first cycle, then the address shifted by 32 bits on the second cycle. That allows cards which are only connected to the low 32 pins to see all 64 address bits.<br>
+<p>
+The problem is devices which don't support more than N bits, either because they don't decode more than N bits or they encode addresses along with data in a 64-bit field. Since you mentioned SCSI, Symbios 8xx-1010 has three modes, 32-bit, 40-bit and 64-bit. Fortunately you can compile the firmware and driver to support however much address space you need. Adaptec of the same era are similar, supporting a 39-bit mode.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023338/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1023567"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Very well written, and accessible, piece</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2025 20:57 UTC (Mon)
+                               by <b>cytochrome</b> (subscriber, #58718)
+                              [<a href="/Articles/1023567/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cytochrome" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023567" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Kudos to Mr. Corbet for, once again, taking a difficult topic and making it accessible to people not familiar with this part of the kernel. Keep up the excellent work!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023567/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1023601"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tough times for Iomega Zip drive owners</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2025 10:20 UTC (Tue)
+                               by <b>parametricpoly</b> (subscriber, #143903)
+                              [<a href="/Articles/1023601/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="parametricpoly" />
+                <input type="hidden" name="return" value="/Articles/1022655/#CommAnchor1023601" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess this basically means that you can't have a 32-bit 4-socket CPU server with 8-16 GB of available RAM and a RAID-6 array of Iomega Zip drivers anymore. <br>
+<p>
+<a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=bbeb69ce301323e84f1677484eb8e4cd8fb1f9f8">https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/...</a><br>
+<p>
+And now this change modifies drivers/scsi/ppa.c<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1023601/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

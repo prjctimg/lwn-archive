@@ -1,0 +1,247 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A RDRAND followup [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A RDRAND followup">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="In a recent episode, 'Pitchforks for RDSEED', we learned that there was some uncertainty around [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/963169/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A RDRAND followup</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 26, 2024</br>
+           </div>
+In a recent episode, "<a href="../961121/index.html">Pitchforks for RDSEED</a>",
+we learned that there was some uncertainty around whether hardware-based
+random-number generators on x86 CPUs could fail.  Since the consequences of
+failure in some situations (confidential-computing applications in
+particular) can be catastrophic, there was some concern about this prospect
+and what to do about it.  Since then, the situation has come a bit more
+into focus, and there would appear to be an agreed-upon plan for changes to
+be made to the kernel.
+<p>
+At the end of the last article, it was noted that there were ongoing
+discussions within the CPU vendors about whether the <tt>RDRAND</tt>
+and <tt>RDSEED</tt> instructions could fail to generate a properly random
+number.  Proceeding without a thorough understanding of the hardware is,
+after all, a way to obtain the wrong kind of random outcomes.  On
+February&nbsp;14, Elena Reshetova <a
+href="/ml/linux-kernel/DM8PR11MB57503A2BB6F74618D64CC44AE74E2@DM8PR11MB5750.namprd11.prod.outlook.com/">came
+back with a summary</a> of Intel's position on the matter:
+<p>
+<blockquote class="bq">
+	The RdRand in a non-defective device is designed to be faster than
+	the bus, so when a core accesses the output from the DRNG, it will
+	always get a random number.  As a result, it is hard to envision a
+	scenario where the RdRand, on a fully functional device, will
+	underflow.
+</blockquote>
+<p>
+In other words, <tt>RDRAND</tt> can be expected to always succeed.  The
+lower-level <tt>RDSEED</tt> instruction, instead, consumes entropy more
+directly and, as participants in the discussion had already shown, can fail
+if stressed too hard.
+<p>
+Confidential-computing applications, at the core of their security model,
+require random data that is not under the control of the host system (or
+anybody else).  Only a random-number generator built into the CPU itself
+will fill the bill; anything else may be subject to external manipulation.
+There seems to be universal agreement, though, that the data from
+<tt>RDRAND</tt> is good enough even for confidential computing, and thus
+there is no need to use <tt>RDSEED</tt>.  So these applications
+<i>should</i> be safe on Intel systems — safe from a random-number
+compromise anyway.
+<p>
+Jason Donenfeld, the maintainer of the kernel's random-number generator,
+responded with <a
+href="/ml/linux-kernel/20240214195744.8332-1-Jason@zx2c4.com/">a brief
+patch series</a> making a couple of changes.  One is to immediately issue a
+warning if an attempt to use <tt>RDRAND</tt> fails, on the assumption that,
+as described above, any such failure is indicative of a hardware problem.
+That patch also eliminated the loop that would retry the operation ten
+times, since even one failure suggests that the hardware is broken and
+retrying is unlikely to fix it.
+
+There was just one little problem with that change, as was <a
+href="/ml/linux-kernel/696a5d98-b6a2-43aa-b259-fd85f68a5707@amd.com/">pointed
+out</a> by Tom Lendacky: the claim about the robustness of <tt>RDRAND</tt>
+applies to <i>current</i> CPUs.  Older processors might behave differently,
+and there may be cases where the retry loop is indicated.  So that patch
+appears to have been dropped for now.
+<p>
+The other patch, applied to the confidential-computing support code,
+attempts to seed the kernel's random-number generator with 256&nbsp;bits of
+<tt>RDRAND</tt> output at boot time.  Should that attempt fail, the result
+will be an immediate system panic.  Any such failure would indicate that a
+confidential-computing virtual machine lacks a reliable source of
+randomness and, thus, will be unable to achieve the intended level of
+confidentiality.  In such cases, it is better to just stop immediately
+rather than run in a potentially compromised mode.
+<p>
+That latter patch has been <a
+href="/ml/linux-kernel/20240222020616.2315199-1-Jason@zx2c4.com/">reposted</a>
+with a few tweaks, and has obtained Reviewed-by tags from a number of
+relevant developers.  So it looks likely to be the end of this particular
+story — until, as always seems to be the case, somebody finds something else
+to worry about in the random-number generator.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Architectures/x86</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Confidential computing</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Random numbers</a></td></tr>
+            <tr><td><a href="../../Security/Index/index.html">Security</a></td><td><a href="../../Security/Index/index.html">Linux kernel/Random number generation</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/963281/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor963866"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A RDRAND followup</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 28, 2024 0:02 UTC (Wed)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/963866/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JoeBuck" />
+                <input type="hidden" name="return" value="/Articles/963281/#CommAnchor963866" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is any more known about which previous processor versions might need RDRAND retries (from the Tom Lendacky comment)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/963866/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor964290"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A RDRAND followup</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2024 8:05 UTC (Sun)
+                               by <b>kmeyer</b> (subscriber, #50720)
+                              [<a href="/Articles/964290/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kmeyer" />
+                <input type="hidden" name="return" value="/Articles/963281/#CommAnchor964290" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's nice to have a statement from Intel, but I wonder if the same can actually be assumed for AMD RdRand?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964290/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964607"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A RDRAND followup</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2024 0:55 UTC (Thu)
+                               by <b>riking</b> (subscriber, #95706)
+                              [<a href="/Articles/964607/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="riking" />
+                <input type="hidden" name="return" value="/Articles/963281/#CommAnchor964607" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Honestly, the statement follows pretty easily from the fact that the two instructions are split at all.<br>
+<p>
+There are other performance considerations to have - e.g. many CPUs have only one RDRAND complex per socket, so you can very easily saturate its bus - but perf isn't correctness :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964607/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

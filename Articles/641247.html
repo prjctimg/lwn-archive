@@ -1,0 +1,357 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Taking control of SSDs with LightNVM [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Taking control of SSDs with LightNVM">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="A great deal of work has gone into improving the Linux kernel's block layer so that it can keep [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/640552/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Taking control of SSDs with LightNVM</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 22, 2015</br>
+           </div>
+A great deal of work has gone into improving the Linux kernel's block layer
+so that it can keep up with solid-state storage devices (SSDs).  Dealing
+with SSDs has often been an exercise in frustration, though, for one simple
+reason: the kernel is not able to manage the storage device directly, but,
+instead, must talk to a computer embedded in the device that is running
+some sort of flash 
+translation layer (FTL) software.  Developers have often felt that a better
+job could be done without the FTL getting in the way.  Now, it seems, the
+hardware manufacturers are starting to make direct control easier; a patch
+set has been posted that aims to enable the kernel to take advantage of
+this opening.
+<p>
+The problems with flash translation layers are numerous and well known.
+Often they are designed to optimize access for one specific filesystem
+(FAT, for example), a feature that often makes performance worse for other
+filesystems.  Attempts to allow
+operating systems to communicate usage information to the drives (the
+discard/TRIM 
+command, which indicates a range of blocks that is not in use, is an
+example) have led to performance problems and bugs of their own.  And an
+FTL baked into a drive cannot normally be upgraded or fixed when bugs
+appear.  All of these problems would go away if the kernel could just
+access the low-level storage media directly.
+<p>
+There are a number of high-end nonvolatile memory (NVM) devices that
+provide this access now, but 
+there's one catch: each model has its own interface, and sometimes the nature
+of those interfaces varies wildly.  The rest of the kernel, though, cares
+little about those details; it needs to know a relatively small number of
+parameters to be able to manage such a device.  The required information
+includes the layout of blocks on the device, some timing details, and not a
+whole lot more.  If there were an abstraction layer in the kernel that
+provided just the required interface, the task of managing these devices
+would get easier.
+<p>
+A candidate for this abstraction layer is <a
+href="/Articles/641358/">LightNVM</a>, posted by Matias Bjørling.  LightNVM
+is, at its base, a <a
+href="https://docs.google.com/document/d/1kedBY_1-hfkAlqT4EdwY6gz-6UOZbn7kIjWpmBLPNj0/edit">specification
+of an interface</a> by which the kernel can access what Matias calls
+"open-channel SSDs."  His implementation adapts the kernel's <a
+href="http://www.nvmexpress.org/">NVM Express</a> driver to provide the
+LightNVM interface; the generic block layer code is then adjusted to take
+advantage of the new capabilities that are provided.
+<p>
+A LightNVM driver is, to begin with, an ordinary block driver.  To get the
+full performance advantage, it should implement the <a
+href="../552904/index.html">multiqueue block interface</a>, though that does
+not appear to be strictly necessary.  On top of the block interface,
+though, the driver must implement a set of LightNVM-specific APIs, most of
+which are defined by this structure of function pointers:
+<p>
+<pre>
+    struct nvm_dev_ops {
+	nvm_id_fn		*identify;
+	nvm_get_features_fn	*get_features;
+	nvm_set_rsp_fn		*set_responsibility;
+	nvm_get_l2p_tbl_fn	*get_l2p_tbl;
+	nvm_erase_blk_fn	*erase_block;
+    };
+</pre>
+<p>
+The <tt>identify()</tt> operation identifies the type of the device and,
+importantly, the number of independent I/O channels it supports; that
+number affects how many operations can execute in parallel.  A call to
+<tt>get_features()</tt> obtains information about the capabilities of the
+drive, including whether it can do its own logical-to-physical address
+mapping, whether the drive performs garbage collection, whether it can
+perform ECC error correction, and so on.  The
+<tt>set_responsibility()</tt> function tells the drive which features
+should actually be enabled.  The current mapping between logical and
+physical blocks can be read from the device with <tt>get_l2p_tbl()</tt>.
+Finally, a call to <tt>erase_block()</tt> will cause a specific erase block
+to be wiped.
+<p>
+The code as posted appears to expect that on-drive logical-to-physical
+mapping will be supported, but that no other features will be present.
+Adding support for the other features should be an optimization opportunity
+in the future, especially as drives supporting options like "block move"
+(which relocates a block on the drive without requiring the host to read
+and rewrite it) become available.
+<p>
+At the block-layer level, the patch set provides a mechanism by which the
+LightNVM code can intercept I/O requests, remap them, and pass the modified
+request directly to the hardware.  For a read request, this task is
+relatively simple: the logical-to-physical table is consulted to locate the
+block's address on the drive, then a read is performed from that address.
+Writes are more complicated, since data in flash cannot be rewritten in
+place.  Instead, the code must find a new location for the block, cause it
+to be written there, invalidate the copy of the block at the old location,
+and update the translation maps accordingly.
+<p>
+In the posted patch set, this work is done by the "RRPC target," a
+round-robin FTL built into the kernel itself.  The wear-leveling algorithm
+used is fairly simple; the code sequences through erase blocks one after
+another, relocates any valid sectors found within each erase block, then
+wipes the block for reuse.  It does not even support discard requests at
+this point.  The point is clearly to demonstrate a functioning in-kernel
+FTL while leaving the optimization opportunities for later.
+<p>
+There will be a number of such opportunities, but it could take a while to
+realize many of them.  For example, getting the best performance out of
+such a device requires spreading data across each of the available
+channel controllers in such a way as to keep them all busy.  To an extent, that
+could be done purely in the FTL, but chances are good that higher
+performance will result if the filesystem is aware of the device's
+geometry.  Currently there is no API to pass that information up, so,
+needless to say, no filesystems have that support.
+<p>
+So LightNVM in its current form is just a start.  But it should be enough
+to test the idea that kernel developers can, in the long run, do a better
+job of managing flash arrays than the firmware developers who write FTLs
+have traditionally been able to achieve.
+<p>
+There is one last question that has not really even been asked yet with
+regard to this patch set, though.  LightNVM is intended to manage
+nonvolatile memory as if it were a block storage device.  But there is
+<a href="/Articles/640113/">a lot of work</a> going into the creation of
+large, nonvolatile-memory devices that are 
+mapped directly into the system's physical address space; from there, that
+memory can be mapped into a process's virtual address space.  While it
+would be possible to use a kernel layer like LightNVM to do the low-level
+management for directly mapped devices, that does not appear to be the
+approach that most manufacturers (and developers) have in mind.  So it
+seems likely that the FTL will remain deeply buried within the hardware for
+those devices.  That could, in the long term, restrict the applicability of
+block-oriented subsystems like LightNVM.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer/Solid-state storage devices</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Solid-state storage devices</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/641247/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor642112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Taking control of SSDs with LightNVM</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 28, 2015 9:13 UTC (Tue)
+                               by <b>aleXXX</b> (subscriber, #2742)
+                              [<a href="/Articles/642112/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aleXXX" />
+                <input type="hidden" name="return" value="/Articles/641247/#CommAnchor642112" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This surely is not the NIH syndrome at work ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/642112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor670073"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MTD subsystem has an FTL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2016 18:58 UTC (Mon)
+                               by <b>a0273324@ti.com</b> (guest, #94150)
+                              [<a href="/Articles/670073/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="a0273324@ti.com" />
+                <input type="hidden" name="return" value="/Articles/641247/#CommAnchor670073" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there any reuse from the MTD subsystem (Memory Technology Devices) which provides a similar abstraction for raw flash?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/670073/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor671328"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MTD subsystem has an FTL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2016 5:35 UTC (Mon)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/671328/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alison" />
+                <input type="hidden" name="return" value="/Articles/641247/#CommAnchor671328" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+a0273324@ti.com, I had a similar reaction.    Why not use UBI as an LVM for NVM?   I'll have to compare LightNVM to see how it differs.  At least the news is welcome that bypassing the on-board management engine will soon be possible.   I wonder how many manufacturers will support the new interface if doing so undermines their claim of having a differentiated storage controller.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/671328/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor671342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MTD subsystem has an FTL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2016 10:17 UTC (Mon)
+                               by <b>mbjorling</b> (guest, #91144)
+                              [<a href="/Articles/671342/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mbjorling" />
+                <input type="hidden" name="return" value="/Articles/641247/#CommAnchor671342" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Many vendors are already working on implementing support for host-based control. There is many ways to differentiate. For example ECC, flash characterization, and extensions that further offload the host.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/671342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor671336"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MTD subsystem has an FTL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2016 9:35 UTC (Mon)
+                               by <b>mbjorling</b> (guest, #91144)
+                              [<a href="/Articles/671336/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mbjorling" />
+                <input type="hidden" name="return" value="/Articles/641247/#CommAnchor671336" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+MTD solves the problem of directly driving raw flash. Whereas Open-Channel SSDs have flash controllers embedded in hardware, that takes care of scheduling, driving hundred of flash chips, and provide power capacitors for durability. The host primarily handles data placement, I/O scheduling, and garbage collection and leaves everything else to the SSD controller. Making it more efficient for &gt;1M IOPS devices.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/671336/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

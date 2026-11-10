@@ -1,0 +1,218 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Tags and IDs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Tags and IDs">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Our recent coverage of the multiqueue block layer work touched on a number of the changes neede [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/554184/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Tags and IDs</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 19, 2013</br>
+           </div>
+Our recent coverage of the <a href="../552904/index.html">multiqueue block
+layer work</a> touched on a number of the changes needed to enable the
+kernel to support devices capable of handling millions of I/O operations
+per second.  But, needless to say, there are plenty of additional details
+that must be handled.  One of them, the allocation of integer tags to
+identify I/O requests, seems like a relatively small issue, but it has led
+to an extensive discussion that, in many 
+ways, typifies how kernel developers look at proposed additions.
+<p>
+Solid-state storage devices will only achieve their claimed I/O rates if
+the kernel issues many I/O operations in parallel.  That allows the device
+to execute the requests in an optimal order and to exploit the parallelism
+inherent in having multiple banks of flash storage.  If the kernel is not
+to get confused, though, there must be a way for the device to report the
+status of specific operations to the kernel; that is done by assigning a tag
+(a small integer value) to each request.  Once that is done, the device can
+report that, say, request #42 completed, and the kernel will know which
+operation is done.
+<p>
+If the device is handling vast numbers of operations per second, the kernel
+will somehow have to come up with an equal number of tags.  That suggests
+that tag allocation must be a fast operation; even a small amount of
+overhead starts to really hurt when it is repeated millions of times every
+second.  To that end, Kent Overstreet has proposed the merging of a <a
+href="/Articles/554097/">per-CPU tag allocator</a>, a new module with a
+simple task: allocate unique integers within a given range as quickly as
+possible.
+<p>
+The interface is relatively straightforward.  A "tag pool," from which tags
+will be allocated, can be declared this way:
+<p>
+<pre>
+    #include &lt;linux/percpu-tags.h&gt;
+
+    struct percpu_tag_pool pool;
+</pre>
+<p>
+Initialization is then done with:
+<p>
+<pre>
+    int percpu_tag_pool_init(struct percpu_tag_pool *pool, unsigned long nr_tags);
+</pre>
+<p>
+where <tt>nr_tags</tt> is the number of tags to be contained within the
+pool.  Upon successful initialization, zero will be returned to the
+caller.
+<p>
+The actual allocation and freeing of tags is managed with:
+<p>
+<pre>
+    unsigned percpu_tag_alloc(struct percpu_tag_pool *pool, gfp_t gfp);
+    void percpu_tag_free(struct percpu_tag_pool *pool, unsigned tag);
+</pre>
+<p>
+A call to <tt>percpu_tag_alloc()</tt> will allocate a tag from the given
+<tt>pool</tt>.  The only use for the <tt>gfp</tt> argument is to be
+checked for the <tt>__GFP_WAIT</tt> flag; if (and only if) that flag is
+present, the function will 
+wait for an available tag if need be.  The return value is the allocated
+tag, or <tt>TAG_FAIL</tt> if no allocation is possible.
+<p>
+The implementation works by maintaining a set of per-CPU lists of available
+tags; whenever possible, <tt>percpu_tag_alloc()</tt> will simply take the
+first available entry from the local list, avoiding contention with other
+CPUs.  Failing that, it will fall back to a global list of tags, moving a
+batch of tags to the appropriate per-CPU list.  Should the global list be
+empty, <tt>percpu_tag_alloc()</tt> will attempt to steal some tags from
+another CPU or, in the worst case, either wait for an available tag or
+return <tt>TAG_FAIL</tt>.  Most of the time, with luck, tag allocation and
+freeing operations can be handled entirely locally, with no contention or
+cache line bouncing issues.
+<p>
+The attentive reader might well be thinking that the API proposed here
+looks an awful lot like the <a href="/Articles/536293/">IDR subsystem</a>,
+which also exists to allocate unique integer identifiers.  That is where
+the bulk of the complaints came from; Andrew Morton, in particular, was <a
+href="/Articles/554918/">unhappy</a> that no apparent attempt had been made
+to adapt IDR before launching into a new implementation:
+<p>
+<div class="BigQuote">
+	The worst outcome here is that idr.c remains unimproved and we merge a
+	new allocator which does basically the same thing.
+<p>
+	The best outcome is that idr.c gets improved and we don't have to merge
+	duplicative code.
+<p>
+	So please, let's put aside the shiny new thing for now and work out
+	how we can use the existing tag allocator for these applications.
+	If we make a genuine effort to do this and decide that it's
+	fundamentally hopeless then this is the time to start looking at
+	new implementations.
+</div>
+<p>
+The responses from Kent (and from Tejun Heo as well) conveyed their belief
+that IDR is, indeed, fundamentally hopeless for this use case.  The IDR
+code is designed for the allocation of identifiers, so it works a little
+differently: the lowest available number is always returned and the number
+range is expanded as needed.  The lowest-number guarantee, in particular,
+forces a certain amount of cross-CPU data sharing, putting a limit on how
+scalable the IDR code can be.  The IDR API also supports storing (and
+quickly looking up) a pointer value associated with each ID, a
+functionality not needed by users of tags.  As Tejun <a
+href="/Articles/554923/">put it</a>, even if the two allocators were
+somehow combined, there would still need to be two distinct ways of using
+it, one with allocation ordering guarantees, and one for scalability.
+<p>
+Andrew proved hard to convince, though; he suggested that, perhaps, tag
+allocation could be implemented as some sort of caching layer on top of
+IDR.  His position appeared to soften a bit, though, when Tejun <a
+href="/Articles/554925/">pointed out</a> that the I/O stack already has
+several tag-allocation implementations, "<q>and most, if not all,
+suck</q>".  The per-CPU tag allocator could replace those
+implementations with common code, reducing the amount of duplication rather
+than increasing it.  Improvements of that sort can work wonders when it
+comes to getting patches accepted.
+<p>
+Things then took another twist when Kent posted <a
+href="/Articles/555189/">a rewrite of the IDA module</a> as the basis for a
+new attempt.  "IDA" is a variant of IDR that lacks the ability to store
+pointers associated with IDs; it uses many of the IDR data structures but
+does so in a way that is more space-efficient.  Kent's rewrite turns IDA
+into a separate layer, with the eventual plan of rewriting IDR to sit on
+top.  Before doing that, though, he implemented <a
+href="/Articles/555190/">a new per-CPU ID allocator</a> implementing the
+API described above on top of the new IDA code.  The end result should be
+what Andrew was asking for: 
+a single subsystem for the allocation of integer IDs that accommodates all
+of the known use cases.
+<p>
+All this may seem like an excessive amount of discussion around the merging
+of a small bit of clearly-useful code that cannot possibly cause bugs
+elsewhere in the kernel.  But if there is one thing that the community has
+learned over the years, it's that kernel developers are far less scalable
+than the kernel itself.  Duplicated code leads to inferior APIs, more bugs,
+and more work for developers.  So it's worth putting some effort into
+avoiding the merging of duplicated functionality; it is work that will pay
+off in the long term — and the kernel community is expecting to be around
+and maintaining the code for a long time.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">idr</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/554910/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

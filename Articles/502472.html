@@ -1,0 +1,437 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Supporting block I/O contexts [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Supporting block I/O contexts">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Memory storage devices, including flash, are essentially just random-access devices with some p [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/501976/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Supporting block I/O contexts</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 18, 2012</br>
+           </div>
+Memory storage devices, including flash, are essentially just random-access
+devices with some peculiar restrictions.  Given direct access to the
+device, Linux kernel developers could certainly come up with drivers that
+would provide optimal performance and device lifetime.  In the real world,
+though, these devices are hidden behind their own proprietary operating systems and
+software stacks; much of the real (commercial) value seems to be in the
+software bundled inside.  As a result, the kernel must try to
+coax the device's firmware into doing an optimal job.  Over time, the
+storage industry has added various mechanisms by which an operating system
+can pass hints down to the device; the "trim" or "discard" mechanism is one
+of those.  Newer eMMC and unified flash storage (UFS) devices add a
+new hint in the form of 
+"contexts"; patches exist to support this feature, but they seem to have
+raised more questions than they have answered.
+<p>
+The standards documents describing contexts do not appear to be widely
+available—or at least findable.  From what your editor has been able to
+divine, "contexts" are a small number added to I/O requests that are
+intended to help the device optimize the execution of those requests.  They
+are meant to differentiate different types of I/O, keeping large,
+sequential operations separate from small, random requests.  I/O can be
+placed into a "large unit" context, where the operating system promises to
+send large requests and, possibly, not attempt to read the data back until
+the context has been closed.
+<p>
+Saugata Das recently posted <a href="/Articles/502474/">a small patch
+set</a> adding context support to the ext4 filesystem and the MMC block
+driver.  At the lower level, context numbers are associated with block I/O
+requests by storing the number in the newly-added <tt>bi_context</tt> (in
+<tt>struct bio</tt>) and <tt>context</tt> (in <tt>struct request</tt>)
+fields.  The virtual filesystem layer takes responsibility for setting
+those fields, but, in the end, it defers to the actual filesystems to come
+up with the proper context numbers.  There is a new address space operation
+(called <tt>get_context()</tt>) by which the VFS can call into the
+filesystem code to obtain a context number for a specific request.  The
+block layer has been modified to avoid merging block I/O requests if those
+requests have been assigned to different contexts.
+<p>
+There was little discussion of the lower-level changes, which apparently
+make sense to the developers who have examined them.  The filesystem-level
+changes have seen rather more discussion, though.  Saugata's patch set only
+touches the ext4 filesystem; those changes cause ext4 to use the inode
+number of the file 
+under I/O as the context number.  Thus, all I/O requests to a single file
+will be assigned to the same context, while requests to different files
+would go into different contexts (within limits—eMMC hardware, for example, only supports 15 contexts, so many inode numbers will be mapped onto a single context number at the lower levels).
+The question that came up was: is using the inode number the right policy?
+Coming up with an answer involves addressing two independent questions:
+(1)&nbsp;what does the "context" mechanism actually do?, and (2)&nbsp;how
+can Linux filesystems provide the best possible context information to the
+storage devices?
+<p>
+Arnd Bergmann (who has <a href="/Articles/428584/">spent a lot of time</a>
+understanding the details of how flash storage works) has <a
+href="/Articles/502476/">noted</a> that the standard is deliberately vague
+on what the context mechanism does; the authors wanted to create something
+that would outlive any specific technology.  He went on to say:
+<p>
+<div class="BigQuote">
+	That said, I think it is rather clear what the authors of the spec
+	had in mind, and there is only one reasonable implementation given
+	current flash technology: You get something like a log structured
+	file system with 15 contexts, where each context writes to exactly
+	one erase block at a given time.
+</div>
+<p>
+The effect of such an implementation would be to concentrate data written
+under any one context into the same erase block(s).  Given that, there are at
+least a couple of ways to use contexts to optimize I/O performance.
+<p>
+For example, one could try to concentrate data with the same expected
+lifetime, so that, when part of an erase block is deleted, all of the data
+in that erase block will be deleted.  Using the inode number as the context
+number could have that effect; deleting the file associated with that inode
+will delete all of its blocks at the same time.  So, as long as the file is
+not subject to random writes (as, say, a database file might be), using
+contexts in this manner should reduce the amount of garbage collection and
+read-modify-write cycles needed when a file is deleted.
+<p>
+Another helpful approach might be to use contexts to separate large,
+long-lived files from those that are shorter and more ephemeral.  The
+larger files would be well-placed on the medium, and the more volatile data
+would be concentrated into a smaller number of erase blocks.  In this case,
+using the inode number to identify contexts may or may not work well.
+Large files would be nicely separated, but the smaller files could be
+separated from each other as well, which may not be desirable: if
+several small files would fit into a single erase block, performance might
+be improved if all of those files were written in the same context.
+In this case, some other policy might be more advisable.
+<p>
+But what should that policy be?  Arnd suggested that using the inode number
+of the directory containing the file might work better.  Various commenters
+thought that using the ID of the process writing to the file could work,
+though there are some potential difficulties when multiple processes write
+the same file.  Ted Ts'o <a href="/Articles/502478/">suggested</a> that
+grouping files written by the same process in a short period of time could
+give good results.  Also useful, he thought, might be to look at the size
+of the file relative to the device's erase block size; files much smaller
+than an erase block would be placed into the same context, while larger
+files would get a context of their own.
+<p>
+A related idea, also <a href="/Articles/502479/">from Ted</a>, was to look
+at the expected I/O patterns.  If an existing file is opened for write
+access, chances are good that a random I/O pattern will result.  Files
+opened with <tt>O_CREAT</tt>, instead, are more likely to be sequential;
+separating those two types of files into different contexts would likely
+yield better results.  Some flags used with <tt>posix_fadvise()</tt> could
+also be used in this way.  There are undoubtedly other possibilities as
+well.  Choosing a policy will have to be done with care; poor use of
+contexts could just as easily reduce performance and longevity instead of
+increasing them.
+<p>
+Figuring all of this out will certainly take some time, especially since
+devices with actual support for this feature are still relatively rare.
+Interestingly, <a href="/Articles/502480/">according to Arnd</a>, there may
+be an opportunity in getting ext4 to supply context information early:
+<p>
+<div class="BigQuote">
+	Having code in ext4 that uses the contexts will at least make it
+	more likely that the firmware optimizations are based on ext4
+	measurements rather than some other file system or operating
+	system.  From talking with the emmc device vendors, I can tell you
+	that ext4 is very high on the list of file systems to optimize for,
+	because they all target Android products.
+</div>
+<p>
+Ext4 is, of course, the filesystem of choice for current Android systems.
+So, conceivably, an ext4 implementation could drive hardware behavior in
+the same way that much desktop hardware is currently designed around what
+Windows does.
+<p>
+Given that the patches are relatively small and that policies can be
+changed in the future without user-space compatibility issues, chances are
+good that something will be merged into the mainline as soon as the 3.6
+development cycle.  Then it will just be a matter of seeing what the
+hardware manufacturers actually do and adjusting accordingly.  With luck,
+the eventual result will be longer-lasting, better-performing memory
+storage devices.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Filesystems/ext4</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Solid-state storage devices</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/502472/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor502835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting block I/O contexts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 10:38 UTC (Thu)
+                               by <b>etienne</b> (guest, #25256)
+                              [<a href="/Articles/502835/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="etienne" />
+                <input type="hidden" name="return" value="/Articles/502472/#CommAnchor502835" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At the minimum, the context should change when writing data or metadata or journal - would be nice for FAT at least, if possible the default for all filesystems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502949"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting block I/O contexts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 9:11 UTC (Fri)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/502949/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arnd" />
+                <input type="hidden" name="return" value="/Articles/502472/#CommAnchor502949" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We already have the "data tag" support, which is used to annotate metadata. In eMMC 4.5 any request can be tagged either metadata or belonging to one of 5 to 15 contexts, or being unspecified. Any request that a file system flags as a REQ_META write uses the data tag.<br>
+<p>
+Since FAT is both very simple and very common, a lot of the flash devices actually have logic in them to detect the access patterns even without those annotations. Usually the FAT area is known to be at the beginning of the device (partition-less SD cards and older USB sticks) or an erase block that receives lots of random I/O is expected to be the FAT. Further, devices often expect a FAT cluster size of 32KB, so all requests of that size are taken to be data while all smaller ones are treated as directory updates.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502949/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor502837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting block I/O contexts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 11:01 UTC (Thu)
+                               by <b>gioele</b> (subscriber, #61675)
+                              [<a href="/Articles/502837/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gioele" />
+                <input type="hidden" name="return" value="/Articles/502472/#CommAnchor502837" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Slightly out of topic, but why do flash vendors not focus on flash-specific file systems like the Nokia-sponsored UBIFS instead of hacking features over traditional file systems like ext4?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting block I/O contexts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 14:13 UTC (Thu)
+                               by <b>drag</b> (guest, #31333)
+                              [<a href="/Articles/502853/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="drag" />
+                <input type="hidden" name="return" value="/Articles/502472/#CommAnchor502853" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It appears that MTD file systems are designed for small systems. I don't know about UBIFS in particular, but typically they work well only on small devices. <br>
+<p>
+To go and write your own file system for MTD that would scale up like XFS or Ext4 can do would require years of development and for Windows this is a virtual impossibility unless you can get Microsoft on board.  Meanwhile people have been writing block storage to memory device translation for decades. People have been doing these translation firmwares for a very long time. <br>
+<p>
+Another thing is that compatibility with existing interfaces is important. They want to have the ability for people to purchase and use the devices with the minimal amount of effort. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor502844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting block I/O contexts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 9:12 UTC (Fri)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/502844/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arnd" />
+                <input type="hidden" name="return" value="/Articles/502472/#CommAnchor502844" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+UBIFS sits on top of the UBI, which sits on top of raw NAND flash, while the hardware industry is now moving towards block based storage such as eMMC. While it would be possible to do UBI on top of an eMMC to get some of the performance back, in the discussion we had between Linaro and some of the eMMC vendors, we ended up discarding that idea. Instead, focusing on improving performance on ext4 and btrfs on flash based block devices is something we are planning to spend more time on together.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor502868"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Context documentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 16:17 UTC (Thu)
+                               by <b>roman</b> (guest, #24157)
+                              [<a href="/Articles/502868/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roman" />
+                <input type="hidden" name="return" value="/Articles/502472/#CommAnchor502868" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"The standards documents describing contexts do not appear to be widely available...."<br>
+<p>
+Contexts are documented in the eMMC 4.5 specification.  Last I knew, anyone could register on the JEDEC web site and download the PDF.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502868/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor502986"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting block I/O contexts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 17:32 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/502986/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/502472/#CommAnchor502986" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      This sounds like a case of overgeneralization.  There's no way an abstract, undefined concept of "context" of a write (or is it of the data written?) can be useful.  They should just have made it (and called it) expiration group.  
+
+<P>
+Separately, an expected lifetime value would help with the placement goals that apparently underly this feature.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502986/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

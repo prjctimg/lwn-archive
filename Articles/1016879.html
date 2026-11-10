@@ -1,0 +1,462 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Atomic writes for ext4 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Atomic writes for ext4">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Building on the discussion in the two previous sessions on untorn (or atomic) writes, for buffe [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1017013/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Atomic writes for ext4</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>April 10, 2025</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+Building on the discussion in the two previous sessions on untorn (or
+atomic) writes, <a
+href="../1016015/index.html">for buffered <span class="nobreak">I/O</span></a> and <a
+href="../1016406/index.html">for XFS using direct <span class="nobreak">I/O</span></a>, Ojaswin Mujoo
+remotely led a
+session on support for the feature on ext4.  That took place in the combined storage and
+filesystem track at the
+2025 Linux Storage, Filesystem, Memory Management, and BPF Summit.  Part of
+the support for the feature is already in the upstream kernel, with more
+coming.  But 
+there are still some challenges that Mujoo wanted to discuss.
+</p>
+
+<p>
+For ext4, a single filesystem block can be written atomically; that <a
+href="/ml/all/cover.1730437365.git.ritesh.list%40gmail.com/">support</a>
+was merged for 6.13, he said.  There is <a
+href="/ml/all/Z-KWsWHOGJnq8pUp@li-dc0c254c-257c-11b2-a85c-98b6c1322444.ibm.com/">work
+in progress</a> on doing multi-block atomic writes in ext4.
+There are two main allocation challenges that need to be handled for
+multi-block, though: unaligned extents that do not match the hardware alignment
+requirements and ranges with mixed mappings, for example those that cover both unwritten data
+and hole sections.
+</p>
+
+<p>
+The ext4 <a
+href="https://www.kernel.org/doc/html/latest/filesystems/ext4/bigalloc.html">bigalloc</a>
+feature eliminates the problem with unaligned extents because the
+cluster size for the filesystem can be set to, say, 16KB, so everything
+will be aligned on those boundaries.  But it is a
+filesystem-wide setting, even if atomic writes are only needed for a few
+files, and it requires that any existing filesystem be
+reformatted to use the feature.  Reformatting may not be desirable
+for all use cases, but multi-block writes with bigalloc is working now.
+</p>
+
+<p>
+Currently, without bigalloc, ext4 does not have a way to guarantee the
+needed alignment; if an atomic write is done on an unaligned extent, ext4
+has no fallback, it simply returns an error to the user.  In order to
+ensure the alignment, Mujoo is <a
+href="/ml/all/cover.1742800203.git.ojaswin%40linux.ibm.com/">exploring a
+combination of extsize and forcealign</a>.  Extsize is a per-inode
+alignment "hint" to the allocator that is set with an <a
+href="https://www.man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>
+command; it will try to allocate all extents to the boundary specified, but
+can fail.  The forcealign extended attribute can be set on a file that has
+an extsize specified in order to require that allocation alignment; it can
+be seen as a per-file bigalloc.
+</p>
+
+<p>
+Luis Chamberlain said that he has done some analysis of ext4 using bigalloc
+with a 16KB cluster size and noticed that some writes are not aligned on
+16KB boundaries; he wondered why that was.  Ted Ts'o said that bigalloc
+guarantees that data blocks are aligned to the cluster size, but not
+metadata blocks, which are still 4KB-aligned.  Journal updates, inode
+updates, and bitmap-allocation-block updates could all cause writes that are
+not aligned to the cluster size.
+</p>
+
+<p>
+Chamberlain wondered if there was any way to support 16KB writes for ext4
+metadata; Ts'o said that it would require
+ext4 support for <a
+href="/Articles/1009548/">filesystem block sizes larger than the page
+size</a>.  The buffered <span class="nobreak">I/O</span> path for ext4 would probably need to switch to
+using iomap, he said; the ext4 developers are interested in getting patches
+that make that switch and he understands that large-block-size support is
+fairly straightforward once that happens.
+</p>
+
+<p>
+The idea is to not require any reformatting of the filesystem with extsize
+and forcealign, Mujoo said.  That will require fallbacks for files that are
+not properly aligned when forcealign is set for them.  A "compat" feature
+flag can be added that can be set on existing filesystems; that will allow
+older kernels to mount the filesystem.  An <tt>ioctl()</tt> command can be
+added to fix files that are not properly aligned.  The forcealign feature
+might also have use cases outside of atomic writes; for example, it might
+help with getting properly aligned blocks for use with a <a
+href="https://docs.kernel.org/filesystems/dax.html">direct-access</a> (DAX)
+filesystem.
+</p>
+
+<p>
+The problem of mixed mappings affects both bigalloc and non-bigalloc ext4;
+avoiding atomic writes with mixed mappings should be the goal, but it may
+not always be met.
+If a mixed mapping is used for an atomic write, there are three solutions
+that he sees.  The first is to return an error, which might be popular for
+those who do not want a fallback path.  Another is to zero the holes and
+write them with the rest.  Finally, ext4 can do something similar to what
+XFS is doing: write the data in a new place and atomically change the
+extent mappings.  Ext4 has no infrastructure to support the XFS-like
+solution, however, so it would add complexity to the solution.
+</p>
+
+<p>
+Mujoo described the roadmap for ext4 atomic-write support.  The patch
+sets for multi-filesystem-block writes using bigalloc and for adding
+extsize and forcealign support to ext4 are being targeted for Linux 6.16.
+Subsequent features, including using extsize and forcealign for multi-block
+atomic writes, exploring an extent-swapping fallback, and enabling buffered
+atomic writes for ext4, will come later.
+</p>
+
+<p>
+Chamberlain asked if the idea of using the <a
+href="https://docs.kernel.org/core-api/xarray.html#multi-index-entries">multi-index
+feature</a> of <a href="https://docs.kernel.org/core-api/xarray.html">XArray</a>
+had been evaluated as a means to more generically support atomic writes for
+all filesystems.  Mujoo agreed that it would be nice to have
+VFS support for atomic writes that could be used by more filesystems, but
+has not really looked at that.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Atomic I/O operations</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Filesystems/ext4</a></td></tr>
+            <tr><td><a href="../../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1016879/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1017169"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2025 8:47 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1017169/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017169" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One more awesome feature becoming available for ext4.<br>
+<p>
+Still hoping copy-on-write files became available someday. I'd love to be able to use those to efficiently guard against files being modified between hashing and transmission, without having to copy them into RAM.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017169/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017257"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2025 15:44 UTC (Fri)
+                               by <b>tytso</b> (<b>&#x272D; supporter &#x272D;</b>, #9993)
+                              [<a href="/Articles/1017257/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tytso" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017257" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Many years ago, we roughly scoped out how we might be able to support reflink for ext4.  The issue has always been finding someone with the time (and most likely, because it's non-trivial) corporate sponsorship to do the work.<br>
+<p>
+Over 15 years ago, I participated with a company-wide study about whether there was a business case to investing in file system technologies --- and at the time, the conclusion was the ROI Just Wasn't There.  What the enterprise customers of my employer at the time pay $$$ for are things like application servers and databases, and things like COW support doens't help with those use case (in fact; they tend to hurt --- COW file systems tend to have a way of turning off COW to improve database performance).   In contrast, the Sun engineers didn't bother asking for product analysis from the sales folk or management, and just Went Ahead and Did It.   Perhaps the business case for Sun customers were different, but Sun went out of business --- and my former employer is still around.<br>
+<p>
+That being said, if some company wants to invest 2 or 3 SWE-years (of highly talented FS talent) to implement reflink support for ext4, I'm happy to work with them.  But given that we live in a world where a CEO of a major social media company has said that he is laying off engineers to pay for more GPU's.... this might not be very likely.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017257/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017264"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2025 16:52 UTC (Fri)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1017264/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017264" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure. Only hyperscalers exist; nothing else matters.<br>
+<p>
+I wonder if this means that we, the mere mortal worthless users, should simply use other filesystems whose development we can finance and influence (like ZFS, whose development is funded by people buying NAS boxes and small businesses who worry about data integrity, or bcachefs, whose development is funded on Patreon) rather than ext4, The Filesystem From The World Where Only Hyperscalers Exist.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017264/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017268"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2025 17:20 UTC (Fri)
+                               by <b>tytso</b> (<b>&#x272D; supporter &#x272D;</b>, #9993)
+                              [<a href="/Articles/1017268/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tytso" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017268" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You should use whatever file system meets your needs.   I'm not sure how much new features in ZFS is actually being funded by NAS manufacturers and small business, but if it meets your needs, use what works for you.<br>
+<p>
+Ext4 is funded not just by hyperscalers; we get non-trivial contributions from companies like IBM, SuSE, Oracle, as well as a hobbyist or two.  A lot of the initial ext4 work was funded by IBM, when I was a member of IBM Linux Technology Center.   So I'm quite familiar with the neesd of enterprise users.   And we've had features like ext4's Unicode casefolding that was funded by Steam for gaming. <br>
+<p>
+In general, my attitude is "horses for courses".   If for your use case, XFS is better, use XFS.  If ZFS is better, and you're not worried about the GPL / CDDL license compatibility issues, then hey, use ZFS.   Knock yourself out.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017268/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017269"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2025 17:31 UTC (Fri)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1017269/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017269" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Then what is the point of that very distinct derisiveness in the great-grandparent comment towards both users who happen to want $feature and competitors that happen to have $feature?<br>
+<p>
+It's absolutely fine to say "this $feature can happen, but nobody wanted to fund/develop it so far", but what's the point of bringing up ZFS just to say "look at all those suckers who happen to have $feature, aren't they suckers?"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017269/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017276"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2025 19:08 UTC (Fri)
+                               by <b>MrWim</b> (subscriber, #47432)
+                              [<a href="/Articles/1017276/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MrWim" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017276" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FWIW I don’t see any derisiveness in that comment. The comment about business cases seems to be a lament rather than a jab.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017276/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2025 3:06 UTC (Sat)
+                               by <b>tytso</b> (<b>&#x272D; supporter &#x272D;</b>, #9993)
+                              [<a href="/Articles/1017286/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tytso" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017286" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed, I wasn't saying that it was the user of ZFS that were the suckers; they weren't the ones who made the decision to invest in that feature, after all.<br>
+<p>
+What I was saying that companies that make investment decisions without consider the question of return on that investment have a tendency to not do well, and that's what happened to Sun.   Which is actually quite a shame, because I have nothing but respect for the technical skills of the Solaris team.  They had some really, super smart, super-talented engineers.<br>
+<p>
+Unfortunately, Sun management, including their technical management, made enough mistakes (including assuming that the dot-Com boom would last forever), that Sun Microsystems wasn't able to continue as a going concern.   And that's sad; sure, they open-sourced Solaris (with a weird license that was intentionally not GPL-compatible, but they at least did release it), and they did give the world DTrace and ZFS.   But who knows what other technologies they could have come up with if Sun had been able to survive as a company, and the could have kept the Solaris team together?  <br>
+<p>
+This is *why* companies are well-advised to consider the business case, and return on investment, when considering what features to invest in.  Its not enough that the feature is technically "cool".<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017313"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CoW</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2025 9:02 UTC (Sun)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/1017313/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cpitrat" />
+                <input type="hidden" name="return" value="/Articles/1016879/#CommAnchor1017313" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or build a startup during the boom, become a millionaire, pay generously some talented engineers to develop cool features in open source software and go bankrupt when the bubble bursts. Everybody wins: the nice fetures are here forever, you and some engineers had some good time and made some money and a VC enjoyed being virtually rich for some time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017313/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

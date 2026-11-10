@@ -1,0 +1,270 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A superficial introduction to fsblock [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A superficial introduction to fsblock">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Many kernel developers may work through their entire career without  encountering a buffer_head [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/322043/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A superficial introduction to fsblock</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 11, 2009</br>
+           </div>
+Many kernel developers may work through their entire career without 
+encountering a buffer_head structure.  But the buffer head (often called
+"bh") sits at the core of the kernel's memory management and filesystem
+layers.  Simply put, a bh maintains a mapping between a specific page (or
+portion thereof) in RAM and its corresponding block on disk.  In the 2.4
+days, the bh structure was also a key part of the block I/O layer, but 2.6
+broke that particular association.  That notwithstanding, the lowly,
+much-maligned bh still plays a crucial role in contemporary kernels.
+<p>
+Why "much-maligned"?  Buffer heads are difficult to manage, to the point
+that they can create significant memory pressure on some systems.  They
+deal in very small units of I/O (512 bytes), so you need a pile of them
+to represent even a single page.  And there is a certain sense of antiquity
+that one encounters when dealing with them; the buffer head code is some of
+the oldest code in the core kernel.  But it is important and tricky code,
+so few developers dare to try to improve it.
+<p>
+Nick Piggin is the daring type.  But Nick, too, is not trying to improve
+the bh layer; instead, he would like to replace it outright.  The result is
+an intimidating set of large patches known as "fsblock."  This code was
+first <a href="http://lwn.net/Articles/239621/">posted</a> in 2007, making
+it fairly young by the standards of memory-management patches.  This patch
+set was <a href="http://lwn.net/Articles/321390/">reposted</a> in early
+March; it has shown a number of improvements on the way.  Nick says
+"<q>I'm pretty intent on getting it merged sooner or later</q>", so
+we'll likely be seeing more of this code in the future.
+<p>
+The core data structure is <tt>struct fsblock</tt>, which represents one
+block:
+<p>
+<pre>
+    struct fsblock {
+	unsigned int	flags;
+	unsigned int	count;
+
+    #ifdef BDFLUSH_FLUSHING
+	struct rb_node	block_node;
+    #endif
+	sector_t	block_nr;
+	void		*private;
+	struct page	*page;
+    };
+</pre>
+<p>
+
+This structure, notes Nick, is about 1/3 the size of <a
+href="/Articles/322674/"><tt>struct buffer_head</tt></a>, but it serves
+roughly the same purpose: tracking the association between an in-memory
+block (found in <tt>page</tt>) and its on-disk version, indexed by
+<tt>block_nr</tt>.  The <tt>flags</tt> field describes the state of this
+block: whether it's up-to-date (memory and disk versions match), locked,
+dirty, in writeback, etc.  Some of these flags (the dirty state, for
+example) match the state stored with 
+the in-memory page; the fsblock layer (unlike the buffer_head code) takes
+great care to keep those flags in sync.  
+<p>
+There are a couple of interesting flags in the <tt>fsblock</tt> structure
+which one does not find associated 
+with buffer heads.  One of them is not a flag at all: <tt>BL_bits_mask</tt>
+describes a subfield giving the size of the block.  In fsblock, "blocks"
+are not limited to the standard 512-byte sector size; they can, in fact,
+even be larger than a page.  These "superpage" blocks have been on some
+filesystem developers' wish lists for some time; they would make it easy to
+create filesystems with large blocks which, in turn, would perform better
+in a number of situations.  But the superpage feature may be removed for
+any initial merge of fsblock in an attempt to make the code easier to
+understand and review.  Besides, large blocks are a bit of a controversial
+topic, so it makes sense to address that issue separately.
+<p>
+The <tt>flags</tt> field also holds a flag called <tt>BL_metadata</tt>;
+this flag indicates a block which holds filesystem metadata instead of file
+data.  In this case, the block is actually part of a larger structure which
+(edited slightly) looks like this:
+<p>
+<pre>
+    struct fsblock_meta {
+	struct fsblock block;
+	union {
+    #ifdef VMAP_CACHE
+	    /* filesystems using vmap APIs should not use ->data */
+	    struct vmap_cache_entry *vce;
+    #endif
+	    /*
+	     * data is a direct mapping to the block device data, used by
+	     * "intermediate" mode filesystems.
+	     */
+	    char *data;
+	};
+    };
+</pre>
+<P>
+In short, this structure makes it easy for filesystem code to deal directly
+with metadata blocks.  Finally, the <tt>fsblock_sb</tt> structure ties a
+filesystem superblock into the fsblock subsystem.
+<p>
+A filesystem can, at mount time, set things up with a call to:
+<p>
+<pre>
+    int fsblock_register_super(struct super_block *sb, 
+                               struct fsblock_sb *fsb_sb);
+</pre>
+<p>
+The superblock can then be read in with a call to <tt>sb_mbread()</tt>:
+<p>
+<pre>
+    struct fsblock_meta *sb_mbread(struct fsblock_sb *fsb_sb, 
+                                   sector_t blocknr);
+</pre>
+<p>
+There's only one little problem: before fsblock can perform block I/O
+operations, it must have access to the superblock.  So, thus far,
+filesystems which have been converted to fsblock must still use the buffer
+head API to read the superblock.  One assumes that this little glitch will
+be taken care of at some point.
+<p>
+A tour of the full fsblock API would require a few articles - it is a lot
+of code.  Hopefully a quick overview will provide a sense for how it all
+works.  To start with, blocks are reference-counted objects in fsblock, so
+there is the usual set of functions for incrementing and decrementing the
+counts:
+<p>
+<pre>
+    void block_get(struct fsblock *block);
+    void block_put(struct fsblock *block);
+    void mblock_get(struct fsblock_meta *block);
+    void mblock_put(struct fsblock_meta *block);
+</pre>
+<p>
+There's a whole set of functions for performing I/O on blocks and metadata
+blocks; some of these are:
+<p>
+<pre>
+    struct fsblock_meta *mbread(struct fsblock_sb *fsb_sb, sector_t blocknr, 
+    	   		        unsigned int size);
+    int mblock_read_sync(struct fsblock_meta *mb);
+    int sync_block(struct fsblock *block);
+</pre>
+<p>
+Note that, while there are a number of functions for reading blocks, there
+are fewer write functions.  Instead, code will use a function like
+<tt>set_block_dirty()</tt> or <tt>mark_mblock_dirty()</tt>, then leave it
+up to the memory management code to decide when the actual I/O should take
+place.
+<p>
+There is a lot more than this to fsblock, including functions to lock
+blocks, look up in-memory blocks, perform page I/O, truncate pages,
+implement <tt>mmap()</tt>, and more.  One assumes that Nick will certainly
+write exhaustive documentation for this API sometime soon.
+<p>
+Beyond that little documentation task, there are a few other things to do,
+including supporting direct I/O and fixing a number of known bugs.  But,
+even now, fsblock seems to have a lot of potential; it updates the old
+buffer head API in a way which is more efficient and more robust.  It also
+appears to perform better with the ext2 filesystem - a fact which appears
+to be surprising to Nick.  So something like fsblock will almost certainly
+be merged sooner or later.  A lot could happen in the mean time, though.
+Core memory-management-related patches like this are notoriously slow to
+get through the merging process, and, despite its age, fsblock has not seen a great
+deal of review to date.  So there's likely to be plenty of time and
+opportunity for other developers to find things to disagree with before
+fsblock hits the mainline.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Filesystems</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">fsblock</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/322668/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor322899"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">buffer_head size</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2009 12:54 UTC (Thu)
+                               by <b>axboe</b> (subscriber, #904)
+                              [<a href="/Articles/322899/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="axboe" />
+                <input type="hidden" name="return" value="/Articles/322668/#CommAnchor322899" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not sure about your description of very small I/O units and buffer_heads. A single buffer_head can map a full page, it's only if you have a 512b file system block size that you get them linked. Which is not a huge surprise, since they represent the on-disk block mapping. But for "normal" 4kb block size file systems, you only get one bh per page.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/322899/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,234 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Polling block drivers [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Polling block drivers">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The number of latency-sensitive applications running on Linux seems to be increasing, with the  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/555867/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Polling block drivers</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 26, 2013</br>
+           </div>
+The number of latency-sensitive applications running on Linux seems to be
+increasing, with the result that more latency-related changes are finding
+their way into the kernel.  Recently LWN looked at the <a
+href="/Articles/551284/">Ethernet device polling patch set</a>, which
+implements 
+polling to provide minimal latency to critical networking tasks.  But what
+happens if you want the lowest possible latency for block I/O requests
+instead?  Matthew Wilcox's <a href="/Articles/555886/">block driver
+polling patch</a> is an attempt to answer that question.
+<p>
+As Matthew <a href="/Articles/556245/">put it</a>, there are users who are
+willing to go to great lengths to lower the latencies they experience with
+block I/O requests:
+<p>
+<div class="BigQuote">
+	The problem is that some of the people who are looking at those
+	technologies are crazy.  They want to "bypass the kernel" and "do
+	user space I/O" because "the kernel is too slow".  This patch is
+	part of an effort to show them how crazy they are.
+</div>
+<p>
+The patch works by adding a new driver callback to <tt>struct
+backing_dev_info</tt>:
+<p>
+<pre>
+    int (*io_poll)(struct backing_dev_info *bdi);
+</pre>
+<p>
+This function, if present, should poll the given device for completed I/O
+operations.  If any are found, they should be signaled to the block layer;
+the return value is the number of operations found (or a negative error
+code).
+<p>
+Within the block layer, the <tt>io_poll()</tt> function will be called
+whenever a process is about to sleep waiting for an outstanding operation.
+By placing the poll calls there, Matthew hopes to avoid going into polling when there
+is other work to be done; it allows, for example, the submission of
+multiple operations without invoking the poll loop.  But, once a process
+actually needs the result of a submitted operation, it begins polling rather
+than sleep. 
+<p>
+Polling continues until one of a number of conditions comes about.  One of
+those, of course, is that an operation that the current process is waiting
+for completes.  In the absence of a completed operation, the process will
+continue polling until it receives a signal or the scheduler
+indicates that it would like to switch to a different process.  So, in
+other words, polling will stop if a higher-priority process becomes
+runnable or if the current process exhausts its time slice.  Thus, while
+the polling happens in the kernel, it is limited by the relevant process's
+available CPU time.
+<p>
+Linus <a href="/Articles/556248/">didn't like this approach</a>, saying
+that the polling still wastes CPU time even if there is no higher-priority
+process currently contending for the CPU.  That said, he's not necessarily
+opposed to polling; he just does not want it to happen if there might be other
+runnable processes.  So, he suggested, the polling should be moved to the
+idle thread.  Then polling would only happen when the CPU was about to go
+completely idle, guaranteeing that it would not get in the way of any other
+process that had work to do.
+<p>
+But Linus might actually lose in this case.  Block maintainer Jens Axboe <a
+href="/Articles/556250/">responded</a> that an idle-thread solution would
+not work.  "<q>If you need to take the context
+switch, then you've negated pretty much all of the gain of the polled
+approach.</q>"  Also he <a href="/Articles/556251/">noted</a> that the
+current patch does the polling in (almost) the right place, just where the
+necessary information is available.  So Jens appears to be disposed toward
+merging something that looks like the current patch; at that point, Linus
+will likely accept it.
+<p>
+But Jens did ask for a bit more smarts when it comes to deciding when the
+polling should be done; in the current patch, it happens unconditionally
+for any device that provides an <tt>io_poll()</tt> function.  A better
+approach, he said, would be to provide a way for specific processes to opt
+in to the polling, since, even on latency-sensitive systems, polling will
+not be needed by all processes.  Those processes that do not need extremely
+low latency should not have to give up some of their allotted CPU time for
+I/O polling.
+<p>
+So the patch will certainly see some work before it is ready for merging.
+But the benefits are real: in a test run by Matthew on an <a
+href="http://www.nvmexpress.org/">NVMe</a> device, I/O 
+latencies dropped from about 8.0µs to about 5.5µs — a significant
+reduction.  The benefit will only become more pronounced as the speed of
+solid-state storage devices increases; as the time required for an I/O
+operation approaches 1µs, an extra 2.5µs of overhead will come to dominate
+the picture.  Latency-sensitive users will seek to eliminate that overhead
+somehow; addressing it in the kernel is a good way to ensure that all users
+are able to take advantage of this work.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/556244/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor556566"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Polling block drivers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2013 15:46 UTC (Thu)
+                               by <b>kugel</b> (subscriber, #70540)
+                              [<a href="/Articles/556566/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kugel" />
+                <input type="hidden" name="return" value="/Articles/556244/#CommAnchor556566" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why does the kernel have so many different poll interfaces for driver developers, the proposed one is different once more.<br>
+<p>
+Character device's poll(), NAPI poll(), the low-latency ethernet poll(), this block device poll(). All are different.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/556566/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor556577"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Polling block drivers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2013 16:09 UTC (Thu)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/556577/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/556244/#CommAnchor556577" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The different interfaces are different because they're trying to accomplish different things.  Naming is one of the three hardest problems in computer science; if they weren't all called "poll", I don't think it would irk you as much that these interfaces are different.<br>
+<p>
+I have to say that the system call "poll" is the worst because it literally does the opposite of polling.  It sleeps waiting for an event (unless the timeout is zero).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/556577/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

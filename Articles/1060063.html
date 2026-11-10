@@ -1,0 +1,743 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The ongoing quest for atomic buffered writes [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The ongoing quest for atomic buffered writes">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="There are many applications that need to be able to write multi-block chunks of data to disk wi [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1060393/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The ongoing quest for atomic buffered writes</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 2, 2026</br>
+           </div>
+There are many applications that need to be able to write multi-block
+chunks of data to disk with the assurance that the operation will either
+complete successfully or fail altogether — that the write will not be
+partially completed (or "torn"), in other words.  For years, kernel
+developers have worked on providing atomic writes as a way of satisfying
+that need; see, for example, sessions from the Linux Storage, Filesystem,
+Memory Management, and BPF (LSFMM+BPF) Summit from <a
+href="../933015/index.html">2023</a>, <a href="../974578/index.html">2024</a>,
+and <a href="../1016015/index.html">2025</a> (<a
+href="../1016406/index.html">twice</a>).  While atomic <i>direct</i> <span
+class="nobreak">I/O</span> is now supported by some filesystems, atomic
+<i>buffered</i> <span class="nobreak">I/O</span> still is not.  Filling
+that gap seems certain to be a 2026 LSFMM+BPF topic but, thanks to an early
+discussion, the shape of a solution might already be coming into focus.
+<p>
+Pankaj Raghav <a
+href="/ml/all/d0c4d95b-8064-4a7e-996d-7ad40eb4976b@linux.dev">started that
+discussion</a> on February&nbsp;13, noting that both ext4 and XFS now have
+support for atomic writes when direct <span class="nobreak">I/O</span> is in use, but that supporting
+atomic buffered <span class="nobreak">I/O</span> "<q>remains a contentious topic</q>".  There are a
+couple of outstanding proposals to add this feature: <a
+href="/ml/linux-fsdevel/20240422143923.3927601-1-john.g.garry@oracle.com/">this
+2024 series</a> from John Garry and <a
+href="/ml/all/cover.1762945505.git.ojaswin@linux.ibm.com/">a more recent
+patch set</a> from Ojaswin Mujoo.  These proposals have stalled, partly out
+of concern about the amount of complexity added to the <span class="nobreak">I/O</span> paths and
+questions about whether there is really a need for atomic buffered writes.
+<p>
+A frequently mentioned potential user for this feature is the PostgreSQL
+database which, unlike many other database managers, uses buffered <span class="nobreak">I/O</span>.
+The PostgreSQL code often has to go out of its way to ensure that partial
+<span class="nobreak">I/O</span> operations do not corrupt the database, sometimes at a cost to
+performance.  PostgreSQL is an important user, but not all developers are
+convinced that atomic buffered writes are the solution to its problems;
+Christoph Hellwig, for example, <a
+href="/ml/all/20260217055103.GA6174@lst.de">commented</a>: "<q>I think a
+better session would be how we can help postgres to move off buffered <span class="nobreak">I/O</span>
+instead of adding more special cases for them.</q>"
+<p>
+PostgreSQL developer Andres Freund <a
+href="/ml/all/ndwqem2mzymo6j3zw3mmxk2vh4mnun2fb2s5vrh4nthatlze3u@qjemcazy4agv">responded</a>
+that the project is indeed working on adding direct-<span
+class="nobreak">I/O</span> support, but its performance has not yet reached
+the level of the buffered-<span class="nobreak">I/O</span> method.  But, he
+said, direct <span class="nobreak">I/O</span> will only ever be useful for
+some larger installations.  Smaller systems, or those where the database is
+running as part of a larger application with its own memory needs, will
+still do better in a buffered-<span class="nobreak">I/O</span> setup where
+the kernel can manage the allocation of memory.  Even when direct <span
+class="nobreak">I/O</span> becomes competitive as an option for PostgreSQL,
+he said, "<q>well over 50% of users</q>" will not be able to benefit from
+it.  Most of the developers in the conversation seem to accept that there
+is a legitimate use case for atomic buffered <span
+class="nobreak">I/O</span>, though Hellwig <a
+href="/ml/all/20260220151050.GA14064@lst.de">remains a holdout</a>.
+<p>
+An agreement that a solution would be nice to have does not, itself, create
+a solution, though.  Atomic direct <span class="nobreak">I/O</span> was a complex problem to solve,
+requiring the kernel to keep <span class="nobreak">I/O</span> requests together all the way through to the
+eventual storage device.  Buffered <span class="nobreak">I/O</span> adds complexity, since those
+operations have to go through the page cache, and the actual write
+operation is normally carried out at a different time, when the kernel gets
+around to it.  Tracking atomicity requirements through the kernel in this
+way and preventing multiple operations from interfering with each other
+are not simple tasks.
+<p>
+Early in the discussion Mujoo <a
+href="/ml/all/aY8n97G_hXzA5MMn@li-dc0c254c-257c-11b2-a85c-98b6c1322444.ibm.com">suggested</a>
+that one possible solution might be to use writethrough semantics for
+atomic buffered writes.  In other words, when user space initiates a
+buffered write requesting atomic behavior (which would be done using <a
+href="https://www.man7.org/linux/man-pages/man2/pwritev.2.html"><tt>pwritev2()</tt></a>
+with the <tt>RWF_ATOMIC</tt> flag), the kernel would immediately initiate
+the process of writing that data to disk.  That would allow creating a
+short-term pin to keep the pages in memory (it is hard to do an atomic
+write if one of the pages full of data is pushed out to swap in the middle
+of the operation) and would let the kernel prevent any other changes to
+those pages while the operation is underway.  There would be no need to
+find a way to track atomic writes for dirty data that is sitting in the
+page cache.
+<p>
+Jan Kara <a
+href="/ml/all/w3vwdaygcz3prsxwv43blo4co666mragpdwaxihbirt5stl4vr@agyz4mnaxghj">agreed</a>
+that writethrough behavior could be interesting.  It would allow much of
+the existing direct-<span class="nobreak">I/O</span> infrastructure to be reused, he said, making the
+solution much simpler.  The real question, he said, was whether
+writethrough behavior would be useful for PostgreSQL.  Freund <a
+href="/ml/all/fh3hxyhoezqzcsabqjr2glft2uvrx5bkyx6pejek3uskpm5ow4@zym4kmg5o2bm">answered</a>
+that writethrough would indeed be useful, even in the absence of atomic
+behavior.  He suggested implementing it by requiring that atomic buffered
+writes include a new <tt>RWF_WRITETHROUGH</tt> flag along with
+<tt>RWF_ATOMIC</tt>; that way, if the kernel ever implemented atomic
+buffered writes <i>without</i> writethrough, there would not be a behavior
+change seen by user space.
+<p>
+Raghav <a
+href="/ml/all/4627056f-2ab9-4ff1-bca0-5d80f8f0bbab@linux.dev">asked</a>
+about the difference between the proposed <tt>RWF_WRITETHROUGH</tt> flag,
+and the existing <tt>RWF_DSYNC</tt>, saying that the former might (like
+most buffered writes) be asynchronous, while the latter is synchronous.
+Dave Chinner <a href="/ml/all/aZUQKx_C3-qyU4PJ@dread">disagreed with that
+interpretation</a>, though, saying that writethrough behavior is
+inherently synchronous so that errors can be immediately reported.  The way
+to get asynchronous behavior, he said, is to use <a
+href="https://man7.org/linux/man-pages/man7/aio.7.html">the
+asynchronous-<span class="nobreak">I/O</span> interface</a> or <a
+href="https://www.man7.org/linux/man-pages/man7/io_uring.7.html">io_uring</a>.
+But <tt>RWF_WRITETHROUGH</tt> itself, he said, should behave identically to
+direct-<span class="nobreak">I/O</span> writes, allowing the existing <span class="nobreak">I/O</span> paths to be used to implement
+it.  <tt>RWF_DSYNC</tt>, he said, would still be different in that it
+forces the storage device to commit the data to persistent media, while
+<tt>RWF_WRITETHROUGH</tt> would not take that extra step (meaning that data
+could remain in the device's write cache).
+<p>
+In an attempt to summarize the discussion, Raghav posted <a
+href="/ml/all/sjuplc6ud6ym3qyn7qmhzpr3jzjxpf6wcza3s2cenvmwwibbxr@aorfpiuxf7qy">this
+set of proposed conclusions</a>; the first step would be to implement the
+proposed writethrough behavior with immediate initiation of the requested
+operation.  Writethrough alone, though, does not guarantee atomic
+behavior, so there will be more to be done.  The next step will be to
+ensure that the data being written is not modified while the operation is
+underway.  Fortunately, the kernel has long had a mechanism, <a
+href="/Articles/528031/">stable pages</a>, that can be brought into play
+here.  By preventing modifications to a buffer that is being written, the
+kernel can prevent the data from being corrupted.
+<p>
+Later steps will include taking care to copy the full data range into the
+page cache before beginning the operation, and to make sure that the buffer
+is written in a single, atomic operation.  There will inevitably be other
+details to deal with, such as specifying and enforcing alignment
+requirements for buffers used with atomic writes.  But it would appear that
+the path toward atomic buffered writes is starting to become more clear.
+It shouldn't take more than another half-dozen or so LSFMM+BPF sessions
+before the problem is fully solved.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Atomic I/O operations</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1060063/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1060982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">heh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2026 0:41 UTC (Tue)
+                               by <b>djwong</b> (subscriber, #23506)
+                              [<a href="/Articles/1060982/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="djwong" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1060982" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+“...another half-dozen or so LSFMM+BPF sessions before the problem is fully solved.”<br>
+<p>
+&lt;snicker&gt;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1060994"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic Writes and PLP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2026 12:01 UTC (Tue)
+                               by <b>RazeLighter777</b> (subscriber, #130021)
+                              [<a href="/Articles/1060994/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="RazeLighter777" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1060994" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How do atomic write  implementations differ with drives having Power Loss Prevention and those without? It seems like to me that doing atomic operations on drives with PLP and without PLP should be different.<br>
+<p>
+I'm curious about this. I've picked up a couple SAS SSDs with PLP and they've been much more dependable for my database workloads than my consumer grade drives.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060994/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic Writes and PLP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2026 4:10 UTC (Fri)
+                               by <b>ghodgkins</b> (subscriber, #157257)
+                              [<a href="/Articles/1072895/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ghodgkins" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1072895" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAICT, PLP only protects the data in the volatile caches on the SSD itself, behind the interface it presents to the rest of the system. So it would not affect how the kernel manages its in-memory copy of the data.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1060996"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2026 12:39 UTC (Tue)
+                               by <b>danielkza</b> (subscriber, #66161)
+                              [<a href="/Articles/1060996/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="danielkza" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1060996" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Writethrough behaviour sounds quite useful in general, file managers coudld leverage it when copying data to removable devices, eliminating the surprising occurence of a very fast file copy followed by a device eject taking minutes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060996/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060998"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2026 13:03 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1060998/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1060998" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you are using io_uring or another asynchronous API, where you request a write and get notified of its completion later, I would say that writethrough should arguably be the default.  But you might want to get two separate notifications: the first for "the data has hit the cache and is now visible to read queries", the second for "the data has been written to disk".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060998/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1061074"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2026 16:10 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1061074/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061074" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      There's three notifications the kernel could give you:
+<ol>
+<li>The data is visible to other readers, but not necessarily the storage device.
+<li>The data is in the storage device's volatile cache, but not necessarily persistent.
+<li>The device reports that the data has been persisted to the long-term storage medium, and absent a hardware issue, will be safe after a system restart.
+</ol>
+<p>The problem is that the second notification is not normally a lot more valuable than the first (they both mean "your data is not yet safe, but is visible to other readers", just with different values of "not yet safe"), while the third is costly (either you flush caches to convert "in the storage device's volatile cache" into "persisted", or you use a more expensive "forced unit access" write command, and prevent the device from doing its normal reordering optimizations on writes).
+<p>It's thus best for performance if you have to choose which notification of the three you get up-front, and accept the cost of asking for the "data is persisted" notification if you've chosen that one. It could, for example, be worth accepting the increased cost because you're writing to a USB 2.0 attached flash drive, and the resulting extra cost is minimal as compared to the cost of the write itself, and well worth it to avoid a long delay when the write is finished as the device becomes safe to remove, or it might be not worth the extra cost because you're writing to NVME storage, and the user won't remove it.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061074/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1061187"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2026 10:34 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1061187/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061187" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Technically there could also be more layers, e.g. if you have a RAID controller with its own cache or some sort of system where NVMe disks cache data from rotating ones.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061187/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1061191"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2026 12:54 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1061191/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061191" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Even with more layers, the interesting notifications remain similar - they're telling you how big a failure is needed to lose your data. The interesting states are "any failure", "only a failure in the storage subsystem, but one that's quite likely to happen" and "only unlikely failures that we try to engineer out of the system completely".
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061191/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1061392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 5, 2026 13:11 UTC (Thu)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1061392/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061392" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+True, my point was more that you probably don't want to bake assumptions about current storage architectures into the long-lived FS API.<br>
+<p>
+Other reasons for more layers with messy properties might include network filesystems which might have local cached storage in case of network failure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1061393"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 5, 2026 13:56 UTC (Thu)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1061393/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061393" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Yep - you want to base the notifications on what's interesting to the application, not on the current layering; one for "other readers will see the write" (obvious), one for "this system can crash without losing data, but if the storage stack crashes, you may lose data" (there are commit protocols where this is the point at which you can tentatively acknowledge the write), and one for "data should not be lost even if everything crashes" (since this is the final state for all writes) are still probably the interesting three, no matter how complicated you make the underlying layers.
+<p>I can also see some room for splitting the first into two: "other readers on this system" and "other readers with access to this storage stack" - but again, the point has to be "what is interesting to the application about this state", as opposed to "what states do I know about?", with "what states do I know about?" only being useful for preventing you offering notifications you can't provide at a sensible cost.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061393/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1061985"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How much would it cost for every NVMe drive to have a non-volatile cache?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2026 21:24 UTC (Sun)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1061985/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061985" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If NVMe drives were required to have non-volatile caches, how much would it add to the BOM cost?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061985/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062136"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How much would it cost for every NVMe drive to have a non-volatile cache?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2026 14:55 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1062136/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1062136" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      What difference does it make? The notifications (in kernel caches, sent to device but not yet guaranteed on non-volatile storage, guaranteed as safe as the device can make it) are the same whether the cache is volatile, or non-volatile.
+<p>And the BOM cost for being able to save the volatile cache to non-volatile store is not small - maybe $10 for the capacitance to power the DRAM, flash and MCU until the cache is saved, plus however much extra flash you need so that you have a "safe space" to write the volatile cache to. You can't just make the device only have non-volatile cache, because the performance characteristics of non-volatile memory aren't what you need when you're doing things like "read 1 MiB from the main flash, replace 4 KiB with this new change, write 1 MiB to a new location, mark the original 1 MiB as safe to erase".
+<p>Note, too, that depending on the NVMe design, a write in non-volatile cache may not be considered "safe", because the chances of the non-volatile cache being corrupted are too high. At least one device I've looked at with non-volatile cache has a clear statement that the non-volatile cache is only safe during a commanded shutdown of the device, and not a power loss event, because the microcontroller may scribble over non-volatile cache during power loss.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062136/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062144"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How much would it cost for every NVMe drive to have a non-volatile cache?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2026 16:20 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1062144/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1062144" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; You can't just make the device only have non-volatile cache, because the performance characteristics of non-volatile memory aren't what you need when you're doing things like "read 1 MiB from the main flash, replace 4 KiB with this new change, write 1 MiB to a new location, mark the original 1 MiB as safe to erase".</span><br>
+<p>
+Did NVRAM use to be 4KiB blocks? Can you still get it?<br>
+<p>
+Okay, I don't know the cost implications, but couldn't you write your 4K updates to a 4K NVRAM cache, and then use normal DRAM as your cache for actually doing your "read 1MiB in, update 4K, write 1 MiB out"? And then you just need to be able to flush your incoming data to the 4K NVRAM on a power fail, which is an easier problem than flushing everything to the permanent backing store?<br>
+<p>
+(And have a "here is a 1MiB write" command, so if the OS is streaming data to disk it can still send data in chunks that match the NVMe block size for efficiency).<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062144/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How much would it cost for every NVMe drive to have a non-volatile cache?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2026 16:32 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1062145/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1062145" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      You can get various forms of flash with different block sizes; the smaller the blocks, the more expensive it becomes per byte, and the faster you want it, the more expensive it gets.
+<p>But the problem is that you don't have just 4K of updates at a time to handle - a high performance NVMe drive is handling gigabytes of unwritten data in its volatile cache, and having gigabytes of very fast flash is expensive, as compared to gigabytes of RAM, gigabytes of reasonably fast flash, and a supercapacitor to let you flush the RAM to the fast flash before you lose power completely. However, even that's going to be significant - doing it with pSLC flash will add maybe $30 to your $100/TiB NVMe SSD, more if you want a bigger cache (useful for performance).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1061352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2026 19:06 UTC (Wed)
+                               by <b>TheJH</b> (subscriber, #101155)
+                              [<a href="/Articles/1061352/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="TheJH" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061352" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+though such a file manager could also, after finishing a copy operation, fsync() all the copied files, or if that's too much, syncfs() the entire filesystem, before indicating to the user that the operation has completed...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1061355"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other use cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2026 20:11 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1061355/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061355" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Ideally, though, the file manager wants to report progress to the user - which means that you want notifications for fsync progress, not just write progress. That pushes you in the direction of <tt>sync_file_range</tt>, too - you'd end up submitting a series of <tt>sync_file_range(fd, offset, len, SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER)</tt> operations to get you progress, then an <tt>fsync</tt> to sync the file metadata, then either a <tt>syncfs</tt> or a set of <tt>fsync</tt>s on directories to ensure that the file is safely on disk.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061355/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1061110"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Related thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2026 20:33 UTC (Tue)
+                               by <b>IanKelling</b> (subscriber, #89418)
+                              [<a href="/Articles/1061110/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="IanKelling" />
+                <input type="hidden" name="return" value="/Articles/1060063/#CommAnchor1061110" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Lately, I've done some learning about different filesystems and found LWN articles to be immensely valuable. In this area, it is really filling a hole, please keep it up.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061110/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

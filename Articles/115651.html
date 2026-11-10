@@ -1,0 +1,202 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>ioctl(), the big kernel lock, and 32-bit compatibility [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="ioctl(), the big kernel lock, and 32-bit compatibility">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Despite efforts to remove the big kernel lock (BKL) from the 2.6 kernel, it still covers large  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/114991/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>ioctl(), the big kernel lock, and 32-bit compatibility</h1>
+<div class="Byline">[Posted December 15, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Despite efforts to remove the big kernel lock (BKL) from the 2.6 kernel, it
+still covers large amounts of code.  Much of that code is implementations
+of the <tt>ioctl()</tt> method in device drivers and filesystems throughout
+the kernel.  A poorly-implemented <tt>ioctl()</tt> method can block other
+processors for some time, wasting CPU time and creating high latencies.
+Fixing <tt>ioctl()</tt>'s BKL use has been on the "to do" list for some
+time, but nobody has dived in to get the job done.
+<p>
+
+Mike Werner has recently taken a step in that direction, however, with <a
+href="/Articles/114637/">this patch</a> which aims to make it easy to wean
+driver <tt>ioctl()</tt> methods off the BKL one at a time.  To that end, it
+creates a new method in the <tt>file_operations</tt> structure:
+<p>
+<pre>
+    int (*unlocked_ioctl) (struct inode *inode, struct file *file, 
+                           unsigned int cmd, unsigned long arg);
+</pre>
+<p>
+This method behaves just like one would expect: if it is non-<tt>NULL</tt>,
+it will be called in preference to the regular <tt>ioctl()</tt> method, and
+the BKL will not be taken for that call.  New drivers can be written to use this method,
+and the <tt>ioctl()</tt> methods of old drivers can be shifted over once
+they are known to be safe to call without the BKL.
+<p>
+
+This is a different approach than was taken to get the BKL out of
+<tt>lseek()</tt> methods.  In that case, the interface was changed by
+decree, and <tt>lseek()</tt> was called without the BKL.  First, however,
+every in-tree <tt>lseek()</tt> method was enhanced with an explicit
+<tt>lock_kernel()</tt> call of its own.  As a result, those methods still
+executed with the BKL held, but the taking of the BKL was made explicit and
+put into a place where it could be removed when it was no longer needed.
+A typical <tt>ioctl()</tt> method can be more complicated than most
+<tt>lseek()</tt> methods, however, so the creation of a new method must
+seem like the easier approach this time around.
+<p>
+
+One commenter has suggested that the new method should not include the
+<tt>inode</tt> argument, since it is trivially obtained from the
+<tt>file</tt> structure anyway.  The version of this patch which was merged
+into 2.6.10-rc3-mm1 retains that argument, however.
+
+<p>
+
+Meanwhile, Michael Tsirkin has posted <a href="/Articles/115751/">a
+different <tt>ioctl()</tt> patch</a> which, while it provides a non-BKL
+migration path for that method, also solves another problem.  One of the
+biggest challenges in writing portable <tt>ioctl()</tt> methods is dealing
+with 32-bit compatibility on 64-bit systems.  When user space is running in
+32-bit mode, it will have a different view of any structures passed into
+<tt>ioctl()</tt>, and the kernel must translate the 32-bit versions into
+something it can work with.
+<p>
+
+The kernel provides some help with this translation in the form of a function called
+<tt>register_ioctl32_conversion()</tt>:
+<p>
+<pre>
+    typedef int (*ioctl_trans_handler_t)(unsigned int, unsigned int,
+                                         unsigned long, struct file *);
+    int register_ioctl32_conversion(unsigned int cmd, 
+                                    ioctl_trans_handler_t handler)
+</pre>
+<p>
+
+After this call, any 32-bit <tt>ioctl()</tt> call using the given
+<tt>cmd</tt> will be passed to the <tt>handler</tt> function, which,
+presumably, knows how to deal with it.  This mechanism works, but it has a
+few shortcomings.  It relies on a global space for <tt>ioctl()</tt> command
+codes, for example.  Every command is <i>supposed</i> to be unique, but
+things do not always happen that way - especially with out-of-tree
+drivers.  The use of a hash table to look up handler functions slows things
+down a bit.  And, as <a href="/Articles/115753/">Andi Kleen pointed
+out recently</a>, the current mechanism suffers from race conditions which appear to
+be unfixable without changing the interface.
+<p>
+
+But, if you're going to change the interface, you might as well do it
+right.  So Michael's patch adds two new <tt>ioctl()</tt> methods to the
+<tt>file_operations</tt> structure.  The <tt>ioctl_native()</tt> method
+handles calls made from user-space processes which are using the same
+architecture model as the kernel, while <tt>ioctl_compat()</tt> is called
+in cases where the two differ.  With this approach, the global table of
+commands can be eliminated, and its problems go away as well.  Since the
+new <tt>ioctl_compat()</tt> method is invoked directly from the
+<tt>file_operations</tt> structure, it is easy to manage the module
+reference count to avoid unload races. 
+<p>
+
+Oh, and the kernel does not acquire the big kernel lock before calling
+either of the new methods; they are expected to be implemented with proper
+locking from the beginning.
+<p>
+
+Michael's patch seems to solve all of the problems addressed by the
+<tt>unlocked_ioctl()</tt> approach, plus a few more.  The debate has not
+yet begun, but it would not be surprising to see the two new methods win
+out in the end.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Big kernel lock</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">ioctl()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/115651/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor117499"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Time to put ioctl() to rest...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 2, 2005 0:09 UTC (Sun)
+                               by <b>Zarathustra</b> (guest, #26443)
+                              [<a href="/Articles/117499/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Zarathustra" />
+                <input type="hidden" name="return" value="/Articles/115651/#CommAnchor117499" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Isn't ioctl() burial some 20 years overdue?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/117499/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

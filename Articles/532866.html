@@ -1,0 +1,254 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Deadlocking the system with asynchronous functions [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Deadlocking the system with asynchronous functions">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Deadlocks in the kernel are a relatively rare occurrence in recent years. The credit largely be [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/532269/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Deadlocking the system with asynchronous functions</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 16, 2013</br>
+           </div>
+Deadlocks in the kernel are a relatively rare occurrence in recent years.
+The credit largely belongs to the "<a href="/Articles/185666/">lockdep</a>"
+subsystem, which watches 
+locking activity and points out patterns that could lead to deadlocks when
+the timing goes wrong.  But locking is not the source of all deadlock
+problems, as was recently shown by an old deadlock bug which was only
+recently found and fixed.
+<p>
+In early January, Alex Riesen <a href="/Articles/532868/">reported</a> some
+difficulties with USB devices on recent kernels; among other things, it was
+easy to simply lock up the system altogether.  A fair amount of discussion
+followed before Ming Lei <a href="/Articles/532869/">identified</a> the
+problem.  It comes down to the block layer's use of the <a
+href="../314808/index.html">asynchronous function call infrastructure</a> used
+to increase parallelism in the kernel.
+<p>
+The asynchronous code is relatively simple in concept: a function that is to be run
+asynchronously can be called via <tt>async_schedule()</tt>; it will then
+run in its own thread at some future time.  There are various ways of
+waiting until asynchronously called functions have completed; the most
+thorough is <tt>async_synchronize_full()</tt>, which waits until all
+outstanding asynchronous function calls anywhere in the kernel have
+completed.  There are ways of 
+waiting for specific functions to complete, but, if the caller does not
+know how many asynchronous function calls may be outstanding,
+<tt>async_synchronize_full()</tt> is the only way to be sure that they are
+all done.
+<p>
+The block layer in the kernel makes use of I/O schedulers to organize and
+optimize I/O operations.  There are several I/O schedulers available; they
+can be switched at run time and can be loaded as modules.  When the block
+layer finds that it needs an I/O scheduler that is not currently present in
+the system, it will call <tt>request_module()</tt> to ask user space to
+load it.  The module loader, in turn, will call
+<tt>async_synchronize_full()</tt> at the end of the loading process; it
+needs to ensure that any asynchronous functions called by the newly loaded
+module have completed so that the module will be fully ready by the time
+control returns to user space.
+<p>
+So far so good, but there is a catch.  When a new block device is
+discovered, the block layer will do its initial work (partition probing and
+such) in an asynchronous function of its own.  That work requires
+performing I/O to the device; that in turn, requires an I/O scheduler.  So
+the block layer may well call <tt>request_module()</tt> from code that is
+already running as an asynchronous function.  And that is where things turn
+bad.
+<p>
+The problem is that the (asynchronous) block code must wait for
+<tt>request_module()</tt> to complete before it can continue with its
+work.  As described above, the module loading process involves a call to
+<tt>async_synchronize_full()</tt>.  That call will wait for <i>all</i>
+asynchronous functions, including the one that called
+<tt>request_module()</tt> in the first place, and which is still waiting
+for <tt>request_module()</tt> to complete.  Expressed more concisely, the
+sequence looks like this:
+<p>
+<ol>
+
+<li> <tt>sd_probe()</tt> calls <tt>async_schedule()</tt> to scan a device
+     asynchronously.
+<p>
+<li> The scanning process tries to read data from the device.
+<p>
+<li> The block layer realizes it needs an I/O scheduler, so, in
+     <tt>elevator_get()</tt>, it calls <tt>request_module()</tt> to load
+     the relevant kernel module.
+<p>
+<li> The module is loaded and initializes itself.
+<p>
+<li> <tt>do_module_init()</tt> calls <tt>async_synchronize_full()</tt> to
+     wait for any asynchronous functions called by the just-loaded module.
+<p>
+<li> <tt>async_synchronize_full()</tt> waits for all asynchronous
+     functions, including the one
+     called back in step&nbsp;1, which is waiting for the
+     <tt>async_synchronize_full()</tt> call to complete.
+</ol>
+<p>
+That, of course, is a classic
+deadlock.
+<p>
+Fixing that deadlock turns out not to be as easy as one would like.  Ming suggested
+that the call to <tt>async_synchronize_full()</tt> in the module loader
+should just be removed, and that user space should be taught that devices
+might not be ready immediately when the <tt>modprobe</tt> binary
+completes.  Linus <a href="/Articles/532836/">was not impressed</a> with
+this approach, however, and it was quickly discarded.
+<p>
+The optimal solution would be for the module loader to wait only for
+asynchronous functions that were called by the loaded module itself.  But
+the kernel does not currently have the infrastructure to allow that to
+happen; adding it as an urgent bug fix is not really an option.  So
+something else needed to be worked out.  To that end, Tejun Heo was brought
+into the discussion and asked to help come up with a solution.  Tejun
+originally <a href="/Articles/532870/">thought</a> that the problem could
+be solved by detecting deadlock situations and proceeding without waiting
+in that case, but the problem of figuring out when it would be safe to
+proceed turned out not to be tractable.
+<p>
+The <a href="/Articles/532871/">solution</a> that emerged instead is
+regarded as a bit of a hack by just about everybody involved.  Tejun added
+a new process flag (<tt>PF_USED_ASYNC</tt>) to mark when a process has
+called asynchronous functions.  The module loader then tests this flag; if
+no asynchronous functions are called as the module is loaded, the call to
+<tt>async_synchronize_full()</tt> is skipped.  Since the I/O scheduler
+modules make no such calls, that check avoids the deadlock in this
+particular case.  Obviously, the problem remains in any case where an
+asynchronously-loaded module calls asynchronous functions of its own, but
+no other such cases have come to light at the moment.  So it seems like a
+workable solution.
+<p>
+Even so, Tejun remarked "<q>It makes me feel dirty but makes the problem
+go away and I can't think of anything better</q>".  The patch has <a
+href="http://git.kernel.org/linus/774a1221e862b343388347bac9b318767336b20b">found
+its way into the mainline</a> and will be present in the 3.8 final
+release.  By then, though, it would not be entirely surprising if somebody
+else were to take up the task of finding a more elegant solution for a
+future development cycle.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Asynchronous function calls</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/532866/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor533354"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Warning: user space programmer opinion ahead!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2013 6:29 UTC (Sun)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/533354/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Fowl" />
+                <input type="hidden" name="return" value="/Articles/532866/#CommAnchor533354" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>The whole existence of <code>async_synchronize_full()</code> seems like a hack to me - a new "BKL" even. You should only be synchronizing on the tasks that you actually created/depend on - this performs better and makes deadlocks much easier to detect. Either module loading is asynchronous or it isn't. <code>request_module()</code> should block until the module is actually loaded/inited, or return something that can be waited upon/polled. (maybe call it <code>request_module_async()</code>?).</p>
+
+<p>Many languages/libraries have this kind of async handling as "tasks", "futures" or "promises" - maybe the kernel needs a more fully fleshed out framework for these kind of operations, which are only going to get more common.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/533354/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor533978"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deadlocking the system with asynchronous functions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2013 0:21 UTC (Fri)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/533978/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/532866/#CommAnchor533978" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel should always have an IO scheduler/elevator_type available, should it not? Kconfig logic ensures the "noop" scheduler from noop-iosched.c is always there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/533978/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

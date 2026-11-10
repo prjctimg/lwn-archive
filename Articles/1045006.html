@@ -1,0 +1,1030 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The intersection of unstable pages and direct I/O [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The intersection of unstable pages and direct I/O">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Longtime LWN readers will have encountered the concept of 'stable pages' before; it was first c [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1045244/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The intersection of unstable pages and direct I/O</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 12, 2025</br>
+           </div>
+Longtime LWN readers will have encountered the concept of "stable pages"
+before; it was first <a href="../429295/index.html">covered here</a> nearly
+15&nbsp;years ago.  For the most part, the problem that stable pages were
+meant to solve — preventing errors when user space modifies a buffer that
+is under <span class="nobreak">I/O</span> — has been dealt with.  But
+recent discussions show that there is one area where problems remain:
+direct <span class="nobreak">I/O</span>.  There is some disagreement,
+though, over whether those problems are the result of user-space bugs and
+how much of a performance price should be paid to address them.
+
+<P>
+Writing a page of data to a block storage device takes time.  If a process
+tells the kernel to perform a write, some time will thus pass before the
+operation is complete.  Should that process modify the under-<span
+class="nobreak">I/O</span> data while it is being written, the result is a
+sort of data race with the usual unpredictable results.  Either the old or
+the new data could end up being written; in the worst case, a combination
+of the old and new data could be written, corrupting the file.
+<p>
+In simple cases, this behavior is less of a problem than it seems; if the
+application is modifying the pages under <span class="nobreak">I/O</span>,
+it is likely to write them to persistent storage another time, and the end
+result will be as it should be.  But if, for example, the filesystem is
+writing checksums alongside the data, changing the data partway through can
+cause the resulting checksum to not match.  Other types of processing
+during <span class="nobreak">I/O</span>, such as transparent compression or
+a RAID implementation, can run into the same sort of trouble.  In these
+cases, a badly timed change to a page under <span
+class="nobreak">I/O</span> can lead to <span class="nobreak">I/O</span>
+errors or data corruption.
+<p>
+The solution to this problem usually takes the form of stable pages — a
+guarantee made by the kernel that data will not be changed while it is
+under <span class="nobreak">I/O</span>.  Stability can be achieved by, for
+example, simply delaying any attempts to modify the data until the <span
+class="nobreak">I/O</span> operation is complete.  For buffered <span
+class="nobreak">I/O</span>, where data is copied through the page cache,
+implementing this approach is relatively straightforward, and was done
+years ago.  Delaying memory access can
+reduce performance, though, so it is usually only done when there is a
+clear need.
+<p>
+Direct <span class="nobreak">I/O</span>, however, is a special case.  When
+a process requests direct <span class="nobreak">I/O</span>, it wants to
+transfer data directly between its buffers and the underlying storage
+device without going through the page cache.  Since stable pages are tied
+to the page cache, direct <span class="nobreak">I/O</span> operations
+cannot use them.  Direct <span class="nobreak">I/O</span> is a relatively
+advanced, low-level operation, where applications take charge of their own
+buffer management, so problems from concurrent data changes have generally
+not been seen.  Increasingly, though, there is interest in using direct
+<span class="nobreak">I/O</span> in conjunction with filesystem-integrity
+features, or with hardware features like the <a
+href="https://en.wikipedia.org/wiki/Data_Integrity_Field">data integrity
+field</a> (also known as "protection information" or "PI"), which provides
+end-to-end checksum protection.
+<p>
+In May 2025, Qu Wenruo posted <a
+href="/ml/all/54c7002136a047b7140c36478200a89e39d6bd04.1746687932.git.wqu@suse.com">a
+patch</a> describing problems that come about when user space performs
+direct <span class="nobreak">I/O</span> to a Btrfs filesystem with
+checksums enabled, then modifies its buffers while the <span
+class="nobreak">I/O</span> is underway.  As described above, that can
+create checksum errors.  Evidently, QEMU can be configured to use direct
+<span class="nobreak">I/O</span> and is prone to just this kind of failure.
+The solution that was adopted (and <a
+href="https://git.kernel.org/linus/968f19c5b1b7">merged for 6.15</a>), is
+to simply fall back to buffered <span class="nobreak">I/O</span> on
+filesystems where checksums are in use.  That solves the problem, but at a
+heavy cost; direct <span class="nobreak">I/O</span> is now simply
+incompatible with checksums on Btrfs filesystems, and applications that
+depend on direct <span class="nobreak">I/O</span> for performance will be
+slowed down accordingly.  There is <a
+href="/ml/all/aa09b68f159fb0de4864de151eeba9250f2e34fd.1758840406.git.wqu@suse.com">a
+similar patch</a> under consideration to fall back to buffered <span
+class="nobreak">I/O</span> for reads as well, since concurrent
+modifications to the buffer being read into can cause checksum failures.
+<p>
+The Btrfs change was applied without much fanfare; Christoph Hellwig's <a
+href="/ml/all/20251029071537.1127397-1-hch@lst.de">patch</a> adding a
+similar fallback to XFS attracted rather more attention.  XFS does not
+support data checksums like Btrfs does, but block devices can perform their
+own checksumming; they need stable pages to do that work successfully.  As
+already noted, stable pages don't work with direct <span
+class="nobreak">I/O</span> so, in cases where the underlying block device
+requires stable pages, Hellwig's patch causes XFS to fall back to buffered
+<span class="nobreak">I/O</span> even when direct <span
+class="nobreak">I/O</span> has been requested.  He expressed unhappiness
+about the resulting performance penalty, and suggested a few ways for
+"<q>applications that know what they are doing</q>" to disable this
+fallback.
+<p>
+Bart Van Assche had <a
+href="/ml/all/ea07dede-5baa-41e5-ad5d-a9f6a90ac6e8@gmail.com">an
+alternative suggestion</a>: "<q>only fall back to buffered <span
+class="nobreak">I/O</span> for buggy software that modifies direct <span
+class="nobreak">I/O</span> buffers before <span class="nobreak">I/O</span>
+has completed</q>".  Dave Chinner also <a
+href="/ml/all/aQNJ4iQ8vOiBQEW2@dread.disaster.area">questioned</a> the
+patch, also suggesting that buffered <span class="nobreak">I/O</span>
+should only be forced for applications that are "<q>known to corrupt stable
+page based block devices</q>", of which he suspected there are relatively
+few.  Geoff Beck <a
+href="/ml/all/5ac7fb86-07a2-4fc6-959e-524ff54afebf@demonlair.co.uk">suggested</a>
+setting the page permissions to prevent changes to memory while it is under
+direct <span class="nobreak">I/O</span>.
+<p>
+Hellwig's responses to those suggestions highlight the core of the
+disagreement around this topic.  Is changing a buffer that is under <span
+class="nobreak">I/O</span> an acceptable thing for an application to do?
+Hellwig repeatedly <a
+href="/ml/all/20251029163338.GA26985@lst.de">insisted</a> that it is indeed
+acceptable: "<q>Given that we never claimed that you can't modify the
+buffer I would not call it buggy, even if the behavior is unfortunate</q>".
+Concurrent modification works in many cases, he <a
+href="/ml/all/20251030143550.GB31550@lst.de">said</a>; his objective is to
+make it work in the remaining cases, even at the cost of severely reduced
+I/O performance.
+<p>
+Chinner, instead, was <a
+href="/ml/all/aQPyVtkvTg4W1nyz@dread.disaster.area">adamant</a> that the
+kernel should not try to support applications that perform this sort of
+modification:
+<p>
+<blockquote class="bq">
+	Remember: O_DIRECT means the application takes full responsibility
+	for ensuring IO concurrency semantics are correctly implemented.
+	Modifying IO buffers whilst the IO buffer is being read from or
+	written to by the hardware has always been an IO concurrency bug in
+	the application.
+<p>
+	The behaviour being talked about here is, and always has been, an
+	application IO concurrency bug, regardless of PI, stable writes,
+	etc. Such an application bug existing is *not a valid reason for
+	the kernel or filesystem to disable Direct IO*.
+</blockquote>
+<p>
+Hellwig, though, <a
+href="/ml/all/20251031130050.GA15719@lst.de">reiterated</a> that the kernel
+has never documented any requirement that buffers be untouched while under
+direct <span class="nobreak">I/O</span>: "<q>We can't just make that up 20+
+years later</q>".  He also said that, on RAID devices, modifying the data
+being written could corrupt an entire stripe, with possible effects on data
+unrelated to the offending application.  At that point, he said, it becomes
+a kernel bug that could let malicious users corrupt others' data.  Jan Kara
+<a
+href="/ml/all/kpk2od2fuqofdoneqse2l3gvn7wbqx3y4vckmnvl6gc2jcaw4m@hsxqmxshckpj">said</a>
+that he agreed that concurrent modification of <span
+class="nobreak">I/O</span> buffers is an application bug, but he added that
+the kernel needs to do something about the problem anyway.
+<p>
+Darrick Wong, addressing specifically the PI case where the hardware
+verifies checksums provided by the software, <a
+href="/ml/all/20251104233824.GO196370@frogsfrogsfrogs">observed</a> that,
+in most cases, applications will be unable to corrupt their own data by
+modifying buffers under direct <span class="nobreak">I/O</span> without
+the corruption being detected by the hardware.  In those
+cases, there is no need to fall back to buffered <span
+class="nobreak">I/O</span>.  The RAID case is worse, though, and must be
+prevented.  Wong suggested adding a new block-device attribute (with the
+name "<q><tt>mutation_blast_radius</tt></q>") describing how serious a
+concurrent modification would be and only falling back in the most serious
+cases.  As Hellwig <a href="/ml/all/20251105141130.GB22325@lst.de">pointed
+out</a>, though, that solution only addresses the PI case, and would cause
+QEMU to fail.
+<p>
+
+While no firm conclusions were reached in this conversation, it seems clear
+that, regardless of how one views the behavior of applications that modify
+data that is under <span class="nobreak">I/O</span>, the kernel probably
+needs to do something to prevent, at a minimum, the worst problems.  The real
+question will be whether it will be possible to provide a way for
+well-behaved applications to avoid the extra overhead of buffered <span
+class="nobreak">I/O</span> without creating opportunities for malicious
+actors.  It may turn out that, in the end, some types of storage device
+will simply not be usable in the direct-I/O mode.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Block layer/Direct I/O</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Data integrity</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Stable pages</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1045006/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1046207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Corner case</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 16:35 UTC (Wed)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/1046207/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="abatters" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046207" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I use a lot of direct I/O code that writes to a raw partition (e.g. /dev/sdb1).  One interesting corner case is if you have a single page involved in two non-overlapping direct I/Os simultaneously at different offsets.  The I/Os won't conflict with each other logically, but if they add these restrictions, the kernel may incorrectly detect a conflict based on page granularity.<br>
+<p>
+Example:<br>
+4k buffer (one page)<br>
+write #1: 2k @ offset 0  written to sector 100<br>
+write #2: 2k @ offset 2k written to sector 200<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046212"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Corner case</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 17:42 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1046212/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046212" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      My understanding is that your corner case as shown would not trigger conflict detection, because the buffer is not changed by the write. The problem would come with two reads to different parts of the same page (at sector alignment, on a system where sectors are smaller than pages), where page granularity would detect two places changing the same page.
+<p>This is a fixable problem if it's a common false positive - once page granularity detection says "two direct I/O reads to same page", you'd add in a check for overlap there.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046212/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1046233"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Corner case</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 20:02 UTC (Wed)
+                               by <b>kreijack</b> (guest, #43513)
+                              [<a href="/Articles/1046233/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kreijack" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046233" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; One interesting corner case is if you have a single page involved in two non-overlapping direct I/Os simultaneously at different offsets. The I/Os won't conflict with each other logically, but if they add these restrictions, the kernel may incorrectly detect a conflict based on page granularity.</span><br>
+<p>
+My be that I am misunderstanding something, but direct-I/O have some requirements. One of these is that the read/write size shall be multiple of the page size, and the offset must be multiple of the page size. So under direct-io is not possible to update a portion of a page, because you have to write (at least) the full-page.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046233/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046246"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Corner case</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 20:20 UTC (Wed)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/1046246/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="abatters" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046246" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The alignment requirements have been relaxed over the years.  See the O_DIRECT section under:<br>
+<p>
+<a href="https://www.man7.org/linux/man-pages/man2/open.2.html#NOTES">https://www.man7.org/linux/man-pages/man2/open.2.html#NOTES</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046246/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1046247"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Corner case</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 20:23 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046247/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046247" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's important to note that there are different alignment requirements for the buffer - "dma alignment" - and the file offset, and they both have to be checked for (via statx).<br>
+<p>
+We recently ran into an application (rocksdb) that didn't work on bcachefs in largebs mode because of this - it was only checking dma alignment, not offset.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046247/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1046218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 17:41 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046218/">Link</a>] (15 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046218" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+you just _bounce_ - drastically cheaper, especially considering that if you're checksumming you're touching the buffer anyways<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 18:59 UTC (Wed)
+                               by <b>nickodell</b> (subscriber, #125165)
+                              [<a href="/Articles/1046225/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nickodell" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046225" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could you clarify why this is better than going through the page cache?<br>
+<p>
+Hellwig's initial patch says<br>
+<p>
+<span class="QuotedText">&gt;This series tries to address this by falling back to uncached buffered I/O.  Given that this requires an extra copy it is usually going to be a slow down, especially for very high bandwith use cases, so I'm not exactly happy about.</span><br>
+<p>
+I assume the bounce buffer also requires an additional copy, so what makes it faster than the approach here?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 19:26 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046229/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046229" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Buffered IO is only fast when IO is mostly staying in cache. When it's not it's _significantly_ slower; you incur all the overhead of walking and managing the page cache radix tree, backround eviction, background writeback - doing all that stuff asynchronously is significantly more constantly when you're not amortizing it by letting things stay in cache.<br>
+<p>
+O_DIRECT tends to be used where the application knows the pagecache is not going to be useful - ignoring what the application communicated and using buffered IO is a massive behavioral change and just not a good idea.<br>
+<p>
+If you just bounce IOs, the only extra overhead you're paying for is allocating/freeing bounce buffers (generally quite fast, thanks to percpu freelists), and the memcpy - which, as I mentioned, is noise when we're already touching the data to checksum.<br>
+<p>
+And you only have to pay for that on writes. Reads can be normal zero copy O_DIRECT reads: if you get a checksum error, and the buffer is mapped to userspace (i.e. might have been scribbled over), you retry it with a bounce buffer before treating it like a "real" checksum error.<br>
+<p>
+(This is all what bcachefs has done for years).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046248"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 21:05 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1046248/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046248" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wasn't that benchmarked a few years back? Somebody disabled caching on file copies, and especially with larger files the uncached copy was maybe ten times faster?<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046248/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1046230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 19:28 UTC (Wed)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/1046230/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Paf" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046230" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At least for small pages, much of the cost of using the page cache is actually in setup, insertion, and removal from the cache, *not* in memory allocation or data copying.  Depending on the use case and hardware, simple bounce buffers can be *much* faster.  And they can be done in parallel across many threads without conflicting on the tree locking for the page cache. (Even a read is a tree insert unless the data is already present.)<br>
+<p>
+But this becomes proportionally less true with large folios though, probably to the point of not really true for larger sizes, since the overhead is spread over much more data.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 19:36 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046235/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046235" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IOPs keep going up, though. Forcing everything through the buffered IO paths is just crippling.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1046234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 19:35 UTC (Wed)
+                               by <b>quwenruo_suse</b> (subscriber, #124148)
+                              [<a href="/Articles/1046234/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quwenruo_suse" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046234" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I doubt. As I tried both, bouncing and falling back to buffered IO on btrfs, no observable difference.<br>
+<p>
+The huge performance drop in my previous observations is caused by unoptimized checksum implementation (kvm64 has no hardware accelerated CRC32C).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046239"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 19:57 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046239/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046239" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+and you thought that test would be representative...?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046239/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046396"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 13, 2025 20:22 UTC (Thu)
+                               by <b>quwenruo_suse</b> (subscriber, #124148)
+                              [<a href="/Articles/1046396/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quwenruo_suse" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046396" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Then please give some representive test result.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046396/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 10:52 UTC (Fri)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046440/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046440" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, I wrote a filesystem that gets this right. You guys are going to have users yelling at you over this.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1046547"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 18:26 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1046547/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046547" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I mentioned it earlier. Dunno where it is, but there are benchmarks saying the performance improvement for the (not uncommon) case of "read, use, throw away" are orders of magnitude, not percentage points, when you switch to unbuffered IO.<br>
+<p>
+Equally, I guess you get exactly the same improvement with "write to storage, forget". And those two are probably 90% of the usage of a small media server - a not uncommon use case. Likewise backup servers - and backing up is often very time sensitive ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046547/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046558"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 21:01 UTC (Fri)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/1046558/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="excors" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046558" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think a vague memory of a benchmark is not really a useful substitute for an actual benchmark.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046558/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046561"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 23:33 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1046561/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046561" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Unfortunately it is just a memory. But it's out there somewhere, and I strongly suspect that "somewhere" is on LWN.<br>
+<p>
+And it was something like modifying cp to use unbuffered IO, and it was orders of magnitude. Pretty simple benchmark to repeat? You just need to make sure that if you ask for direct io, that's what you're getting.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046561/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1046564"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2025 4:08 UTC (Sat)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046564/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046564" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Relative performance at at least a gross level of the basic IO paths is something you should just know - or find out the first time it comes up - if you're serious about filesystem development; it's like knowing relative performance of different levels of the cache hierarchy in any other systems programming.<br>
+<p>
+If you're doing serious performance work you also should know things like the effects of atomics and barriers on performance (not immediately obvious in a profile!) and when and how much pointer chasing hurts you (a lot, when it can't be hidden by prefetch).<br>
+<p>
+You also want to know the rates of those operations typical machines can sustain in the wild, because when you're working on IO paths you can then directly estimate things like "how much will cacheline bouncing cost me in this codepath", and that sort of thing really matters if you don't want to accidentally introduce performance regressions. But to do that, you need to be looking at realistic benchmarks at least on occasion.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046564/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1046565"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2025 5:02 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1046565/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046565" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe it's worth adding something like hash_and_copy functions to copy the data and compute the hash at the same time? Ditto for erasure coding and encryption.<br>
+<p>
+This way, there is no need for any extra operations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046565/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046581"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There's a better solution than falling back to buffered io</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2025 16:17 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1046581/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046581" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's such a good idea that it was already implemented 30 years ago<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046581/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1046572"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PI device</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2025 13:09 UTC (Sat)
+                               by <b>dud225</b> (subscriber, #114210)
+                              [<a href="/Articles/1046572/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dud225" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046572" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sorry if that's a dumb question: what does PI refer to here? When I search on Google I only find about Raspberry PI but I'l not sure that's what is meant here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046572/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046578"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PI == &quot;protection information&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2025 15:32 UTC (Sat)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1046578/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046578" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      We always try to ensure that acronyms are defined in the articles where they are used; in this case, the text is further up;
+<p>
+<blockquote>
+Increasingly, though, there is interest in using direct
+I/O in conjunction with filesystem-integrity
+features, or with hardware features like the <a href="https://en.wikipedia.org/wiki/Data_Integrity_Field">data integrity
+field</a> (also known as "protection information" or "PI"), which provides
+end-to-end checksum protection.
+</blockquote>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046578/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046588"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PI == &quot;protection information&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2025 21:53 UTC (Sat)
+                               by <b>dud225</b> (subscriber, #114210)
+                              [<a href="/Articles/1046588/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dud225" />
+                <input type="hidden" name="return" value="/Articles/1045006/#CommAnchor1046588" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah sorry I missed it. Thanks<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046588/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

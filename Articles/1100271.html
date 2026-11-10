@@ -1,0 +1,1679 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Seeking smaller kernel stacks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Seeking smaller kernel stacks">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Memory has always been a scarce resource in computing systems, but the problem seems to have wo [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Seeking smaller kernel stacks&quot;" href="https://lwn.net/headlines/1100271/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1102137/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Seeking smaller kernel stacks</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 23, 2026</br>
+           <hr>
+<a href="../../Archives/ConferenceByYear/index.html">LPC</a>
+</div>
+Memory has always been a scarce resource in computing systems, but the
+problem seems to have worsened recently.  In particular, the worldwide
+shortage of memory chips has led to a renewed focus by systems developers
+on reducing memory usage.  During the memory-management microconference at
+the 2026 <a href="https://lpc.events/">Linux Plumbers Conference</a>, Will
+Deacon discussed one specific consumer of memory that is being
+re-examined: kernel stacks.
+<p>
+On 64-bit Arm and x86 systems, each thread has its own kernel stack that
+consumes 16KB of non-pageable memory.  That may not seem like much memory,
+but some systems run with large numbers of threads; Android devices, for
+example, may host 2-3,000 system threads, and thousands more for running
+apps, adding up to 5,000 threads on an idle device.  The result can be many
+megabytes of memory tied up in kernel stacks — memory that might well be
+put to better uses.  Cloud environments have a similar problem; a data
+center can host millions of threads, leading to petabytes of memory use for
+kernel stacks over a large fleet of systems.  This memory is highly
+underutilized, but overflowing the kernel stack is fatal for the system
+involved.
+<p>
+
+<a href="/Articles/1100272/"><img
+src="../../_static/images/conf/2026/lpc/WillDeacon-sm.png" alt="[Will Deacon]"
+title="Will Deacon" class="lthumb"></a>
+
+The 16KB size appears to have been arrived at almost by chance.  When the
+64-bit Arm architecture was merged for the 3.7 release in 2012, it had an
+8KB stack; Deacon was unable to say just how that number was determined.
+In March 2013, GCC 4.8 was released with proper Arm64 support.  Shortly
+thereafter, with the 3.11 kernel release in July 2013, the kernel-stack
+size was increased to 16KB.  Again, he is not entirely sure why; he is
+unable to find any mailing-list discussion where that change was discussed.
+The <a href="https://git.kernel.org/linus/845ad05ec31e">commit</a> making
+that change says simply that the change is "<q>needed because of the
+failures encountered when running SpecWeb benchmark test</q>".
+<p>
+In the 3.16 release, the x86 architecture followed suit, justifying the
+change by saying that Arm64 had already done it.  In this case, the
+relevant <a href="https://git.kernel.org/linus/6538b8ea886e">commit</a>
+notes that "<q>the problem is exacerbated by certain gcc versions that seem
+to generate much bigger stack frames</q>".  (This change was <a
+href="/Articles/600644/">covered here</a> at the time).  In the 2016 4.5 release, the
+Arm architecture gained per-CPU interrupt stacks; that change Deacon said, may
+have resolved many stack-overflow problems by taking stack usage for
+interrupt handling off of the per-thread stacks.  The 4.14 release moved to
+<a href="/Articles/692208/">virtually mapped kernel stacks</a>, which bring
+a number of advantages but also force kernel stacks to be aligned
+to&nbsp;32KB.
+<p>
+In 2024, Pasha Tatashin <a
+href="/ml/linux-kernel/20240311164638.2015063-1-pasha.tatashin@soleen.com/">proposed</a>
+dynamic allocation of kernel stacks as a way of saving memory.  Deacon
+described the idea as "<q>scary</q>"; it implies that memory allocation can
+happen at any location in the kernel, which can lead to all kinds of
+surprises.  This idea <a
+href="/ml/linux-kernel/20260424191456.2679717-1-stevensd@google.com/">was
+resurrected</a> earlier this year, but did not gain much traction.
+<p>
+At the end of this history, we have billions of Android devices, all of
+which could benefit from more efficient use of memory.  There are vendors
+that have responded to this problem with out-of-tree dynamic-stack
+implementations, but those are hard to ship, because they cannot be
+implemented on top of the generic kernel image with <a
+href="../1098493/index.html">vendor hooks</a>.  Thus, there is even more
+interest than usual in solving this problem in the mainline kernel.
+<p>
+As an experiment, Deacon built a kernel with 8KB stacks and ran a whole set
+of tests, all of which passed — almost.  There is a memory-pressure test
+that fails with such kernels.  He has managed to crash these kernels in a
+few other ways; when that happens, direct reclaim (the kernel deciding it
+needs to reclaim memory to satisfy an allocation for some unrelated task)
+is almost always involved.  A kernel built with a 4KB stack will not boot
+at all.
+<p>
+Compilers play a role in kernel-stack usage.  GCC 4.9 added a
+<tt>--fconserve-stack</tt> option that is used by the kernel.  Clang has a
+few known problem areas; work is underway to improve them.
+<p>
+Deacon concluded by saying that there has been some recent work to try to
+address this problem.  Deacon has <a
+href="/ml/all/20260918161407.2300-1-will@kernel.org/">a patch series</a>
+creating a dedicated exception stack to take some of the pressure off the
+per-thread stacks.  <a
+href="/ml/all/20260928174122.3380703-1-smostafa@google.com/">This
+series</a> from Mostafa Saleh allows the stack size to be set on the
+kernel's command line; that makes it possible to run with 12KB stacks now.
+Suren Baghdasaryan has been working on patches to move direct reclaim to a
+dedicated worker thread; that, Deacon said, might make it possible to set
+the stack size to 8KB.  Linus Walleij has been looking at the dynamic-stack
+patches again, but worries that they can never really be made to be robust.
+And David Stevens has <a
+href="/ml/all/20260827232948.2520558-1-stevensd@google.com/">an RFC
+series</a> that allows the kernel to reclaim memory from the stacks of blocked
+tasks.
+<p>
+<!-- middle-ad -->
+Peter Zijlstra pointed out that the <a
+href="https://docs.kernel.org/admin-guide/cgroup-v1/freezer-subsystem.html">freezer</a>
+exists, and that it could be used to safely reclaim memory used for kernel
+stacks.  Matthew Wilcox said that it would be useful to have a generic
+feature in the kernel that would put the running thread onto a new stack.
+The XFS filesystem, he said, sometimes pushes work to a worker thread to
+avoid excessive stack use, but that confuses the lockdep locking checker;
+being able to cleanly switch the running thread to a new stack would be a
+lot nicer.  Zijlstra said that feature will be relatively straightforward
+to implement, on x86 systems at least.
+<p>
+Arnd Bergmann has been working on this problem as well; most stack
+overflows, he said, result from direct reclaim invoked by memory
+allocations from user context.  He has been running systems set to emit a
+warning when stack usage exceeds 1.25KB, and it works fine most of the
+time.  Rust code, which is more stack-intensive, tends to blow through that
+limit, though, and there is no stack-usage checker for that code.
+Sanitizers can also cause problems.  Zijlstra said that people running
+systems with sanitizers can deal with any problems themselves; Bergmann
+said that he agreed, but that the Android team does not.
+<p>
+Bergmann suggested simply having memory-allocation functions like
+<tt>kmalloc()</tt> hand off direct-reclaim work to a worker thread.
+Baghdasaryan answered, though, that this approach would lead to problems
+with priorities, CPU affinity, and more.  It would be simpler, he said, to
+just switch stacks.
+<p>
+At the end of the session's time, Kyril Shutsemau said that he has been
+working on systems that run with 64KB pages; on those systems, stack space
+is severely underutilized.  He was wondering whether it would be possible
+to allocate kernel stacks from the slab allocator, which would allow
+setting their size independently of the system's page size.  Deacon replied
+that the system really needs guard pages to prevent stack overruns from
+stomping on unrelated data, and the slab allocator does not provide those.
+Stack canaries are not sufficient, since they only detect overruns after
+the fact, but cannot prevent them.
+<p>
+The session ended without any clear conclusions, but it would not be
+surprising to see some sort of stack-switching mechanism posted to the
+lists in the near future.
+
+<p>
+[Thanks to the Linux Foundation, LWN's travel sponsor, for supporting my
+travel to this event.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Architectures/Arm</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Kernel stack</a></td></tr>
+            <tr><td><a href="../../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../../Archives/ConferenceIndex/index.html">Linux Plumbers Conference/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1100271/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1102580"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Stacks smaller than page size</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 17:19 UTC (Fri)
+                               by <b>Bigos</b> (subscriber, #96807)
+                              [<a href="/Articles/1102580/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Bigos" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102580" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; At the end of the session's time, Kyril Shutsemau said that he has been working on systems that run with 64KB pages; on those systems, stack space is severely underutilized. He was wondering whether it would be possible to allocate kernel stacks from the slab allocator, which would allow setting their size independently of the system's page size. Deacon replied that the system really needs guard pages to prevent stack overruns from stomping on unrelated data, and the slab allocator does not provide those. Stack canaries are not sufficient, since they only detect overruns after the fact, but cannot prevent them.</span><br>
+<p>
+I wonder if a specialized allocator could be used that allocates a 64kB page and gives the bottom 10kB for a stack and the other 54kB for generic slab usage? A guard page could be placed below that which would allow detection of stack overflows.<br>
+<p>
+It would be however pretty awkward to manage such pages that host both stacks and slabs... But maybe it could be made to work? Surely, it would be better than wasting 75%+ of each stack page.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102580/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102585"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Stacks smaller than page size</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 18:02 UTC (Fri)
+                               by <b>MarcB</b> (subscriber, #101804)
+                              [<a href="/Articles/1102585/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MarcB" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102585" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that might be horrible for caches.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102585/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102586"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why so many threads?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 18:19 UTC (Fri)
+                               by <b>TheGopher</b> (subscriber, #59256)
+                              [<a href="/Articles/1102586/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="TheGopher" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102586" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not workqueues or whatever mechanism is currently in vogue? <br>
+Most times when I’ve come across too many threads in a process it’s been due to things like state machines being easier to reason about in a threaded setting, but this is just work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102586/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102588"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 18:37 UTC (Fri)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/1102588/">Link</a>] (30 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="clugstj" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102588" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+5000 threads?  Why is user mode bloatware the kernel's problem?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102588/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102589"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 18:58 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1102589/">Link</a>] (26 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102589" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We live in the time of multicore for almost two decades.<br>
+Spawning multiple (dozens of) threads per application and distributing the work is a must to get the full performance.<br>
+This is not bloat.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102589/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 14:20 UTC (Sat)
+                               by <b>linuxrocks123</b> (subscriber, #34648)
+                              [<a href="/Articles/1102632/">Link</a>] (25 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linuxrocks123" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102632" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Mmmmmm ... yeah, it's bloat.  Let's say 8 cores in the phone, no SMT.  My non-bloated computer has 320 processes.  Let's say every single one of those processes is performance critical and needs to spawn threads.  Well, max of 8 threads can be run simultaneously, so that's 8 threads per process.  We're still only up to 2560 threads, which is about half the quoted 5000 figure.  That's 2x bloat.<br>
+<p>
+Now let's be more realistic and say that most of those processes are not performance-critical.  Let's say 10 processes are performance critical, which since  a phone is usually really only be running a single performance-critical application at a time is still generous.  Now we're down to 310+10*8 = 490 justifiable threads for a not-bloated system.<br>
+<p>
+So that's 10x bloat.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102638"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 14:46 UTC (Sat)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1102638/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102638" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, first is that using multiple cores is not only about performance. It's also about latency and often also reducing power consumption (the faster the job is done, the more time the system is in deep sleep).<br>
+<p>
+But the absolute number of threads doesn't matter anyway. Even with 500 threads reducing the stack size by 8k frees up ~4 MiB for actual useful work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102638/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102641"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 15:26 UTC (Sat)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/1102641/">Link</a>] (23 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vadim" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102641" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're thinking about it wrong. <br>
+<p>
+A lot of thread usage isn't related to CPU cores at all, it's about tasks and interactivity. Think for instance of a GUI application that needs to do something like draw a bitmap pixel by pixel for whatever reason. That could take a while, so you send that off to a thread. You need to download something from the internet, that's a thread. You save the settings/stats/etc, that's a thread. None of that cares about how many cores are there in the system. Threads are at this point a completely standard thing to launch for handling something like an HTTP request.<br>
+<p>
+And you have libraries and frameworks like Qt that may start their own threads for their own reasons.<br>
+<p>
+Sure, when you do something "classic" like video encoding, it'll probably query the number of cores in the system and start a number of threads according to the system's capability, but in general it's very normal to have a bunch of threads that are just tasks to perform concurrently in general, without any attempt to account for what the system hardware happens to be.<br>
+<p>
+Obviously there are limits there, but if I'm writing a desktop app I'm not going to worry about that I've got 10 threads running on a 4 core system. Maybe if I get to like a couple couple dozen I'll start thinking about a thread pool, but even then you can have several of those and end up with a thread count higher than strictly optimal.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102641/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102643"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 20:22 UTC (Sat)
+                               by <b>linuxrocks123</b> (subscriber, #34648)
+                              [<a href="/Articles/1102643/">Link</a>] (17 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linuxrocks123" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102643" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; You're thinking about it wrong.</span><br>
+<p>
+Nope.<br>
+<p>
+<span class="QuotedText">&gt; A lot of thread usage isn't related to CPU cores at all, it's about tasks and interactivity.</span><br>
+<p>
+That's bloat.<br>
+<p>
+<span class="QuotedText">&gt; Think for instance of a GUI application that needs to do something like draw a bitmap pixel by pixel for whatever reason. That could take a while, so you send that off to a thread.</span><br>
+<p>
+Yes, that's a thread that will actually execute in parallel, so that's fine.<br>
+<p>
+<span class="QuotedText">&gt; You need to download something from the internet, that's a thread.</span><br>
+<p>
+No, that's what select() and poll() are for.<br>
+<p>
+<span class="QuotedText">&gt; You save the settings/stats/etc, that's a thread.</span><br>
+<p>
+That's just bizarre.  Writing a few kilobytes of JSON to the page cache, to be written to flash memory later, is not something I'd ever think to break out multithreading for.<br>
+<p>
+<span class="QuotedText">&gt; Threads are at this point a completely standard thing to launch for handling something like an HTTP request.</span><br>
+<p>
+No, that's what select() and poll() are for.<br>
+<p>
+<span class="QuotedText">&gt; Obviously there are limits there, but if I'm writing a desktop app I'm not going to worry about that I've got 10 threads running on a 4 core system. Maybe if I get to like a couple couple dozen I'll start thinking about a thread pool, but even then you can have several of those and end up with a thread count higher than strictly optimal.</span><br>
+<p>
+Indeed, software is bloated because sometimes it's easier to do it the wrong way than the right way.  Although, with select()/poll() versus multithreading, it's really _NOT_ easier to subject yourself to deadlocks and race conditions just so you don't have to call select() or poll() on some socket descriptors in an event loop.<br>
+<p>
+I've done it both ways, because multithreading seemed like the obvious choice for network I/O before I read an online comment that led me to read the man page for select(), and now I know that select() is better.  Maybe colleges need to do a better job teaching new programmers how to do event loops.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102643/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102657"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 20:34 UTC (Sat)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/1102657/">Link</a>] (15 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vadim" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102657" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That's bloat.</span><br>
+<p>
+We're not on a 386 anymore, cycles aren't precious. The priority is a good user experience. The UI mustn't ever freeze.<br>
+<p>
+<span class="QuotedText">&gt; No, that's what select() and poll() are for.</span><br>
+<p>
+In a simple case perhaps, if you have something to parse it can get more involved than that. <br>
+<p>
+<span class="QuotedText">&gt; That's just bizarre. Writing a few kilobytes of JSON to the page cache, to be written to flash memory later, is not something I'd ever think to break out multithreading for.</span><br>
+<p>
+Interactivity. The write itself may be trivial, but there's a fsync involved if you want anything persisted properly, and that's liable to make the whole application freeze. <br>
+<p>
+<span class="QuotedText">&gt; Indeed, software is bloated because sometimes it's easier to do it the wrong way than the right way. </span><br>
+<p>
+The right way is the way that doesn't annoy the user with eg, the application stuttering because the GUI thread is waiting on disk access.<br>
+<p>
+<p>
+<span class="QuotedText">&gt; Ive done it both ways, because multithreading seemed like the obvious choice for network I/O before I read an online comment that led me to read the man page for select(), and now I know that select() is better. </span><br>
+<p>
+select() is obsolete and shouldn't be used as per its own manpage, there's better ways.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102657/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102661"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 3:50 UTC (Sun)
+                               by <b>linuxrocks123</b> (subscriber, #34648)
+                              [<a href="/Articles/1102661/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linuxrocks123" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102661" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Interactivity. The write itself may be trivial, but there's a fsync involved if you want anything persisted properly, and that's liable to make the whole application freeze.</span><br>
+<p>
+Please stop calling fsync() unnecessarily.  Nonsense like that is why I have to put <a href="https://github.com/stewartsmith/libeatmydata">https://github.com/stewartsmith/libeatmydata</a> in ld.so.preload now.<br>
+<p>
+But if you have a real need to ensure that data is forced to disk -- and you do not if all you're writing is a JSON file with user prefs -- then use aio_fsync.<br>
+<p>
+<span class="QuotedText">&gt; select() is obsolete and shouldn't be used as per its own manpage, there's better ways.</span><br>
+<p>
+Well, we're on Android, so we're in Java, so this would be the particular select() being used: <a href="https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/nio/channels/Selector.html#select">https://docs.oracle.com/en/java/javase/27/docs/api/java.b...</a>()<br>
+<p>
+But, even in C, I disagree with that manpage.  Almost no normal application should be generating fd numbers over 1023.  After all, you're close()ing fds when you're finished with them, so the fd numbers are getting reused, right?  &lt;Padme Amidala face&gt; ...Right?<br>
+<p>
+It is true that if you want to use the event loop pattern when you may have more than 1000 open sockets or other fds, you need to use poll() if you want to be portable to any UNIX and epoll() if you want optimal performance on Linux.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102661/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102670"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 12:59 UTC (Sun)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/1102670/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vadim" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102670" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; But if you have a real need to ensure that data is forced to disk -- and you do not if all you're writing is a JSON file with user prefs -- then use aio_fsync.</span><br>
+<p>
+Last I heard, nobody really liked AIO. Has that changed? Also not going to be portable. <br>
+<p>
+<span class="QuotedText">&gt; But, even in C, I disagree with that manpage. Almost no normal application should be generating fd numbers over 1023. </span><br>
+<p>
+No, that's ridiculous. There's only 3 good limits: 0, 1, unlimited. Stuff breaking because of too many handles isn't reasonable. The only reasonable maximum for anything is std::numeric_limits&lt;decltype(var)&gt;::max()<br>
+<p>
+Anyway, we're losing the plot here a bit. Point was, most of us aren't working on spacecraft or codecs. Optimal allocation of tasks to cores isn't a real concern in a lot of software. You start however many threads make sense for the program, and it's the operating system's job to deal with that, and I only start thinking about complicating that at all if things get really out of hand. But if I have 20 threads on a program for whatever reason I'm not going to worry about it. Such micro-optimizations aren't a problem worth solving in most projects.<br>
+<p>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102670/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102689"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 17:29 UTC (Sun)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/1102689/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102689" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;But if I have 20 threads on a program for whatever reason I'm not going to worry about it.</span><br>
+<p>
+Threads in one process have a secondary price, namely in userspace. The glibc default is 8 MB or so per thread. (pthread_attr_setstacksize) Maybe memory is not scarce enough for you yet, but I am going to lean on the article's introductory paragraph for best judgement: "Memory has always been a scarce resource in computing systems, but [and!] the problem seems to have worsened recently."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102689/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 17:41 UTC (Sun)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1102693/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102693" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;The glibc default is 8 MB or so per thread</span><br>
+<p>
+Yeah, but it's only virtual memory address space allocation, not resident size, unless the thread actually uses it, right?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102695"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 18:17 UTC (Sun)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/1102695/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pizza" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102695" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Threads in one process have a secondary price, namely in userspace. The glibc default is 8 MB or so per thread. </span><br>
+<p>
+There are 45 processes/threads associated with my ~2wk-old running firefox instance.<br>
+<p>
+Even assuming each uses the full 8MB of that stack (which they very much don't), that's a total of 360MB... compared to 21.2GB VSS for the primary firefox process alone.   Meanwhile, of that 21GB VSS, only 1.7GB is actually resident.<br>
+<p>
+Stack space isn't even a rounding error.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102695/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102705"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 21:27 UTC (Sun)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/1102705/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102705" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;There are 45 processes/threads associated with my ~2wk-old running firefox instance</span><br>
+<p>
+Lucky you. Running for 5 hours, currently 3 tabs open, but 13 processes and 348 threads total (as per /proc/N/task/M, not about:processes). "death by a thousand cuts" is the idiom I am thinking of.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102705/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1102711"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 12:25 UTC (Mon)
+                               by <b>linuxrocks123</b> (subscriber, #34648)
+                              [<a href="/Articles/1102711/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linuxrocks123" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102711" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; No, that's ridiculous. There's only 3 good limits: 0, 1, unlimited. Stuff breaking because of too many handles isn't reasonable. The only reasonable maximum for anything is std::numeric_limits&lt;decltype(var)&gt;::max()</span><br>
+<p>
+Run ulimit -n on your machine, because, guess what?  It's 1024.<br>
+<p>
+ulimit -Hn is probably 4096, so you can't set it higher than that unless you're root.  cat /proc/sys/fs/file-max will tell you how many open file descriptors across all running processes Linux will allow before just not letting anyone create any new file descriptors.  It's probably somewhere between 600,000 and 3 million.<br>
+<p>
+Open file handles consume system resources.  The operating system manages those system resources.  So, no, we're not going to let your program open INT32_MAX files and network sockets.<br>
+<p>
+<span class="QuotedText">&gt; There's only 3 good limits: 0, 1, unlimited</span><br>
+<p>
+There are 3 open file descriptors by default: 0 for stdin, 1 for stdout, and 2 for stderr.  You'd want to ask for the equivalent of pledge("stdio", NULL), I think, to restrict yourself from opening new file descriptors for security purposes, but Linux doesn't have an exact equivalent as far as I know.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102711/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102732"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 12:34 UTC (Mon)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/1102732/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vadim" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102732" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Run ulimit -n on your machine, because, guess what? It's 1024.</span><br>
+<p>
+It is<br>
+<p>
+<span class="QuotedText">&gt; ulimit -Hn is probably 4096, so you can't set it higher than that unless you're root. </span><br>
+<p>
+It's 1048576<br>
+<p>
+<span class="QuotedText">&gt; cat /proc/sys/fs/file-max will tell you how many open file descriptors across all running processes Linux will allow before just not letting anyone create any new file descriptors. It's probably somewhere between 600,000 and 3 million.</span><br>
+<p>
+9223372036854775807 actually.<br>
+<p>
+Anyway, there's a very big difference between setting a local policy to make obviously broken programs blow up before all RAM is allocated to file descriptors, and an API that's hard-wired to be incapable going higher than a pretty modest number in this day and age.<br>
+<p>
+You can get 256 core/512 thread CPUs these days, and multiple of those in SMP. 1024 descriptors stopped being a sensible limit long ago.<br>
+<p>
+<span class="QuotedText">&gt; Open file handles consume system resources. The operating system manages those system resources. So, no, we're not going to let your program open INT32_MAX files and network sockets.</span><br>
+<p>
+Not by system configuration by default, but if I want to write a program that has some reason to open a million handles, it should be able to.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102732/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102971"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 15:32 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1102971/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102971" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; There's only 3 good limits: 0, 1, unlimited.</span><br>
+<p>
+Experience shows that to be untrue. For example, comment depth. LWN gets unreadable after a depth of about five (and we've seen some threads go very, very deep). I believe Stack Exchange has a limit of two, which means people find alternative ways of having conversations that don't require infinite nesting depth. Reddit and Substack take a different approach where you have to click through to a new page after a depth of five which tends to limit comment depth as people don't bother to click through.<br>
+<p>
+For file descriptors, there are definitely efficiency losses as the number of fds grow. People would find other ways to write programs (eg sharding) if we capped the number of fds at 1023. I'm not saying we should, or that the result would be better, but it's interesting to imagine a world where we had kept that limit instead of (effectively) making it unlimited.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102971/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103006"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 27, 2026 10:52 UTC (Tue)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1103006/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1103006" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Having seen where that kind of arbitrary limits lead in environments such as LSL scripts on Second Life which are capped to 64KB memory I really wouldn't want to work with that limit-based splitting in any environment that tries to solve non-trivial problems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103006/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103021"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 27, 2026 13:11 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1103021/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1103021" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I mean, I've written meaningful programs that ran on machines with 32KiB of memory. There's usually a sweet spot, and it wouldn't be around 64 fds. I'd consider a design that has one thread per fd to be a poor design because overhead per fd would be too high. A million fds per process is also bad because it incurs significant overhead trying to find the lowest available FD on every call to open()/socket()/whatever.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103021/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103271"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 28, 2026 11:42 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1103271/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1103271" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is more that any meaningful program has a certain essential complexity and if that ends up being above the limits for a single one you don't want to add lots of accidental complexity by forcing a split into multiple programs just because of some arbitrary limit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103271/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1106342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 9, 2026 22:32 UTC (Mon)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/1106342/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mrugiero" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1106342" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Interactivity. The write itself may be trivial, but there's a fsync involved if you want anything persisted properly, and that's liable to make the whole application freeze.</p>
+</blockquote>
+<p>If you want that persistence you'll have to wait on some signal from the thread before you call the operation done, no?
+I feel this is an interface problem, where fsync could perfectly be a non-blocking operation if only the fd were pollable for fsync termination (and result) instead of forcing a thread on the programmer.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1106342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1106354"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Going fully for &quot;signal on completion&quot; is io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2026 12:11 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1106354/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1106354" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Ultimately, that's what io_uring brings to the table; you can poll the completion queue, or put a thread to sleep waiting for a new entry in the queue (or a timeout).</p>
+<p>There's an argument to be made that it'd be worth extending io_uring to cover the entire kernel ABI for userspace, so that you have a choice: traditional blocking syscalls, or non-blocking io_uring submissions if you want to poll for completion.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1106354/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1106545"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Going fully for &quot;signal on completion&quot; is io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2026 17:03 UTC (Tue)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1106545/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1106545" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+io_uring is just the mechanics. The trend is broader: moving away from blocking syscalls and treating the kernel more like an actor that accepts requests and posts responses.<br>
+<p>
+Erlang has the simplest version of this: a process is a stack and a mailbox.  If you want to read/write a file you can send a message to (e.g.) a File actor which executes it and then sends you a message back when it's done. Your thread never need block.<br>
+<p>
+Networking has gone this direction with (e)poll/kqueue and Windows Completion Ports, but file I/O remains awkward. We have ad hoc async file support, but no generic "submit work, get completion later" mechanism.<br>
+<p>
+Now, the io_uring implementation focuses on reducing syscalls with ring buffers and shared memory. But conceptually the biggest change is it makes it possible to have a generic "submit work, receive completion later" mechanism. Any blocking call (read, write, accept, stat, fsync, etc) can all be queued and the completions collected later.<br>
+<p>
+Most developers don't want to think about the actual mechanics, just like Erlang developers don't care about the implementation of the mailbox. They just want to queue an fsync() and get a notification when it's done. Perhaps what we need is a higher level abstraction over io_uring that exposes the request/completion model directly. Most libraries that layer on io_uring expose a future/promise abstraction, which is less flexible.<br>
+<p>
+So,  I don't think you need the whole kernel ABI, but anything that can block would be a good start.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1106545/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1102658"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 20:37 UTC (Sat)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1102658/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102658" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Writing a few kilobytes of JSON to the page cache, to be written to flash memory later, is not something I'd ever think to break out multithreading for.</span><br>
+<p>
+This is exactly where software becomes jerky or completely unresponsive, if the storage is not what the developer thought it was (slow, network, etc..).<br>
+Really annoying and unfortunately really common.<br>
+<p>
+<span class="QuotedText">&gt;No, that's what select() and poll() are for.</span><br>
+<p>
+I agree, but manually writing async code is a pain, unless you have a language that actually supports it well.<br>
+<p>
+From an application perspective this is certainly not the way to go to save a few kilobytes of kernel stack, if it means massive amounts of manual async state machines.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102658/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1103213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 27, 2026 18:18 UTC (Tue)
+                               by <b>kazer</b> (subscriber, #134462)
+                              [<a href="/Articles/1103213/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kazer" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1103213" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; draw a bitmap pixel by pixel</span><br>
+<p>
+I get what you are trying to say but that example is misleading. (A sidenote, UI drawing typically uses blits and damage-areas to for efficient area drawing.)<br>
+<p>
+More typically might be that audio player has a slider that shows progress on the song. Slider might updated by callback/signal, but it that might be handled by a different thread than the one pushing audio to the audio device. Often there is a visualization running, that might be using multiple threads. User might be scrolling through a playlist and that might be handled by a different thread. The player might be showing something from the internet and actual audio data might be streamed from network or read from disc. <br>
+<p>
+So a relatively simple application can use many threads. And that is to make it much much simpler to decide when a task should be doing things rather than trying to implement your own scheduling in a single application-level thread.<br>
+<p>
+If the player is implented in something like Java there might be a garbage collector running in a separate thread and so forth.<br>
+<p>
+Threaded application is not "bloat" as someone else argues, it is to make it possible to support different things without unreasonable latency problems and with a reasonable programming model.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103272"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 28, 2026 11:50 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1103272/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1103272" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You raise a very good point there that the alternative would be to implement your own in-thread scheduler which could also be considered bloat when there is a perfectly good scheduler available to you on the OS level already. It is not as if refusing to use more threads suddenly reduces the variety of tasks you have to perform.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103272/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1105888"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2026 14:50 UTC (Fri)
+                               by <b>jch</b> (guest, #51929)
+                              [<a href="/Articles/1105888/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jch" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1105888" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; A lot of thread usage isn't related to CPU cores at all, it's about tasks and interactivity.</span><br>
+<p>
+These threads need not be visible to the kernel, they should be handled entirely by a userspace scheduler.  That's the idea behind Go's goroutines, Erlang processes, and Java's virtual threads.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105888/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1105926"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2026 0:36 UTC (Sat)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/1105926/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pizza" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1105926" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; These threads need not be visible to the kernel, they should be handled entirely by a userspace scheduler. </span><br>
+<p>
+So... continually re-implement the wheel?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105926/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1106114"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Userspace scheduled threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 9, 2026 13:34 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1106114/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1106114" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>This is basically M:N threading - and we don't have a good sense of what kernel interfaces are needed to make M:N threading capable of beating 1:1 threading on latency (they do beat it on throughput, which is why I use userspace scheduled options, but the latency is, AFAICT, still an unsolved issue).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1106114/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1102601"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 0:21 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1102601/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="khim" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102601" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because kernel without userspace is pretty much useless?<br>
+<p>
+You may like such userspace or hate it, but in the end of the day kernel exist to run userspace programs, whether they are bloated or not…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102601/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102714"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 8:58 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1102714/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102714" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also, it is not as if the kernel doesn't use plenty of threads itself. On my 24 core system right now at moderate load (load average under 20) I have about 4.2k userspace threads and 1k kernel threads (with ~450 processes).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102714/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1104666"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bloatware</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 2, 2026 8:02 UTC (Mon)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1104666/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1104666" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>5000 threads? Why is user mode bloatware the kernel's problem?</p>
+</blockquote>
+<p>That's bloatware thinking.  Here the kernel community may have the opportunity to save 40MB for these 5000 threads across many systems by using 8KB instead of 16KB stacks, so if it's doable, the kernel community should do it.</p>
+<p>The people who write user-space programs also need to balance the benefits and costs (including memory costs) of the options for writing their programs.  I expect that in many cases they consider the benefit of an additional thread worth even 16KB of kernel memory (plus additional user memory); you see examples in this thread.</p>
+<p>One thing that we see here is that optimizing this at the kernel level gives much higher cost savings than when a user-level programmer debloats a program by reducing the, say, 10 threads that the program uses to 5.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1104666/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102598"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">4k stacks were a thing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 22:23 UTC (Fri)
+                               by <b>hailfinger</b> (subscriber, #76962)
+                              [<a href="/Articles/1102598/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hailfinger" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102598" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://lwn.net/Articles/150580/">https://lwn.net/Articles/150580/</a><br>
+21 years ago, lwn.net had an article "4K stacks for everyone?" and 4K stacks seemed to be an achievable goal. Times have certainly changed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102598/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">4k stacks were a thing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 6:06 UTC (Sun)
+                               by <b>glenn</b> (subscriber, #102223)
+                              [<a href="/Articles/1102664/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="glenn" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102664" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm glad someone remembers!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102716"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">4k stacks were a thing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 9:38 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1102716/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102716" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I assume the fact that the kernel printed messages about processes using 8k or 12k stacks for years had something to do with that effort.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102716/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102640"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Voluntary stack allocation points</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 14:58 UTC (Sat)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1102640/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102640" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;when that happens, direct reclaim (the kernel deciding it needs to reclaim memory to satisfy an allocation for some unrelated task) is almost always involved</span><br>
+<p>
+<span class="QuotedText">&gt;dynamic allocation of kernel stacks as a way of saving memory.</span><br>
+<span class="QuotedText">&gt;Deacon described the idea as ""scary""; it implies that memory allocation can happen at any location in the kernel</span><br>
+<p>
+If we know the few points where we are likely going to need more stack memory and these happen only in special situations, why not allocate more stack at these points (only) and free it again on return?<br>
+That sounds way less scary to me than allowing dynamic stack allocation at any time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102640/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102642"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Voluntary stack allocation points</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 16:53 UTC (Sat)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1102642/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102642" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe this is the "direct reclaim and some XFS stuff with a separate stack" idea mentioned in the article. I kind of wonder whether the idea for handling blocking operations in io_uring and this could benefit from a bit of indirection between a thread's identity and the computation it is performing, such that direct reclaim, XFS, and io_uring operations that could block get a separate stack despite being the same thread, but io_uring also has the ability to say that the separate stack (and any locks it took) actually belong to a helper thread after all and the original thread can just continue on the original stack. And maybe direct reclaim's CPU usage could then be charged to a kernel thread rather than the thread that also got hit with a slow allocation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102642/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Voluntary stack allocation points</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 12:56 UTC (Mon)
+                               by <b>jeremyhetzler</b> (subscriber, #127663)
+                              [<a href="/Articles/1102734/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jeremyhetzler" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102734" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;If we know the few points where we are likely going to need more stack memory and these happen only in special situations, why not allocate more stack at these points (only) and free it again on return?</span><br>
+<p>
+Probably because those "special situations" happen to be ones where the kernel is already in the process of freeing up memory because it doesn't have enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102703"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Continuations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 20:20 UTC (Sun)
+                               by <b>axvon</b> (subscriber, #182668)
+                              [<a href="/Articles/1102703/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="axvon" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102703" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The Mach kernel used in XNU has had continuations for a while, where you simply state a function and pointer to pass into the function upon being switched in from after a sleep... it would be a lot of restructuring for drivers and code, but is a tried and tested paradigm that I think could be cleaner than other things proposed<br>
+<p>
+<a href="https://lkml.iu.edu/9704.3/0282.html">https://lkml.iu.edu/9704.3/0282.html</a><br>
+<p>
+It seems to have been discussed a while ago<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102703/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">design option with minimal arch-specific changes: reap stack only for freezable-sleep tasks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 19:24 UTC (Mon)
+                               by <b>TheJH</b> (subscriber, #101155)
+                              [<a href="/Articles/1102980/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="TheJH" />
+                <input type="hidden" name="return" value="/Articles/1100271/#CommAnchor1102980" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One design option is to leave kernel stacks big, but reclaim them for sleeping userspace tasks in freezable sleep. So each task starts out with a 16K stack, but the shrinker can free kernel stack memory below the stack pointer, and mark in task-&gt;state that the stack was partially reclaimed. Then when a task without a full stack is woken, the scheduler can kick off a workqueue item to asynchronously allocate more stack memory again. This has the advantage that it requires almost no low-level arch-specific stuff, though it only works well if most tasks sleep for a long time.<br>
+<p>
+This is a hacky prototype I wrote in 2021 but never published: <a href="https://github.com/thejh/linux/commits/kstack-reaper/">https://github.com/thejh/linux/commits/kstack-reaper/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

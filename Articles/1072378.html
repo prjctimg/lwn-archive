@@ -1,0 +1,176 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Keeping COWs in context (a.k.a. anonymous reverse mapping) [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Keeping COWs in context (a.k.a. anonymous reverse mapping)">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's reverse-mapping machinery is charged with locating the page-table entries that ref [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1072731/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Keeping COWs in context (a.k.a. anonymous reverse mapping)</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 14, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+The kernel's reverse-mapping machinery is charged with locating the
+page-table entries that refer to a given page in memory.  The reverse
+mapping of anonymous pages is handled differently than for file-backed
+pages.  The kernel's implementation of reverse mapping for anonymous pages
+is, according to Lorenzo Stoakes in his <a
+href="/ml/all/aec533b2-37a7-4f44-a279-c4aa604206ac@lucifer.local/">proposal</a>
+for a memory-management-track session at the 2026 <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a>, "<q>a very broken
+abstraction</q>", due to its complexity.  It also has some performance
+problems.  Stoakes was there to present, in raw form, a proposed
+replacement that he calls a "COW context".
+<p>
+
+The system's page tables map a virtual address to the physical page (if
+any) the address points to.  There is no hardware mechanism, though, to go
+in the other direction — from a physical page to the page-table entries
+that refer to it.  This reverse mapping is needed by the kernel, though, in
+order to manage memory.  Many years ago, reverse mapping of anonymous pages
+was done by scanning through all of the page tables in the system; needless
+to say, that was not the fastest possible solution.  Rik van Riel <a
+href="/2002/0124/kernel.php3">added a reverse-mapping mechanism</a> to
+eliminate the page-table scans in 2002; that machinery was <a
+href="../75198/index.html">significantly reworked</a> by Andrea Arcangeli two
+years later.  The code has evolved considerably in the subsequent two
+decades, generally in the direction of more complexity.  The portion
+dedicated to the reverse-mapping of anonymous pages is particularly
+difficult to follow.
+<p>
+Stoakes began by complaining about that complexity, saying that the code
+is, in many places, inscrutable.  He also lamented the fact that the
+reverse-mapping code holds locks across an entire fork operation, creating
+high lock contention and the consequent scalability problems.  There are a
+vast number of kernel objects used to provide reverse mappings, which
+creates a lot of memory overhead.
+<p>
+He has been working on an alternative, which can be found (in first-draft
+form) in <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/ljs/linux.git/log/?h=project/cow-context">this
+repository branch</a>.  The current reverse-mapping code works at the
+virtual memory area (VMA) level; since a single process can have large
+numbers of VMAs, that is a lot of tracking to do.  Stoakes is, instead,
+proposing a "COW context" that is used to track anonymous mappings at the
+<tt>mm_struct</tt> level.  There is one <a
+href="https://elixir.bootlin.com/linux/v7.0.5/source/include/linux/mm_types.h#L1123"><tt>mm_struct</tt>
+structure</a> per process; it is the core data structure describing a
+process's address space.  Since only one COW context is needed per process,
+the system must maintain far fewer of them than if it were a per-VMA
+structure.
+<p>
+While the COW context is associated with the <tt>mm_struct</tt>, it is
+managed as a separate structure.  Why is the COW context not directly
+incorporated into <tt>struct mm_struct</tt>?  The COW context structures
+are linked together to represent the process hierarchy, but they may have
+to outlive their associated processes.  If a process creates a number of
+children, then exits, its COW context must still exist to maintain the
+kernel's model of the series of forks that brought about the
+still-existing processes, since they are likely to continue to share
+mappings to anonymous pages.
+<p>
+Each page (strictly, each folio; see <a href="/Articles/1064861/">this
+article</a> for a discussion of the difference) gains a pointer to the COW
+context of the process that first maps it.  When the time comes to find all
+of the mappings of that folio, that pointer can be followed, yielding the
+COW context at the top of the hierarchy of processes that may have
+mappings; at that point, it is just a matter of walking the tree of COW
+contexts to find any other mappings that may exist.  There are, of course,
+complications, many of which tied to the fact that processes can remap
+their address spaces, meaning that a folio may be mapped at different
+virtual addresses in different processes.  Tracking those remappings adds a
+fair amount of complexity to the patch set.  Stoakes also noted that files
+mapped with <tt>MAP_PRIVATE</tt> bring pain of their own.
+<p>
+If a process has created a lot of children, there could be a lot of COW
+contexts to walk through.  To optimize that walk, effort is made to link
+folios to the COW context at the lowest part of the hierarchy in which they
+are mapped.  As a result, reverse-mapping lookups are quick most of the
+time.
+<p>
+One advantage of the new structure is that the lookups can be done under
+read-copy-update (RCU) protection rather than locking.  That is both good
+and bad; RCU is much faster, but it lacks the synchronization points that
+locking brings.  So he is going to have to introduce some sort of lock with
+mapping granularity.  A "<q>crazier</q>" alternative would be to simply
+tolerate races to an extent; that would require delaying the freeing of
+page tables until after an RCU grace period, though.
+<p>
+Stoakes concluded his presentation as the session ran out of time; there
+was no real discussion resulting from the talk.  He acknowledged that the
+code, as it exists now, has a lot of rough edges and incomplete parts.  It
+is, he said, a research project that might not work out in the end.  But,
+if nothing else, he will have learned a lot more about anonymous reverse
+mapping.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">anon_vma</a></td></tr>
+            <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Memory management/Object-based reverse mapping</a></td></tr>
+            <tr><td><a href="../../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1072378/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

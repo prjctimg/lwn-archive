@@ -1,0 +1,1124 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A high-memory elimination timeline for the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A high-memory elimination timeline for the kernel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Arnd Bergmann began his 2025 Linux Plumbers Conference session on the future of 32-bit support  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../../current/index.html">Weekly Edition</a></li><li><a href="../../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../../Kernel/index.html">Kernel</a></li><li><a href="../../Security/index.html">Security</a></li><li><a href="../../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1051065/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A high-memory elimination timeline for the kernel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 23, 2025</br>
+           <hr>
+<a href="../../Archives/ConferenceIndex/index.html">LPC</a>
+</div>
+Arnd Bergmann began his <a href="https://lpc.events/event/19/">2025 Linux
+Plumbers Conference</a> session on the future of 32-bit support in the
+Linux kernel by saying that it was to be a followup to <a
+href="../1035727/index.html">his September talk</a> on the same topic.  The
+focus this time, though, was on the kernel's "high memory" abstraction, and
+when it could be removed.  It seems that the kernel community will need to
+support 32-bit systems for some time yet, even if it might be possible to
+remove some functionality, including support for large amounts of memory on
+those systems, more quickly.
+<p>
+<h4>The high-memory problem</h4>
+<p>
+High memory, he began, is needed to support 32-bit systems with more than
+768MB of installed physical memory with the default kernel configuration;
+it can enable the use of up to 16GB of physical memory.  The high-memory
+abstraction, though, is a maintenance burden and "<q>needs to die</q>".
+Interested readers can learn more about high memory, why it is necessary,
+and how it works in <a href="/Articles/813201/">this article</a>.
+<p>
+<a href="/Articles/1051013/"><img
+src="../../_static/images/conf/2025/ossjp/ArndBergmann-sm.png" alt="[Arnd Bergmann]"
+title="Arnd Bergmann" class="lthumb"></a>
+
+A 32-bit system has a 4GB virtual address space (the physical address space
+is larger), which is split between
+user and kernel space.  There are various kernel-configuration options that
+can change where that split happens; the most common configuration is
+<tt>VMSPLIT_3G</tt>, which allocates the bottom 3GB of the address space to
+user space, while reserving 1GB for the kernel.  The problem is that the
+kernel's "linear map" (or "direct map"), which maps all of physical memory,
+must fit in the kernel's part of the address space; with
+<tt>VMSPLIT_3G</tt>, that limits the kernel to directly mapping 768MB of
+physical memory.  Any memory beyond that is managed as high memory, which
+must be explicitly mapped before every use (and unmapped afterward).
+<p>
+Configuration options that increase the size of kernel space, and thus the
+size of the linear mapping, exist, but they do so at the cost of reducing
+the address space available to applications.  For example, the
+<tt>VMSPLIT_2G</tt> options support up to nearly 2GB of physical memory
+without using high memory, but limit the virtual address space to 2GB.
+<p>
+There are a number of reasons to want to get rid of high memory, Bergmann
+said.  Embedded developers dislike it because it tends to be the source of
+regressions on updates and complicates the code significantly.  While
+32-bit CPUs are still used for embedded applications, they normally do not
+have large amounts of memory installed, so high memory is not particularly
+helpful there.  The memory-management maintainers dislike high memory for
+the same reasons; they would also like to see it disappear before anybody
+starts to think that 64-bit high memory might be a good idea.
+<p>
+There are reasons to keep high memory too, of course.  Removing it
+increases the chances of exposing driver bugs and can force changes to
+user-space code.  Any 32-bit system with more than 2GB of installed memory
+cannot actually use that memory without the high-memory abstraction.  Even
+smaller amounts of memory cannot be supported without reducing the size of
+the user-space address space as described above, which would break
+applications that use a lot of virtual memory.  If high memory were removed
+from the kernel, there would be no hope of supporting 32-bit systems with
+more than 4GB of memory; even 2GB systems would suffer significant
+limitations.  There would be no impact at all, instead, on systems with
+less than 1GB installed.
+<p>
+There are still 32-bit systems being made, but almost all of them have 1GB
+or less of installed memory.  The only reason to use a 32-bit CPU in a new
+system, he said, is extreme cost sensitivity, so there is unlikely to be a
+budget for larger amounts of memory.  Anything with more than 1GB is thus
+almost certainly an older system.  The 1GB systems are relatively easy to
+support, except that some of them have discontiguous memory, which makes it
+impossible to map into the kernel's linear mapping.  There are workarounds,
+but some of them might require user-space changes.
+<p>
+The 2GB case is becoming rare, he said, but people do still have these
+systems, so support for them may have to be maintained as long as support
+for 1GB systems.  The 2GB <tt>VMSPLIT</tt> option may work for some, but it
+results in a 1.75GB virtual address space, which is too small to run
+Firefox.  David Hildenbrand asked whether "support" means that new kernels
+have to work on these systems; the answer was "yes", at least for systems
+where users still want to be able to update.
+<p>
+Then, there are systems with more than 2GB of memory.  These can be old
+(pre-2007) x86 laptops or Arm Chromebooks from 2012 or 2013.  There are
+also evidently in-flight entertainment systems, fire-alarm systems, and
+digital signs that fall into this category.  These are systems where the
+cost of the board is a tiny part of the total cost, he said, so the
+manufacturers go ahead and put in more memory.  Jason Gunthorpe asked
+whether people were really upgrading these systems to current kernels;
+Bergmann said they were, and Gunthorpe responded that he was shocked to
+hear that.
+<p>
+There are a number of known 32-bit systems with more than 4GB of memory;
+Bergmann said they were all "<q>dead systems</q>".  They include Amazon
+Annapurna Alpine boxes, Calxeda Midway systems, HiSilicon HiP04 systems,
+among others.  Evidently there are also SPARC systems with up to 2GB of
+memory that are still getting updates.
+<!-- middle-ad -->
+<p>
+<h4>Proposals</h4>
+<p>
+So what is to be done about high memory?  Bergmann said that he had held
+out a lot of hope for a <tt>VMSPLIT_4G</tt> option, which would separate
+kernel and user space entirely, giving the full 4GB to each.  That would
+allow systems with up to nearly 4GB of physical memory to be supported
+without high memory and would have solved a lot of problems, but this
+option has never been pushed to the point where it actually works, and
+nobody is funding that work now.  So this option will probably never
+happen, he said, but it also probably will not be necessary.
+<p>
+What may be needed is an option called "densemem", which uses some mapping
+trickery to close up holes in the physical address space.  Densemem is
+needed to <a href="/Articles/974517/">replace the SPARSEMEM model</a> in
+any case, and it could enable support for systems with up to 2GB without
+high memory.  This option would reduce the address space available to user
+space, though.  It also is not working yet; Bergmann is looking for
+developers who want to help finish it.
+<p>
+Another thing that is likely to happen is "reduced-feature high memory",
+where high-memory support would be dropped from one subsystem at a time.
+That would reduce the complexity of the system, and would also reduce the
+impact of an eventual high-memory removal.  So, for example, support might
+be removed for page tables, DMA buffers, filesystem metadata, and more in
+high memory.  Other users, such as file-backed and anonymous memory
+mappings, would need to continue to use high memory for now.
+<p>
+Years ago, low memory was a relatively scarce resource, so developers were
+advised to provide the <tt>__GFP_HIGHMEM</tt> flag (indicating that the
+request could be satisfied from high memory) whenever possible.  Bergmann
+suggested changing that policy so that memory allocations would only
+include <tt>__GFP_HIGHMEM</tt> where high memory is truly required.  He said
+that it might be possible to start phasing out 32-bit desktop use cases in
+particular, though he acknowledged that such a move might be controversial.
+Gunthorpe wanted to confirm that no such desktops are being made anymore;
+Bergmann said that is the case.  The users of 32-bit desktop systems are
+hobbyists and people who actively seek out old hardware.  Dave Hansen
+described those users as "<q>a vocal minority</q>", and suggested that they
+might be better off supporting a computer-history museum.
+<p>
+Eventually, Bergmann said, high memory could be placed behind the
+<tt>CONFIG_EXPERT</tt> configuration option, making it inaccessible to many
+users.
+<p>
+Hildenbrand asked what the impact on maintenance would be for the partial
+removals that had been proposed; Bergman said that it was small, but it
+would help with the following removal stages.  Gunthorpe worried about the
+possibility of exposing driver bugs, and that removing high-memory support
+from them may not be worth the trouble.  He suggested targeting the areas
+where high memory creates a lot of complexity instead.  Matthew Wilcox said
+that removal could break kernel code that has to map large folios; Bergmann
+suggested making large-folio support incompatible with high memory.  Hansen
+said that the <tt>__GFP_HIGHMEM</tt> flag could simply be removed for
+large-folio allocations, but Bergmann said that would break the page cache.
+Gunthorpe said that, when high-memory support is removed, systems that need
+it for the page cache simply will not work anymore.
+<p>
+Bergmann went on, suggesting that a separate configuration option could be
+created for each high-memory user.  That would allow the creation of
+statistics for each usage.  High-memory support for the page cache, he
+said, would need to be retained for at least five more years.
+<p>
+<h4>The timeline</h4>
+<p>
+He concluded with a suggested timeline for the future of 32-bit support; it
+looked like this:
+<p>
+<ul class="spacylist">
+<li> The high-memory feature-set reduction would begin in 2026.
+<li> Also in 2026, the <tt>VMSPLIT_2G_OPT</tt> configuration would become
+     the default for Arm, PowerPC, and x86 systems.
+<li> In 2027, high-memory support could be removed entirely for lesser-used
+     architectures like Arc, Microblaze, MIPS, SPARC, and xtensa.
+<li> With luck, 2027 will also see the addition of densemem support for
+     Armv7 systems.
+<li> In 203x, support for the page cache in high memory would go away.
+<li> In 204x, support for the last 32-bit architectures would be removed.
+</ul>
+<p>
+Hansen reacted by saying that many of the removals could be done more
+quickly.  He also suggested a configuration option to only use low memory,
+even on systems with high-memory support, until forced by an out-of-memory
+situation to use the high memory too.  Will Deacon said there might yet be
+hope for <tt>VMSPLIT_4G</tt>, which may become more attractive as
+high-memory support is removed.  He asked if it would be useful if somebody
+completed the work; Bergmann answered that it would, but whether that work
+will be done is unclear.
+<p>
+After the conference, Bergmann posted <a
+href="/ml/all/20251219161559.556737-1-arnd@kernel.org">a patch series</a>
+implementing parts of his 2026 timeline items.
+<p>
+The <a
+href="https://lpc.events/event/19/contributions/2261/attachments/1823/3963/Highmem%20deprecation%20planning-1.pdf">slides</a>
+and <a href="http://www.youtube.com/watch?v=ka0AJvH6uPE">video</a> of this
+talk are available.
+<p>
+[Thanks to the Linux Foundation, LWN's travel sponsor, for supporting my
+travel to this event.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../../Kernel/Index/index.html">Kernel</a></td><td><a href="../../Kernel/Index/index.html">Architectures/32-bit systems</a></td></tr>
+            <tr><td><a href="../../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../../Archives/ConferenceIndex/index.html">Linux Plumbers Conference/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1051010/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1051797"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMSPLIT_4G and Ingo Molnars' 4G/4G patches </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 17:58 UTC (Tue)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1051797/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joib" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051797" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some 20 or so years ago there was the 4G/4G patches by Ingo Molnar (<a href="https://lwn.net/Articles/39283/">https://lwn.net/Articles/39283/</a> ) which aimed to support full 4G address spaces for both kernel and user mode. IIRC some enterprise distros supported them for a while, but they were never mainlined. And then affordable x86-64 systems appeared on the market and killed it. IIRC they had quite a lot of overhead as every kernel/user transition involved a TLB flush.<br>
+<p>
+How does the VMSPLIT_4G now being worked on differ from that one? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051797/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMSPLIT_4G and Ingo Molnars' 4G/4G patches </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 21:18 UTC (Tue)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/1051801/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arnd" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051801" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The implementation on Arm LPAE would likely be much more efficient than x86 could because it can use the separate page tables for 256MB of high kernel virtual addresses in vmalloc space and 3.75GB for either userspace or the linear map.<br>
+<p>
+Flipping between them does have a significant overhead during kernel entry/exit and user access, but at least it can be done in a few instructions to reload ttbr0, and without flushing the TLB.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051821"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMSPLIT_4G and Ingo Molnars' 4G/4G patches </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 23:38 UTC (Tue)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/1051821/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiederm" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051821" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I haven't looked recently but the fix I remember for meltdown on x86 was to completly remove the kernel from the userspace page tables.<br>
+<p>
+I expect that existing as a starting point is obvious to anyone who is likely to do this work, but I figured I would point it out on the off chance it isn't.<br>
+<p>
+Perhaps the work could be motivated as a way to guard against speculative execution processor bugs as well as replacing highmem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051821/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051823"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMSPLIT_4G and Ingo Molnars' 4G/4G patches </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 0:19 UTC (Wed)
+                               by <b>hansendc</b> (subscriber, #7363)
+                              [<a href="/Articles/1051823/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hansendc" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051823" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, it’s not that simple.  With KPTI there are indeed two top level page tables, but they are very much twins where the user mapping one has been heavily “redacted”. The kernel mapping one lets the kernel mostly operate as usual. <br>
+<p>
+The 4/4 work requires two very different sets of page tables.  The kernel entry code and the normal kernel code like copy_to_user() need modification.<br>
+<p>
+That makes 4/4 and KPTI very different beasts.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051823/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1051826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMSPLIT_4G and Ingo Molnars' 4G/4G patches </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 2:32 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1051826/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051826" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think some (not all, but some) of the overhead of VMSPLIT_4G is similar to the overhead of KPTI (kernel page-table isolation). It seems possible that with all the speculation mitigations in place, VMSPLIT_4G might add less relative overhead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1051804"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Surprised to hear WRT modern kernels on embedded</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 18:56 UTC (Tue)
+                               by <b>calvin</b> (subscriber, #168398)
+                              [<a href="/Articles/1051804/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="calvin" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051804" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Then, there are systems with more than 2GB of memory. These can be old (pre-2007) x86 laptops or Arm Chromebooks from 2012 or 2013. There are also evidently in-flight entertainment systems, fire-alarm systems, and digital signs that fall into this category. These are systems where the cost of the board is a tiny part of the total cost, he said, so the manufacturers go ahead and put in more memory. Jason Gunthorpe asked whether people were really upgrading these systems to current kernels; Bergmann said they were, and Gunthorpe responded that he was shocked to hear that.</span><br>
+<p>
+I'm surprised to hear this. Everything industrial or embedded I've seen is usually running the (now ancient) kernel it was developed with. Maybe with backports if you're lucky. As such, I wouldn't think that running a modern kernel on an old SoC is important, even if the device is in use and maintained.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051804/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051806"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Surprised to hear WRT modern kernels on embedded</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 19:42 UTC (Tue)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1051806/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051806" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+These sound less sealed than the industrial end of the embedded space. I assume the "fire-alarm systems" are the sort of devices that make coordinated announcements throughout the building, rather than the sorts of devices that control fire-suppression equipment or directly detect emergencies, and they'd want to update user space portions regularly, and might as well get a whole new system image at that point. The "digital signage" example probably includes playing news and ads in elevators, which is getting content from remote sources and probably really needs security updates.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051806/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1051814"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Surprised to hear WRT modern kernels on embedded</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 23:46 UTC (Tue)
+                               by <b>bobolopolis</b> (subscriber, #119051)
+                              [<a href="/Articles/1051814/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bobolopolis" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051814" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I work in critical infrastructure (primarily electric utilities but also wastewater, large industrial, datacenters, etc) and 32-bit systems, some with 4 GB+ RAM, are still heavily used for automation and SCADA like controls (protection, such as detecting overvoltage/overcurrent and shutting off a transmission line is done by different devices that run an RTOS, not Linux). These automation devices are running modern LTS kernels due to regulations that require timely security updates. A surprising number of these systems are not airgapped to allow for remote control, monitoring, and upgrades. Performing software updates is quite expensive for utilities. Some, but not all, will do remote firmware upgrades for minor security fixes since the risk of a problem is low. Almost none will do remote updates for larger updates with new features. Due to the geographically distributed nature of electric power distribution, sending crews on-site to do firmware upgrades can be very expensive, so there is strong pressure on utilities to connect their substations to the internet via VPN to allow for remote updates and only send crews when something goes wrong. Connecting those systems obviously opens them up to attacks and drives the desire to maintain up to date kernels on that old hardware.<br>
+<p>
+The older of the systems my employer sold are x86 or PowerPC 32-bit only hardware with up to 4 GB RAM. Others are 64-bit capable hardware with up to 32 GB of RAM, but running a 32-bit kernel and OS. The newest devices (within the last 3 years or so) is all 64-bit. The expected lifespan of this hardware is 20-50 years and there is no easy way to upgrade these systems without major overhauls that cost utilities millions. The cost of the hardware is fairly minor, it's the cost of development, testing, validation, installation of hardware, and liability when things go wrong that makes utilities avoid updates if at all possible.<br>
+<p>
+The Civil Infrastructure Project (also recently featured here on LWN) is one answer, but there are inherent risks and limitations to backporting fixes to an increasingly outdated kernel.<br>
+<p>
+There aren't easy answers here and there's definitely blame to go around the industry, but these old 32-bit systems are absolutely out there and actively using modern kernels. The kernel community can certainly say they don't care about these systems and drop support, but it's not accurate to say they don't exist. If you live in North America or Europe, chances are high your electric power is being monitored by one of these 32-bit systems right now.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051814/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Surprised to hear WRT modern kernels on embedded</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 9:49 UTC (Wed)
+                               by <b>dottedmag</b> (subscriber, #18590)
+                              [<a href="/Articles/1051839/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dottedmag" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051839" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So you could make a good argument to whoever keeps the purse that sponsoring VMSPLIT_4G work (obviously in a purse-holder-compatible terms) would be a rational decision, right?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Surprised to hear WRT modern kernels on embedded</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 16:37 UTC (Wed)
+                               by <b>bobolopolis</b> (subscriber, #119051)
+                              [<a href="/Articles/1051895/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bobolopolis" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051895" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, but management/purse holders don't always make rational decisions :-) For my company at least, it's been slow to convince people but we are making progress. Just this year we have begun sponsoring certain open source projects we heavily use. The strongest argument we've found for us internally is supply chain security. If we're so dependent on an open source project that it would cause major issues for our products if it were to be abandoned, or even just degrade in quality, we should be willing to financially support that project to ensure our continued benefit. Framing the support as supply chain security resonates with certain people and provides a reasonable analogy to physical component supply chains, especially after the difficulty in electronic component supply during COVID.<br>
+<p>
+In general I think there are good reasons to support things such as the VMSPLIT_4G work, but it's hard to convince the decision makers that this specific project is worth the investment cost, especially when there are so many other projects worthy of spending time and money on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1070007"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Upgrading 64-bit-capable systems to 64-bit kernels?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2026 18:14 UTC (Mon)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1070007/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1070007" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could the 64-bit-capable hardware be switched to a 64-bit kernel via a software update?  The hardware is capable of it, and the userspace can stay unmodified unless it runs into a bug in compat syscall or ioctl handling.  The userspace might need to be recompiled for Y2038 anyway.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070007/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1051813"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are newer 32-bit ARM chromebooks than 2013</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 21:30 UTC (Tue)
+                               by <b>urjaman</b> (guest, #130506)
+                              [<a href="/Articles/1051813/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="urjaman" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051813" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Chromebooks from 2012 or 2013</span><br>
+That bit seems ... false, in what seems to me an attempt to make these devices seem less relevant.<br>
+<p>
+I'm typing this from an ASUS C201 (RK3288, 4GB RAM 32-bit ARMv7). As far as i know it (aka veyron speedy) was in design 2014, shipped 2015, and i bought mine 2017. So, practically from my point of view, you're talking about at-most 10 year old hardware.<br>
+<p>
+And as far as i know, the last ChromeOS device to use the "veyron" design was veyron tiger aka AOpen Chromebase Mini, that was brought to market in 2017-ish (the last ChromeOS update was 2022).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051813/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051815"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are newer 32-bit ARM chromebooks than 2013</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 21:42 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1051815/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051815" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      You do realize that you're referring to the work of somebody who has put a great deal of effort into understanding which architectures are still in use and need to be supported, right?  So perhaps assuming bad faith is the wrong way to start.  If you have a newer system, simply report it and it will surely be taken into account.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051815/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051820"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are newer 32-bit ARM chromebooks than 2013</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2025 23:28 UTC (Tue)
+                               by <b>urjaman</b> (guest, #130506)
+                              [<a href="/Articles/1051820/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="urjaman" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051820" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've posted a hopefully-non-adversarial comment on the video, maybe he will see it some day (i'm not opening an email client or getting on a mailing list for that little detail). I'm just not feeling the great deal of effort here.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051820/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1051819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are newer 32-bit ARM chromebooks than 2013</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 11:26 UTC (Wed)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/1051819/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arnd" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051819" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed, I mixed up those numbers, not sure how that happened. 2012-2013 was the timeframe for the 32-bit server systems (Huawei/Hisilicon, Calxeda, HP/TI, ArmadaXP) with more than 4GB that I listed on the same slides, probably mixed them up during editing.<br>
+<p>
+I think I got the right dates the patch I posted last week <a href="https://lore.kernel.org/all/20251219161559.556737-2-arnd@kernel.org/">https://lore.kernel.org/all/20251219161559.556737-2-arnd@...</a>. The 2020 EOL date I listed for the Chromebooks is for the ChromeOS 84 release that I used on my Veyron-minnie in the ELC talk, I had assumed this was the last for any 32-bit Chromebook. I see now that the veyron-tiger Chromebase went up to ChromeOS 98; apparently they had a separate EOL schedule for Chromebase, Chromebit and Chromebook, though all veyron used linux-4.19 until the end.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1051831"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Turn extra RAM into swap?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 6:22 UTC (Wed)
+                               by <b>patrakov</b> (subscriber, #97174)
+                              [<a href="/Articles/1051831/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="patrakov" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051831" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just an opinion of a complete outsider - won't a new block device driver help here with the limitations?<br>
+<p>
+Plan:<br>
+<p>
+* Expose less than the full amount of RAM in the direct map<br>
+* Expose the rest via a block device where swap can be created<br>
+<p>
+Then, 32-bit devices with too much RAM will still work, with reduced performance.<br>
+<p>
+As the idea is trivial, I would be surprised if this has not been discussed (and rejected).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051831/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051832"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Turn extra RAM into swap?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 6:48 UTC (Wed)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/1051832/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mirabilos" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051832" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would be better than not being able to use the RAM in question at all, but worse than all other options, suitable only as an option of last resort.<br>
+<p>
+The 4G/4G split looks interesting.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051832/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051840"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Turn extra RAM into swap?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 10:48 UTC (Wed)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/1051840/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arnd" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051840" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Using the extra RAM as swap is something we can already do using ZRAM/ZSWAP, and with the proposal I presented this continues to work as long as there is any 32-bit support, including after the highmem pagecache gets removed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051840/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1051834"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Oblig</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 7:14 UTC (Wed)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/1051834/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Fowl" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051834" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+By 2040 the whole kernel will be Rust and we can have the abstraction back “for free”, right? <br>
+<p>
+ /hides<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051834/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1051842"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Oblig</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 11:21 UTC (Wed)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1051842/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051842" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is what i was thinking: Rust might allow you to make an abstraction that means the driver doesn't need to care. So it would become: high memory is available for drivers written in Rust. The compiler would simply instantiate a high memory supporting version on demand.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051842/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1052200"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Oblig</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 29, 2025 10:34 UTC (Mon)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/1052200/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1052200" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+By 2040 2038 will have passed and all the people running antiquated 32 bits stacks will have discovered that in an age of pervasive networking and encryption broken timekeeping is a PITA and it’s cheaper to replace everything with a 64 bit stack than hunt down 32 bit problems.<br>
+<p>
+Especially pretty much everywhere where a failure is harshly punished by the regulator.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1052200/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1052868"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero maintenance cost?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2026 23:35 UTC (Mon)
+                               by <b>intgr</b> (subscriber, #39733)
+                              [<a href="/Articles/1052868/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intgr" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1052868" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure how serious this comment was meant to be or what prompted it.<br>
+<p>
+But I don't think that anyone is claiming that Rust allows writing code with zero maintenance cost?<br>
+<p>
+The "zero cost abstractions" aspect of Rust is about runtime performance overhead, not maintenance burden.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1052868/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1051865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The ARM 4G/4G-split patches</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2025 14:17 UTC (Wed)
+                               by <b>linusw</b> (subscriber, #40300)
+                              [<a href="/Articles/1051865/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linusw" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051865" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I tried for a time to get this going on 32bit ARM.<br>
+<p>
+Essentially a bunch (well quite a lot) of entry-code in assembly and complex macros need to be written for each architecture that want to do this, there isn't much that can be written in C or generic.<br>
+<p>
+I wasn't smart enough to make it work, but some preparatory work was completed and I de facto gave up on it 18 months ago.<br>
+<p>
+Moving the kernel into the vmalloc area works:<br>
+<a href="https://git.kernel.org/pub/scm/linux/kernel/git/linusw/linux-integrator.git/log/?h=kernel-in-vmalloc-v6.10-rc1">https://git.kernel.org/pub/scm/linux/kernel/git/linusw/li...</a><br>
+<p>
+Then after that I started to try to turn off the userspace mappings when executing i kernel space:<br>
+<a href="https://git.kernel.org/pub/scm/linux/kernel/git/linusw/linux-integrator.git/log/?h=kernel-in-vmalloc-v6.10-rc1-just-ttbr0-split">https://git.kernel.org/pub/scm/linux/kernel/git/linusw/li...</a><br>
+<p>
+And this I never managed to get to work. Probably because I'm dumb. Especially this patch is probably lots of wrong:<br>
+<a href="https://git.kernel.org/pub/scm/linux/kernel/git/linusw/linux-integrator.git/commit/?h=kernel-in-vmalloc-v6.10-rc1-just-ttbr0-split&amp;id=9a4daaf9a621b86ec6186df1711da95d6b673642">https://git.kernel.org/pub/scm/linux/kernel/git/linusw/li...</a><br>
+<p>
+If you immediately see my errors and know a path forward with this, feel invited to pick it up.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1051936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">32-bit architectures end of support</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 25, 2025 3:04 UTC (Thu)
+                               by <b>martinetd</b> (subscriber, #175633)
+                              [<a href="/Articles/1051936/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="martinetd" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1051936" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Someone brought up this last item of the timeline and we didn't agree in how this should be read:<br>
+<span class="QuotedText">&gt; In 204x, support for the last 32-bit architectures would be removed. </span><br>
+<p>
+My initial read was "in 204x, high mem support will be completely removed", but it can also be read like 32 bit arches will all get removed at that point?<br>
+<p>
+It's far down the line, but could someone who was present confirm which meaning was intended?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1051936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1052622"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">WINE and DosBox?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 2, 2026 18:12 UTC (Fri)
+                               by <b>jcpunk</b> (subscriber, #95796)
+                              [<a href="/Articles/1052622/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jcpunk" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1052622" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder how this would impact WINE and DosBox? I've got some old games and 32bit apps I'd like to continue running.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1052622/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1052721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">WINE and DosBox?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2026 14:24 UTC (Sun)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/1052721/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="raven667" />
+                <input type="hidden" name="return" value="/Articles/1051010/#CommAnchor1052721" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IIUC it doesn't impact them, this is support for the kernel to run on 32-bit architectures and the techniques needed to support more than 768MB of physical RAM, not support for running 32-bit processes with 2-4GB of virtual RAM.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1052721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
