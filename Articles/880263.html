@@ -1,0 +1,843 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Another Fedora integrity-management proposal [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Another Fedora integrity-management proposal">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="File-integrity management for the Fedora distribution has been the overarching theme of a numbe [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/879698/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Another Fedora integrity-management proposal</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>January 4, 2022</br>
+           </div>
+<p>
+File-integrity management for the Fedora distribution
+has been the overarching theme of a number of different feature proposals
+over the last year or so.  In general, they have been met with skepticism,
+particularly with regard to how well the features mesh with Fedora's
+goals, but also in how they will change the process of building RPM
+packages.  A new proposal that would allow systems to (optionally) perform <a 
+href="https://en.wikipedia.org/wiki/Trusted_Computing#Remote_attestation">remote
+attestation</a> is likewise encountering headwinds; there are several
+different concerns being raised in the discussion of it.
+</p>
+
+<h4>Background</h4>
+
+<p>
+As is usual for feature proposals, Fedora program manager Ben Cotton <a
+href="/ml/fedora-devel/CA+voJeXj0K=GDtHSP9_gNEYn1JdE-11gN3432Xmm+1XnASV1Lg@mail.gmail.com/">posted</a>
+it to the Fedora devel mailing list on behalf of the feature owner: Roberto
+Sassu.  The <a href="https://fedoraproject.org/wiki/Changes/DIGLIM">change
+proposal</a> is also on the Fedora wiki.  The new feature would use the <a
+href="/ml/linux-kernel/20210914163401.864635-1-roberto.sassu@huawei.com/">Digest
+Lists Integrity Module</a> (DIGLIM) feature, which has been proposed by Sassu as an
+addition to the kernel's <a
+href="https://sourceforge.net/p/linux-ima/wiki/Home/">Integrity Measurement
+Architecture</a> (IMA).  Ensuring that file contents and metadata do not
+change in unexpected ways is IMA's job; DIGLIM is an optimization of sorts
+to IMA.
+</p>
+
+<p>
+IMA has a number of different functions, but at its core it maintains
+"digests" of file contents and metadata; these digests are cryptographic
+hashes that can be used to reliably detect file changes.  IMA can also use
+the digests, in combination with the system's <a
+href="https://en.wikipedia.org/wiki/Trusted_Platform_Module">Trusted
+Platform Module</a> (TPM), to calculate a value that proves that the system
+is running a known set of software.  That value can be used to ensure the
+system has been securely booted or it can be sent elsewhere to remotely attest
+to the state of the system.
+</p>
+
+<p>
+Each file being protected by IMA needs its digest stored with the file,
+which is normally done using extended attributes in the filesystem.  IMA
+can be configured to check each file before it is accessed to see if its
+digest still matches the stored value; if not, access can be denied.  As
+files are assessed, their digest can be submitted to the TPM to extend a
+Platform Configuration Register (PCR); the resulting value is a reflection
+of the files measured, but it is also affected by the <i>order</i> of the
+accesses.
+</p>
+
+<p>
+According to the DIGLIM proposals (for Fedora and the patch set for the
+kernel), parallel execution during the assessment results in differing
+values from the TPM; even if the same code is used, it may result in a
+different attestation value.  DIGLIM provides a mechanism to take a digest
+value of all of the files installed, instead, and use that for calculating the
+attestation value.  Only files that have digests that were not included in
+the overall "installation digest" would be used to further extend the PCR
+in the TPM.
+</p>
+
+<p>
+It does so by providing a mechanism to enroll digest values from the
+installed files into a kernel "digest list", which can then be consulted as
+files are accessed.  If the digest of a file appears on the list, it can be
+considered to be unchanged and its digest value does not get submitted to
+the TPM; otherwise, the file has been modified or was not included in the
+digest list at
+all, so access could be denied and the file's digest added into the attestation
+value.  The latter would likely mean that the system fails its attestation.
+</p>
+
+<p>
+One might expect that adding digests for all of the files installed on a
+system would be expensive in terms of memory, but it turns out to have
+fairly modest impact. "<q>A repository of executables and shared
+libraries digests, of a Fedora 33 minimal installation, occupies less than
+800k of memory.</q>"  
+</p>
+
+<p>
+Instead of calculating the digest values for each file, DIGLIM for
+Fedora would use the values that are already calculated and stored in the
+RPM header for the packages that get installed.  Those values are signed
+with the GPG key for the Fedora release, so they can be trusted.  The
+kernel needs to be able to verify GPG signatures, which is part of the
+DIGLIM kernel feature; the Fedora release GPG public key could then be added to the
+kernel keyring and used for verification.  The RPM headers
+would be processed early in the boot 
+sequence: "<q>A user space parser, executed by the kernel during early
+boot, parses RPM headers found in /etc/diglim in the initial ram disk
+(included with a custom dracut script) and uploads them to the
+kernel.</q>" 
+</p>
+
+<p>
+In part, the idea behind DIGLIM is to provide a way for systems to handle
+integrity management without the distributions having to be intimately
+involved in the process.  For systems where  remote attestation is wanted, there
+will be ways to achieve it without Fedora (or any other distribution) having to directly
+manage the process.  DIGLIM would also allow the detection of tampering with
+the installed files, as with IMA, but it can do so with better performance
+than the standard IMA mechanism, according to the kernel patch description.
+</p>
+
+<p>
+There is a fairly long list of kernel prerequisites that need to be
+maintained "<q>and
+possibly have them accepted in the upstream kernel</q>".  In fact, as
+the discussion thread made clear, Fedora is unlikely to adopt the feature
+unless those patches do make their way upstream.  There is some additional
+work that needs done for Fedora so that the RPM headers get processed
+properly for those systems that wish to enable the feature, which is the
+other piece of the proposal.
+</p>
+
+<h4>Reaction</h4>
+
+<p>
+The optional nature of the feature, and the generally fairly narrow use
+cases for it, mean that it will have limited impact for the vast majority
+of Fedora users.  It also means that it will have limited—or no—utility for
+those users.  Some of those with concerns, or objections, seemed to
+misunderstand that it would only be enabled by user choice, not
+distribution fiat. For example, Kevin Kofler <a
+href="/ml/fedora-devel/sqe08b$140k$1@ciao.gmane.io/">said</a>: "<q>[...]
+I do not see how the 'feature' implemented by this  
+Change provides any value at all that does not contradict the very 
+definition of Free Software.</q>"  He is concerned about being unable to
+install software built by a third party or by the user themselves.
+</p>
+
+<p>
+But, as  Mattia Verga <a
+href="/ml/fedora-devel/67018fae-6549-da0b-6451-77c99e2aefab@protonmail.com/">put
+it</a>, the intent is quite different: "<q>It doesn't deny a user to install any software they want, it
+is about preventing unwanted/unsolicited/malevolent software from being 
+installed without user (admin) approval.</q>"  Kofler is <a
+href="/ml/fedora-devel/sqf4er$skk$1@ciao.gmane.io/">worried</a> about a
+slide toward iOS-style centralization of the control of software sources,
+however, 
+which would obviously run counter to free-software ideals.  But few seem to
+see this effort as headed down that path. Michel Alexandre Salim <a
+href="/ml/fedora-devel/YczK5w8Kr+HWRiBD@michel-fedora-PC198L6J.dhcp.thefacebook.com/">envisioned</a>
+something more in keeping with Fedora's goals:
+<blockquote class="bq">
+If/when something like this gets shipped, I hope Fedora limits itself to
+shipping a policy that is the equivalent of SELinux's 'targeted' policy:
+protect the RPMs that Fedora ships from being tampered with, let users
+do whatever on top. With an option to turn it off completely or to
+enforce more strictly.
+</blockquote>
+</p>
+
+<p>
+In fact, Sassu <a
+href="/ml/fedora-devel/e9221371660b4ca58771468ae408db67@huawei.com/">said</a>
+his work on DIGLIM provides  a good example of how third-party code 
+might be handled:
+<blockquote class="bq">
+I'm using myself a COPR [<a
+href="https://fedoraproject.org/wiki/Category:Copr">Cool Other Package
+Repo</a>] repository
+to build the kernel package with the DIGLIM patches. That kernel
+also includes my own GPG key generated for me by COPR.
+<p>
+This has not been decided yet, but likely the Fedora kernel will
+contain the official Fedora keys, and the user will decide to add
+new keys (including those from COPR).
+</blockquote>
+</p>
+
+<p>
+In a <a
+href="/ml/fedora-devel/1066ac083a204cb689fdea0cc0856fc3@huawei.com/">longer
+message</a>, Sassu sought to alleviate some of the concerns and fears about
+the feature: "<q>[...] its primary goal is to
+aid the users to satisfy their security needs, and let them
+decide how this will be done</q>". He noted that the feature is already
+in production use in the Fedora-based <a
+href="https://www.openeuler.org/">openEuler distribution</a>, but he also
+recognized that getting the feature upstream was important. Neal Gompa <a
+href="/ml/fedora-devel/CAEg-Je9+JG4Xp4UmF4FuRn6e8-emu1DzNzvka5cKNAqdrBN--w@mail.gmail.com/">agreed</a>
+that Fedora generally "<q>does not include non-upstream functionality in its
+Linux kernel builds</q>", but noted that DIGLIM could be useful:
+<blockquote class="bq">
+I also agree that this feature is unlikely to affect people, as this
+feature will not be enabled by default. It would be extremely useful
+for people building Fedora-based appliances which need tamper
+protection for various reasons. And Fedora derivatives (like
+RHEL/CentOS, Amazon Linux, openEuler, etc.) can benefit from us having
+the functionality integrated even if we don't enable it by default.
+</blockquote>
+</p>
+
+<h4>DRM</h4>
+
+<p>
+It is clearly true that the TPM and remote attestation can be used for
+various <a
+href="https://en.wikipedia.org/wiki/Digital_rights_management">digital
+rights management</a> (DRM)—digital <i>restrictions</i> management, to
+some—schemes.  Nico Kadel-Garcia is <a
+href="/ml/fedora-devel/CAOCN9rwqKwU+4w6qp5DQaTDM3Gd_sRHbrOv0_S09oDo=mAZb9g@mail.gmail.com/">convinced</a>
+that the feature "<q>has no use but digital rights
+management</q>". But Sassu <a
+href="/ml/fedora-devel/02e1282b93d84d1bb993a3bcf6b1c07d@huawei.com/">pointed
+out</a> that there are other uses:
+<blockquote class="bq">
+If you
+want to enforce an IMA measurement policy instead, access
+to the files will be always granted, regardless of whether
+the digest lists are signed or not. IMA, in this case, will simply
+record the execution of unknown files, in addition to the
+digest lists you generated.
+<p>
+The IMA measurement list remains in your system, unless
+you decide that your system should be remotely attested
+by a remote verifier.
+</blockquote>
+</p>
+
+<p>
+Kadel-Garcia was <a
+href="/ml/fedora-devel/CAOCN9ry+O09nT2iJqOf4H49VX08iFQyMF31XVfkOx8p+KQp=Fg@mail.gmail.com/">adamant</a>
+that it is all about DRM,
+but Gompa <a
+href="/ml/fedora-devel/CAEg-Je81NBB_k721hjFr+4xkGNNa0rt=OJC6ibD1KNJRQkT-sw@mail.gmail.com/">tried
+to clarify further</a>:
+<blockquote class="bq">
+The difference between IMA/verity and DRM is that the former is under
+the system owner's control (in this case, *you*), and the latter is
+*not*.
+<p>[...] There is a ton of value in user-controlled versions of this
+capability. And again, none of this is on by default, it's up to *you*
+to turn it on.
+</blockquote>
+</p>
+
+<h4>Implementation questions</h4>
+
+<p>
+Zbigniew Jędrzejewski-Szmek <a
+href="/ml/fedora-devel/20211230120142.GB11852@in.waw.pl/">had some
+questions</a> about the feature and its implementation.  In particular, the
+need for a
+user-space parser that is run by the kernel was questioned, but Sassu <a
+href="/ml/fedora-devel/36c5c19731e24c4f9995b0272f21ff43@huawei.com/">said</a>
+that the helper needs to be run <i>before</i> the <tt>init</tt> process, so
+that <tt>init</tt> (and all of its dependencies) can be integrity checked
+using the digest list.  It is something of a chicken-and-egg problem, which
+also led Sassu to statically link the helper program; only the digest of
+that one file needs to be added before it can run to add all of the rest of
+the digests. 
+</p>
+
+<p>
+Lennart Poettering <a
+href="/ml/fedora-devel/YdLtEI8ta2cWopJN@gardel-login/">thought</a> that the
+digest information should simply be extracted into a special initrd that
+can be passed to the kernel.  That would avoid having to "upload" the
+digests to the kernel, but, as Sassu <a
+href="/ml/fedora-devel/dee34b8eeb48408cbd29c104b4e4f7dd@huawei.com/">pointed
+out</a>, that would tie the kernel to a particular digest-list format.  The
+initial version of the feature more or less worked that way, Sassu said;
+the parser was in the kernel and it read the information from the RPM
+headers, but every time a new format (e.g. a Debian deb file) needs to be
+supported, the kernel would have to change.
+</p>
+
+<p>
+Poettering was also unhappy with the statically linked helper
+("<q>Static linking is a mess.</q>"), but Sassu explained that it
+makes it simpler to bootstrap the integrity checking:
+<blockquote class="bq">
+I consider this approach self-contained: everything is needed
+to bootstrap DIGLIM is contained in the kernel-tools-diglim
+package. With dynamic linking, you also have to take care
+of all shared libraries. Since the parser is not yet functional
+(the kernel is in enforcing mode), you need to generate a
+digest list in the native format (in the spec file) for every
+shared library you want to load.
+<p>
+I liked the fact that, once you have the modified kernel
+with the appropriate GPG keys, and kernel-tools-diglim,
+you are able to run IMA appraisal without additional effort
+for its management.
+</blockquote>
+</p>
+
+<p>
+The relationship between the DIGLIM feature and the recently discussed <a
+href="878281.html">fs-verity change</a> was raised in the
+January&nbsp;3 meeting of the Fedora Engineering Steering Committee
+(FESCo).  The main difference, Sassu <a
+href="/ml/fedora-devel/b4c60f1364f846d7a03125039c49505d@huawei.com/">said</a>,
+is that DIGLIM works with the existing RPM packages and format, while the
+fs-verity support would need to add additional per-file information in the
+RPM header:
+<blockquote class="bq">
+DIGLIM adopts the current scheme of RPMs,
+and verifies with one signature all the files contained in
+the RPM. Since this data format is not suitable for use
+by the Linux kernel, for enforcing the integrity policy,
+DIGLIM extracts the digests and adds them in a hash
+table stored in kernel memory. Enforcement (it would
+be better to say security decision) is achieved by doing
+a lookup in the hash table.
+<p>
+The main advantage is that DIGLIM can achieve its
+objective, providing reference values, without any
+change to existing RPMs.
+</blockquote>
+</p>
+
+<p>
+RPM developer Panu Matilainen was <a
+href="/ml/fedora-devel/63ee976a-6c73-d9d7-fbf7-11bd7e42a98b@redhat.com/">happy
+to see that approach</a>:
+<blockquote class="bq">
+Besides not bloating up RPMs with seriously expensive per-file data, this
+side-steps the other issues associated with both IMA and fs-verity: both
+require separate signing steps for the file signatures which is a
+non-trivial cost and complexity, and unlike those the file hashes are
+covered (and thus protected) by normal rpm-level signatures too.
+</blockquote>
+</p>
+
+<p>
+It seems clear that the DIGLIM feature will not be adopted by Fedora until
+and unless DIGLIM itself gets merged into the mainline kernel—and maybe not
+even then.  The concerns about locked-down systems and DRM are reasonable
+to a certain extent, but that is not at all what DIGLIM is targeting.  On the other
+hand, though, it seems like a niche feature, at best; even though it will
+have a negligible impact for most Fedora users, that is a bit of a
+double-edged sword.  It will not impact most of them because it will not
+help them or their use cases either.
+</p>
+
+<p>
+But there are use cases that will
+benefit, and the other contenders for integrity management in Fedora seem even
+more complicated.  DIGLIM and fs-verity are both on FESCo's radar (<a
+href="https://pagure.io/fesco/issue/2721">here</a> and <a
+href="https://pagure.io/fesco/issue/2711">here</a>), so we should know the
+outcome soon.  Given the intrusiveness of the fs-verity scheme, and the
+unclear status of DIGLIM in the mainline, one might guess that both will be
+pushed off until Fedora&nbsp;37—at least.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Distribution security</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Integrity</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/880263/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor880410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2022 8:18 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/880410/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880410" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am very sceptical about this. I could see some certification authority certifying exact versions of packages (slowly, potentially only once every couple of years) and leaving systems that require that certification (to be more secure on paper) completely vulnerable in practice.<br>
+<p>
+In other words I am sceptical about giving the &quot;never change a running system&quot; crowd even a millimetre because they are already been responsible for the vast majority of unpatched security holes on de facto existing systems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor880413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2022 9:07 UTC (Wed)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/880413/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880413" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am always skeptical of attempts to increase security by increasing complexity. This opens whole new avenues for attackers  for DOSing systems or for blocking the application of security updates.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor880435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2022 14:23 UTC (Wed)
+                               by <b>ddevault</b> (subscriber, #99589)
+                              [<a href="/Articles/880435/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ddevault" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880435" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Proponents of Digital Restrictions Management are to be given no quarter. It is unethical for us to write software which is designed to deny the rights of our users. An outright refusal of any such feature requests is the only acceptable answer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880439"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2022 14:55 UTC (Wed)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/880439/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahulsundaram" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880439" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Proponents of Digital Restrictions Management are to be given no quarter</font><br>
+<p>
+From the article, &quot;The concerns about locked-down systems and DRM are reasonable to a certain extent, but that is not at all what DIGLIM is targeting&quot;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880439/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2022 15:02 UTC (Wed)
+                               by <b>ddevault</b> (subscriber, #99589)
+                              [<a href="/Articles/880440/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ddevault" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880440" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, I&#x27;m quite aware that they&#x27;ll say this. But, this is not the first time we&#x27;ve seen this kind of thing. What&#x27;s happening here is that they&#x27;re starting with what they want - technology to enable DRM - and trying to come up with use-cases which are not DRM but which use the same technology as an excuse to shove the technology through.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880476"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2022 16:37 UTC (Wed)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/880476/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahulsundaram" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880476" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Oh, I&#x27;m quite aware that they&#x27;ll say this.</font><br>
+<p>
+Who is &quot;they&quot;?  I was quoting the editorial opinion from the LWN article and not from the proposal owner FYI.  Also have you read Neal Gompa&#x27;s post on user control quoted in the article?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880476/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880530"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2022 10:47 UTC (Thu)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/880530/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880530" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Who is &quot;they&quot;? </font><br>
+<p>
+I guess Huawei? It seems the author of the proposed change works there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880530/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880537"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2022 12:48 UTC (Thu)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/880537/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahulsundaram" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880537" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I guess Huawei? It seems the author of the proposed change works there.</font><br>
+<p>
+As I already noted, I wasn&#x27;t quoting the author of the proposal.  If the software is open source and in user control, we aren&#x27;t limited by author&#x27;s intend anyway.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880537/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor880487"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2022 19:21 UTC (Wed)
+                               by <b>martin.langhoff</b> (subscriber, #61417)
+                              [<a href="/Articles/880487/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="martin.langhoff" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880487" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We need this as part of security infra -- mechanisms to validate VM images and container images against SBOM-style manifests. <br>
+<p>
+It&#x27;s useful when you fetch images and perhaps when you boot them. <br>
+<p>
+It&#x27;s useful during runtime if the kernel enforces read-only, or refuses to open tampered files.<br>
+<p>
+And it&#x27;s useful for post-mortems in case of a breach – did the attacker plant or modify files? Which ones?<br>
+<p>
+On my personal machine, I only want this kind of mechanism in a format I can trust, that&#x27;s certain. But reinforcing what you can (to a large extent) already do with rpm --verify and dpkg --verify today is a positive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880487/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880531"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2022 10:50 UTC (Thu)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/880531/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880531" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not just sign the entire vm image?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880531/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880567"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2022 15:21 UTC (Thu)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/880567/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smoogen" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880567" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it is a matter of a signed image is only good until it is run. You could only use that signature inside the image if you regenerate it against the entire image before execution of any binary. Once an update, or some other change happens that signature is no longer valid so you would need to drop the image, confirm the changes that were made were legitimate, and resign it and then rerun. These sorts of controls are to allow for updates of artifacts inside the image and knowing they are still valid. <br>
+<p>
+When you have hundreds of thousands to millions of deployed systems being able to automatically block N systems versus manually finding them and then blocking is seen as beneficial. When you have just  a laptop.. it is seen as not owning your system anymore and someone else deciding what is beneficial or not. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880567/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880574"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2022 16:55 UTC (Thu)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/880574/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880574" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is trivial to do a partition with the binaries that is mounted as RO and where the vm process has no write access, and separate partitions with noexec for the data. If you want to just verify the base system<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880574/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor880718"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another Fedora integrity-management proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2022 9:02 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/880718/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/880263/#CommAnchor880718" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Meh, it&#x27;s even useful on individual, human-operated machines. Just because a computer is human-operated, it does not necessarily follow that the human is in fact the legal owner of the computer. Businesses routinely issue devices to their employees, and the business has every right to dictate what software the device&quot;should&quot; be running, because it&#x27;s not the employee&#x27;s device. It&#x27;s the business&#x27;s device.<br>
+<p>
+Now, I&#x27;m sure that some of us would never touch such an arrangement with a ten-foot pole, but regarding it as unethical is an extreme overreaction IMHO. You cannot seriously claim that the ownership of the device changes just because someone is being allowed to borrow it, right?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880718/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

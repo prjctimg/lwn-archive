@@ -1,0 +1,302 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Using steal time to moderate CPU demands [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Using steal time to moderate CPU demands">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Virtualization can increase CPU utilization by allowing a large number of virtual CPUs to share [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Using steal time to moderate CPU demands&quot;" href="https://lwn.net/headlines/1090381/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1090825/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Using steal time to moderate CPU demands</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 27, 2026</br>
+           </div>
+Virtualization can increase CPU utilization by allowing a large number of
+virtual CPUs to share a smaller number of physical CPUs.  The amount of CPU
+time that is actually available does not change, though, so heavy activity
+on too many virtual CPUs can lead to contention and significant performance
+loss.  The <a
+href="/ml/all/20260825103855.721013-1-sshegde@linux.ibm.com">steal governor
+patch series</a> from Shrikanth Hegde is an attempt to address that problem
+with a mechanism that allows virtual machines to voluntarily reduce the
+number of virtual CPUs they use when contention is high.
+<p>
+From a virtual machine's point of view, contention for a physical CPU is
+clearly an undesirable thing.  When contention occurs, the physical CPU
+will be unavailable at times when the virtual machine is trying to make use
+of it; that slows the execution of the workload.  The situation can be
+worse than that, though, if a virtual CPU is preempted while holding locks
+needed elsewhere in the same virtual machine.  At that point, threads that
+do still have access to a physical CPU may waste their execution time
+spinning on locks that the preempted CPU is no longer able to free, with
+possibly severe effects on performance.  That is the sort of situation that
+causes customers to reconsider shared hosting.
+<p>
+Hegde's solution calls for virtual machines to take notice of when
+contention for physical CPUs is high and to reduce their demands to
+alleviate that contention.
+<p>
+<h4>Steal time and preferred CPUs</h4>
+<p>
+The amount of time that a virtual CPU spends waiting for access to a
+physical CPU is known as "steal time" — execution time that was "stolen"
+from the virtual machine by somebody else.  On a Linux system, the amount
+of steal time experienced in a virtual machine can be read from <a
+href="https://man7.org/linux/man-pages/man5/proc_stat.5.html"><tt>/proc/stat</tt></a>,
+or seen with utilities like <a
+href="https://man7.org/linux/man-pages/man1/top.1.html"><tt>top</tt></a> or
+<a
+href="https://man7.org/linux/man-pages/man8/vmstat.8.html"><tt>vmstat</tt></a>.
+The level of steal time seen by a virtual CPU can be used as a measure of
+how much contention for the physical CPU is being experienced.
+<p>
+Hegde's patch set uses steal time to help maintain (in ways that will be
+described shortly) a "preferred CPU" set.  The preferred CPUs are a subset
+of the active virtual CPUs available to the virtual machine; as much as
+possible, the kernel on that virtual machine will try to schedule its tasks
+only on the preferred CPUs, leaving the others idle.  When the virtual
+machine starts, the preferred set contains all of the active CPUs.  Should
+the level of steal time experienced become too high, one or more CPUs will
+be removed from the preferred set.  When steal time goes below a lower
+threshold, CPUs can be restored to the preferred set.
+<p>
+The scheduler makes use of the preferred set in few small but significant
+ways:
+<p>
+<ul class="spacylist">
+<li> Whenever the time comes to wake a sleeping task, that task will be placed
+     on one of the preferred CPUs if possible.
+<li> At each regular scheduler tick, the kernel checks whether the current
+     CPU is in the preferred set.  If not, the running task, if any, will
+     be pushed out of the current CPU to run on one of the preferred CPUs
+     instead. 
+<li> Load balancing will avoid moving tasks onto CPUs that are not in
+     the preferred set.
+</ul>
+<p>
+One important exception to these rules is that a task's CPU affinities will
+be honored.  If a task is only eligible to run on non-preferred CPUs, it
+will be placed on one of those CPUs.  Other than that, though, this
+machinery will cause any CPUs that are removed from the preferred set to go
+mostly idle, concentrating the virtual machine's tasks on the preferred set
+and reducing the number of physical CPUs that the virtual machine is
+contending for.
+<p>
+One might argue that the result is simply to move the problem around.
+Contention arises because there is more load on the system than its
+physical CPUs are able to handle; that load will not go away just because
+the set of virtual CPUs available to a virtual machine has been reduced.
+What does happen, though, is that the preemption decisions are moved into
+the virtual machine, which has more information about the workload and
+which tasks should be allowed to run first.  That can allow the virtual
+machine to run high-priority tasks, or tasks holding contended locks,
+before others, leading to better decisions overall.
+<p>
+<h4>Policy</h4>
+<p>
+The policy part of this system is encapsulated in a "driver" called the
+<tt>steal_governor</tt>.  It is not actually implemented as a driver,
+though; it runs as a workqueue item that continually resubmits itself.  It
+is controlled by three parameters: <tt>interval_ms</tt> regulates how often
+it checks the experienced steal time, while <tt>low_threshold</tt> and
+<tt>high_threshold</tt> set (as percentages) the amount of steal time
+that should lead to an increase or decrease in the number of preferred
+CPUs, respectively.  Interestingly, these parameters do not appear in
+sysfs; instead, they are implemented as module parameters, a configuration
+method that has been discouraged in recent years.  Changing any of these
+parameters requires unloading and reloading the <tt>steal_governor</tt>
+module.  The default value for <tt>interval_ms</tt> is 1000ms; the low and
+high thresholds default to&nbsp;2% and&nbsp;5%, respectively.
+<p>
+On each iteration, the governor compares the amount of steal time to the
+high threshold.  If that threshold is exceeded, the governor will look for
+a core that contains no <a
+href="https://www.kernel.org/doc/html/next/core-api/housekeeping.html">housekeeping</a>
+CPUs; all CPUs in that core will be removed from the preferred set (subject
+to the obvious restriction that at least one CPU must remain in the
+preferred set).  No other immediate action is taken; the scheduler tweaks
+described above will eventually cause tasks to move away from the
+non-preferred CPUs.  If, instead, the steal time drops below the low
+threshold, one core's worth of CPUs will be added back to the preferred set
+(until the point where all CPUs are preferred).
+<p>
+The policy implementation may be enough for a proof of concept, but it may
+end up falling short for real deployments.  At a minimum, the ability to
+change the governor's parameters without unloading and reloading a module
+would be a clear improvement.  There does not seem to be a reason why these
+values could not be changed directly using sysfs or sysctl knobs.  Even
+then, though, it seems inevitable that somebody will want the ability to
+control the preferred CPU set from user space, or, even more inevitably,
+with a BPF program.
+<p>
+Another potential problem, of course, is the entirely voluntary nature of
+this mechanism; it is nice that each virtual machine can react
+independently, and that there is no need for an overall control or
+communication mechanism, but the result is a system that is dependent on
+universal cooperation.  If only some virtual machines reduce their
+preferred CPU count, they will be penalized relative to those that do not.
+That may limit the applicability of this mechanism on multi-tenant systems
+where some users may not feel inclined (or may be unable) to cooperate.
+<p>
+On systems where cooperation can be expected, though, the results would
+appear to be good.  The cover letter includes data from a number of
+benchmark runs showing improvements from about&nbsp;2% for <a
+href="https://github.com/masoncl/schbench#motivations">schbench</a> to
+over&nbsp;44% for some <a
+href="https://manpages.ubuntu.com/manpages/xenial/man8/hackbench.8.html">hackbench</a>
+runs.  Hegde summarizes the results as: "<q>Many improvement across archs
+especially with real life workloads</q>". 
+
+<p>
+This patch series has been circulating since the <a
+href="/ml/all/20250523181448.3777233-1-sshegde@linux.ibm.com/">first RFC
+version</a> in May 2025.  It has been through 11&nbsp;revisions — after
+several RFC versions — and has evolved considerably over that time.  It has
+not, as yet, acquired the Acked-by or Reviewed-by tags that might indicate
+readiness for merging into the mainline, but Hegde nonetheless said that
+"<q>I believe the series has now converged and is ready for merge
+consideration</q>".  Whether the scheduler maintainers agree will likely
+become clear sometime after the close of the merge window.
+<p>
+This work was <a href="/Articles/1078697/#pv">discussed</a> at the 2026
+Power Management and Scheduling in the Linux Kernel Summit; the <a
+href="https://www.youtube.com/watch?v=adxUKFPlOp0">video</a> from that
+session is available.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Virtualization</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1090381/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1091018"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Penalizing cooperating systems?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2026 19:23 UTC (Thu)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/1091018/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="matthias" />
+                <input type="hidden" name="return" value="/Articles/1090381/#CommAnchor1091018" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; If only some virtual machines reduce their preferred CPU count, they will be penalized relative to those that do not. </span><br>
+<p>
+Is this necessarily the case? If the host scheduler is fair, then the system that reduces its preferred CPU count should still get the same share of the physical CPUs. The non-cooperating systems should exhaust their time slices and their virtual CPUs should be preempted to let other systems run while the cooperating system will not exhaust its time slices and the preferred set can keep running.<br>
+<p>
+Of course this depends on the host scheduler and host configuration regarding cgroups. But it should be possible to configure the host system in a way that cooperating guests are not penalized. Or do I miss something here?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1091018/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093345"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Penalizing cooperating systems?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2026 13:26 UTC (Wed)
+                               by <b>sshegde</b> (guest, #156500)
+                              [<a href="/Articles/1093345/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sshegde" />
+                <input type="hidden" name="return" value="/Articles/1090381/#CommAnchor1093345" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hi matthias,  <br>
+<p>
+It is not necessarily the case. As you said. it depends on the host scheduler and the VM configuration.<br>
+<p>
+The documentation says that a VM which does not enable the feature "may end up with more CPUs than others" to cover host-dependent cases and to recommend cooperative deployment as the best practise.<br>
+<p>
+For example, with PowerVM, each VM has an minimum guaranteed capacity (EC) in addition to its number of vCPUs (VPs). The hypervisor guarantees the EC worth of CPU time even when there are non-coperative VMs.<br>
+<p>
+However, an uncapped VM may also receive capacity above its entitlement when spare  capacity is available. How that excess capacity is distributed, and whether a non-cooperating VM benefits from keeping more vCPUs runnable, depends on the host scheduler and partition configuration. Therefore, I used "may" rather than saying that cooperating VMs are necessarily penalized.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093345/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

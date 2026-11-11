@@ -1,0 +1,620 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The 7.0 scheduler regression that wasn't [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The 7.0 scheduler regression that wasn't">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the more significant changes in the 7.0 kernel release is to use the lazy-preemption mod [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1067990/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The 7.0 scheduler regression that wasn't</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 17, 2026</br>
+           </div>
+One of the more significant changes in the 7.0 kernel release is to use <a
+href="994322.html">the lazy-preemption mode</a> by default in the CPU
+scheduler.  The scheduler developers have wanted to reduce the number of
+preemption modes for years, and lazy preemption looks like a step toward
+that goal.  But then there came <a
+href="/ml/all/20260403191942.21410-1-dipiets@amazon.it">this report</a>
+from Salvatore Dipietro that lazy preemption caused a 50% performance
+regression on a PostgreSQL benchmark.  Investigation showed that the
+situation is not actually so grave, but the episode highlights just how
+sensitive some workloads can be to configuration changes; there may be
+surprises in store for other users as well.
+<p>
+One of the key decisions a CPU scheduler must make is when to remove a
+running process from the CPU to allow another to run.  Preempting processes
+quickly when there is higher-priority work to do can produce quicker
+response times and, thus, lower latency.  Aggressive preemption comes with
+a cost, though, in terms of the overall throughput of the system.  Rapid
+switching of tasks can lead to more scheduler overhead, worse cache
+utilization, and more lock contention.  It is hard to find a solution that
+works for every workload, a fact that has made it hard to remove the
+variety of preemption modes from the scheduler.  
+<p>
+The lazy-preemption mode was designed with an eye toward the needs of both
+latency-sensitive and throughput-driven workloads.  Unlike the
+full-preemption or realtime modes, lazy preemption will normally allow a
+task to run for a while even after the need for preemption has been
+detected.  That preemption will be deferred until the task exhausts its
+time slice, blocks for some other reason, or until the next scheduler tick
+occurs.  That leads to a quicker preemption than would happen with the
+<tt>PREEMPT_NONE</tt> mode (which only preempts a process at the end of its
+time slice), but still allows the task to run for a while before the
+preemption occurs.
+<p>
+Dipietro reported that the PostgreSQL performance regression was caused by
+a large increase in lock contention.  PostgreSQL uses user-space spinlocks
+for much of its concurrency control; one problem with such locks is that,
+if a lock holder is preempted before the lock can be released, other
+processes will spin on a lock that may remain held for a long time.  An
+increase in the frequency of preemption could indeed cause this to happen;
+more preemptions mean more chances to sideline a process before it is able
+to release a contended lock.
+<p>
+At a first glance, that seemed to be exactly what was happening here,
+leading scheduler developer Peter Zijlstra to <a
+href="/ml/all/20260403213207.GF2872@noisy.programming.kicks-ass.net">suggest</a>
+that the proper fix was for PostgreSQL to use <a
+href="/Articles/1038235/">time-slice extension</a> to protect lock holders
+from preemption.  This feature allows a process to request that it not be
+preempted for a short period while it completes the execution of a critical
+section and releases its locks.  It is a useful feature for a situation
+like this but, as PostgreSQL developer Andres Freund <a
+href="/ml/all/yr3inlzesdb45n6i6lpbimwr7b25kqkn37qzlvvzgad5hfd7ut@xv4cihno76wu">pointed
+out</a>, time-slice extension was only added in the 7.0 kernel;
+"<q>requiring the use of a new low level facility that was introduced in
+the 7.0 kernel, to address a regression that exists only in 7.0+, seems not
+great</q>".  It would also not be a simple change, he said, so backporting
+any such fix to released versions of PostgreSQL was unlikely to happen.
+<p>
+Zijlstra, faced with the prospect of having to revert a scheduler change
+that had been years in the making, <a
+href="/ml/all/20260407084913.GF3738010@noisy.programming.kicks-ass.net">was
+clearly reluctant</a> to do so.  He suggested that anybody who updates the
+kernel on a system running PostgreSQL could be expected to update the
+database manager as well.  This is the sort of forced update scenario that
+the kernel's regression policy is meant to avoid, but Zijlstra remarked
+"<q>sometimes you have to break eggs to make cake :-)</q>".  If a revert was
+needed, he said, it would be "<q>a very temporary thing</q>".  The plan is
+to eventually remove <tt>PREEMPT_NONE</tt> entirely, eliminating a fair
+amount of complexity in the scheduler.
+<p>
+Meanwhile, though, Freund <a
+href="/ml/all/wggtu3jjnloqq4fpokuiusbczatxvsgpghkiljzfz5cn53sigr@xcvnvlblte7o">was
+unable to reproduce the problem</a>, and had a hard time understanding how
+it could come about.  A little while later, though, <a
+href="/ml/all/xxbnmxqhx4ntc4ztztllbhnral2adogseot2bzu4g5eutxtgza@dzchaqremz32">he
+figured it out</a>.  In his test systems, he had enabled the use of
+<strike>transparent</strike> huge pages <strike>(THPs)</strike>, "<q>as
+that is the only sane thing to do with 10s to 100s of GB of shared memory
+and thus part of all my benchmarking infrastructure</q>".  When he disabled
+huge pages, the problem reported by Dipietro surfaced immediately.  That
+revelation removed the urgency from this regression:
+<p>
+<blockquote class="bq">
+	I don't see a reason to particularly care about the regression if
+	that's the sole way to trigger it.  Using a buffer pool of ~100GB
+	without huge pages is not an interesting workload.  With a smaller
+	buffer pool the problem would not happen either.
+</blockquote>
+<p>
+He added that, even in the absence of the spinlock contention, avoiding
+huge pages was going to have bad performance effects.
+<p>
+Freund had expressed confusion about how there could be contention on the
+lock that Dipietro pointed out, since the critical section it protects is
+quite short.  But, when huge pages are not in use, that section will take
+longer to execute.  The extra pressure on the translation lookaside buffer
+(TLB) caused by using small pages will be a part of the problem, but a
+bigger part is almost certainly just the greatly increased number of page
+faults that will occur in that configuration.  These effects will increase
+the execution time in the critical section, increasing the chances that a
+<tt>PREEMPT_LAZY</tt> kernel will take control away from a lock-holding
+process.  That slowdown is far less likely to happen when huge pages are in
+use.
+<p>
+One conclusion from that diagnosis is that time-slice extension would be of
+little help; Freund  <a
+href="/ml/all/gsm4btuhuljftcqs4zizevfpl5ag4tjenuesxzzdinyccjy7wp@2ujheofprejr/">confirmed</a>
+that the performance regression happened even when user-space spinlocks are
+taken out of the picture.  That said, he did acknowledge that the feature
+was worth looking into on its own merits, saying it looks "<q>nice for
+performance regardless of using spinlocks</q>".
+
+<p>
+Dipietro <a
+href="/ml/all/20260408200815.19050-1-dipiets@amazon.it/">confirmed</a> that
+enabling huge pages caused the regression to disappear.  With that report,
+thoughts of reverting the scheduler change also seemed to disappear.  That
+may be a bit premature, though.  There are likely to be systems in the wild
+running under less-than-optimal configurations that will show regressions
+when hit with this kind of change.  That prospect, in turn, may cause
+distributors to shy away from lazy preemption in their kernels, regardless
+of what the scheduler developers might like.  An immediate revert might not
+be in the cards, but the grand plan to remove <tt>PREEMPT_NONE</tt> may
+have a longer path to completion than some would like.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Preemption</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Preemption models</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1067029/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1068405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2026 14:45 UTC (Fri)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/1068405/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vbabka" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068405" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+sure wasn't in my 2026 bingo card!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2026 2:01 UTC (Sat)
+                               by <b>page_walker</b> (subscriber, #99801)
+                              [<a href="/Articles/1068436/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="page_walker" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068436" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I needed to read it multiple times to confirm THP is now a good thing. :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068441"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2026 5:48 UTC (Sat)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/1068441/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andresfreund" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068441" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It doesn't have an effect in this case, my comments / benchmark result were about using explicit huge pages. The regression reproduces when THPs are enabled, but explicit huge pages are not used. The entire contention is due to page faults during the first access to a page, in a workload with substantial memory pressure, I don't think it's likely that THP will succeed often / quick enough to matter. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068441/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068469"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2026 13:51 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1068469/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068469" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+khugepaged is unlikely to be of help, but we can allocate THPs by default these days given appropriate calls to madvise() and similar.<br>
+<p>
+It will fall back to lower orders, probably more easily than you'd prefer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068469/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1068496"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2026 1:35 UTC (Mon)
+                               by <b>mmeehan</b> (subscriber, #72524)
+                              [<a href="/Articles/1068496/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mmeehan" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068496" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thinking about transparent huge page allocation, there are cases where default allocation page size could flip to 2 MB by default. For example, for malloc calls over some size they could be transparently backed by huge pages straight away. Would that have helped for this workload?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068496/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2026 2:03 UTC (Mon)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/1068497/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andresfreund" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068497" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Would that have helped for this workload?</span><br>
+<p>
+Possibly. But it's worth noting that that workload is ... not realistic, as it tests an absurd amount of concurrency, with a cold cache, a huge amount of memory. This is not a bottleneck that I've seen outside of intentional torture testing.<br>
+<p>
+I am somewhat sceptical that relying on THPs for a 100GB database buffer pool is a good idea or will be one in the near future. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068500"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2026 3:14 UTC (Mon)
+                               by <b>mmeehan</b> (subscriber, #72524)
+                              [<a href="/Articles/1068500/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mmeehan" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068500" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's more like, if you malloc 10 GB in one go then the kernel may as well give you 1 GB or 2 MB pages transparently if the buddy allocator has contiguous blocks of memory of that size around. If not, you fall back to 4 KB pages. Doesn't seem like it would be more overhead to allocate them this way outright, rather than satisfy the malloc with 4 KB pages and try to mash them together later. This would lead to most big allocations being huge page backed outright, until fragmentation kicked in.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068500/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068537"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2026 11:38 UTC (Mon)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1068537/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068537" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that idea may not play well with lazy memory allocation — the kernel doesn't actually allocate memory for a program's use until it touches a page, which is an important optimization because plenty of programs ask for more memory than they actually use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068537/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068538"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparent hugepages preventing performance regressions instead of causing them</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2026 12:20 UTC (Mon)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/1068538/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vbabka" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068538" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed. But even without such preallocation, the first access in every 2MB aligned sub-range of that large range would attempt to give you a 2MB THP, not a 4kB base page. That's what "always" means here and it's AFAIK default:<br>
+<p>
+# cat /sys/kernel/mm/transparent_hugepage/enabled <br>
+[always] madvise never<br>
+<p>
+If that 2MB page isn't readily available (memory is low, fragmented), then it depends if the system will try reclaim/compaction or not, depending on this:<br>
+<p>
+# cat /sys/kernel/mm/transparent_hugepage/defrag<br>
+always defer defer+madvise [madvise] never<br>
+<p>
+And AFAIK the default is madvise, so only regions subjected to madvise(MADV_HUGEPAGE) will try reclaim/compaction.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068538/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1068437"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">why did PREEMPT_LAZY caused more preemptions than PREEMPT_NONE with THP disabled?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2026 2:22 UTC (Sat)
+                               by <b>rharjani</b> (subscriber, #87278)
+                              [<a href="/Articles/1068437/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rharjani" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068437" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess from above it still wasn't fully clear why PREEMPT_LAZY caused more preemptions than PREEMPT_NONE with THP disabled (or maybe it was obvious for few). <br>
+<p>
+My assumption there is - <br>
+<p>
+With THP disabled, the workload takes many more page faults which serializes on the page table spinlock. This means more preempt_disable() / preempt_enable() pairs for this type of workload. Since preempt_enable() is a preemption point under PREEMPT_LAZY but a no-op under PREEMPT_NONE, maybe this gives far more preemption opportunities under PREEMPT_LAZY (especially since the workload was CPU-intensive and ran well past the scheduler tick that would have escalated TIF_NEED_RESCHED_LAZY to TIF_NEED_RESCHED)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068437/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1068440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">not THP, explicit huge pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2026 5:43 UTC (Sat)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/1068440/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andresfreund" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068440" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that the fix isn't to use THP, it's using explicit huge pages. I think the workload in question would be unlikely to be helped by THP, as the entire problem only happens during warmup, when a page in postgres' buffer pool is used for the first time. <br>
+<p>
+<span class="QuotedText">&gt;  PostgreSQL uses user-space spinlocks for much of its concurrency control</span><br>
+<p>
+Fwiw, that's not really true. Almost everything is protected by locks that use futexes under the hood, it's just much less commonly contended state, or state that is extremely crucial, where futexes are just not competitive (exactly one spinlock) due to the additional memory barrier during lock release. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1068491"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">not THP, explicit huge pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2026 6:48 UTC (Sun)
+                               by <b>mokki</b> (subscriber, #33200)
+                              [<a href="/Articles/1068491/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mokki" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1068491" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+PostgreSQL could add an option to pre touch all shared memory on startup (in parallel). After that the differences between THP and real huge pages are at least somewhat reduced.<br>
+<p>
+This is what java +UseTransparentHugePages and +AlwaysPreTouch combination does. In cases where one cannot get real huge pages it is very convenient (inside many containers, or without root access).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1068491/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069963"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">not THP, explicit huge pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2026 15:45 UTC (Mon)
+                               by <b>psoo</b> (subscriber, #94343)
+                              [<a href="/Articles/1069963/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="psoo" />
+                <input type="hidden" name="return" value="/Articles/1067029/#CommAnchor1069963" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's pg_prewarm in contrib which helps warming up the shared_buffer pool.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069963/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,332 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Solutions for direct-map fragmentation [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Solutions for direct-map fragmentation">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's 'direct map' makes the entirety of a system's physical memory available in the ker [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/894984/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Solutions for direct-map fragmentation</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 12, 2022</br>
+           <hr>
+<a href="/Articles/lsfmm2022/">LSFMM</a>
+</div>
+The kernel's "direct map" makes the entirety of a system's physical memory
+available in the kernel's virtual address space.  Normally, huge pages are used for
+this mapping, making it relatively efficient to access.  Increasingly,
+though, there is a need to carve some pages out of the direct map; this
+splits up those huge pages and makes the system as a whole less efficient.
+During a memory-management session at the 
+<a href="https://events.linuxfoundation.org/lsfmm/">2022
+Linux Storage, Filesystem, Memory-management and BPF Summit</a> (LSFMM),
+Mike Rapoport led a session on direct-map fragmentation and how it might be
+avoided.
+<p>
+Rapoport started by saying that the direct-map fragmentation problem is
+specific to the x86 architecture at this point; some other architectures
+cannot fragment their direct map at all.  There are a number of activities
+that can lead to direct-map fragmentation, including <a
+href="892743.html">allocations for BPF programs</a>, various <a
+href="865256.html">secret-memory mechanisms</a>, and virtualization
+technologies like <a
+href="https://www.amd.com/system/files/TechDocs/SEV-SNP-strengthening-vm-isolation-with-integrity-protection-and-more.pdf">SNP</a>
+and <a
+href="https://www.intel.com/content/www/us/en/developer/articles/technical/intel-trust-domain-extensions.html">TDX</a>.
+Other changes envisioned for the future, including the <a
+href="/ml/linux-mm/20201120202426.18009-1-rick.p.edgecombe@intel.com/">permission
+<tt>vmalloc()</tt> API</a>
+
+<a href="/Articles/894565/"><img
+src="../_static/images/conf/2022/lsfmm/MikeRapoport2-sm.png" alt="[Mike Rapoport]"
+title="Mike Rapoport" class="rthumb"></a>
+
+
+ and using <a href="/Articles/894531/">protection
+keys supervisor (PKS) to protect page tables</a>, will make things
+worse. As more subsystems carve 
+pieces out of the direct map, the performance of the system will decline;
+this is an outcome worth avoiding.
+<p>
+Rapoport's proposal is to coalesce these various uses into a single region
+of memory as a way of minimizing the fragmentation they create.  Once a
+huge page has been split for carved-out memory, further requests for such
+memory should be satisfied from the same huge page, if possible.  To that
+end, he suggests adding a new GFP flag (<tt>__GFP_UNMAPPED</tt>) so that
+normal page-allocator calls can be used to obtain memory that has been
+removed from the direct map.
+Callers using this flag would have to map the
+allocated memory in whatever way makes sense for their use case.  A new
+migration type (<tt>MIGRATE_UNMAPPED</tt>) would  be added to
+prevent this memory from being accidentally migrated back into
+direct-mapped memory.    He has
+posted <a href="/ml/linux-mm/20220127085608.306306-1-rppt@kernel.org/">a
+patch set</a> implementing this idea in a prototype form; it "kind of
+works", he said.
+<p>
+Michal Hocko said that using the page allocator might not be the best
+approach; it will be adding overhead to highly optimized fast paths for a
+rare case.  Mel Gorman agreed that using the page allocator was overkill,
+creating a special case for a single user.  Rapoport's addition of a
+separate migration type, he added, would end up fragmenting memory anyway
+because those pages cannot be moved.
+Rapoport answered that, in a long-running machine, direct-map fragmentation
+is inevitable, leading Gorman to answer that he does not want to see the
+extra complexity added to the page allocator to address a problem that will
+still happen.
+<p>
+An alternative, Rapoport said, would be to have a separate allocation
+mechanism that sits next to the page allocator.  In this case, each user
+would have their own cache, which is a less attractive option.  But Gorman
+replied that migration types are not free either; each new one adds a set
+of linked lists and increases the size of the page-block bitmap.  A better
+solution, he said, might be a special slab cache.
+<p>
+David Hildenbrand said that, in his role working on memory hotplug, he
+hates memory that is not movable; Rapoport's proposal would create more
+unmovable memory and make the problem worse.  Rapoport said that his patch
+tries to avoid movable zones when performing unmapped allocations, which
+should minimize the problem.  Hocko repeated, though, that the page
+allocator is not the best place to make this type of allocation; users
+"count every CPU cycle" for memory allocations, and any extra overhead
+there is unwelcome.  It would be better to build something like a slab
+allocator on top of the page allocator, he said.
+<p>
+At the end of the session, Rapoport said that he would try to create some
+sort of slab-like solution.  Vlastimil Babka cautioned that the existing
+slab allocator cannot be used for BPF programs; the slab allocator hands
+out objects of the same size, but every BPF program is different.  Rapoport
+concluded by saying he wasn't sure how to solve all of the problems, but
+would be making the attempt soon.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Direct map</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2022</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/894557/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor895465"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solutions for direct-map fragmentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 17, 2022 5:11 UTC (Tue)
+                               by <b>hyeyoo</b> (subscriber, #151417)
+                              [<a href="/Articles/895465/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hyeyoo" />
+                <input type="hidden" name="return" value="/Articles/894557/#CommAnchor895465" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; some other architectures cannot fragment their direct map at all.</font><br>
+<p>
+Any architecture that supports huge pages (huge mapping) can fragment direct map, no?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/895465/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor895561"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solutions for direct-map fragmentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 17, 2022 19:07 UTC (Tue)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/895561/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="meyert" />
+                <input type="hidden" name="return" value="/Articles/894557/#CommAnchor895561" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there a way to find out the degree of this type of memory fragmentation from some sysfs files or something similar?<br>
+What would be a typical performance impact on a system with different states of fragmentation, lets say 10%, or is that to general and depends very much on the workload?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/895561/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor895719"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solutions for direct-map fragmentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2022 1:27 UTC (Thu)
+                               by <b>hyeyoo</b> (subscriber, #151417)
+                              [<a href="/Articles/895719/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hyeyoo" />
+                <input type="hidden" name="return" value="/Articles/894557/#CommAnchor895719" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Is there a way to find out the degree of this type of memory fragmentation from some sysfs files or something similar?</font><br>
+<p>
+DirectMap4K/2M/1G in /proc/meminfo shows how direct map is fragmented.<br>
+<p>
+<font class="QuotedText">&gt; What would be a typical performance impact on a system with different states of </font><br>
+<font class="QuotedText">&gt; fragmentation, lets say 10%, or is that to general and depends very much on the workload?</font><br>
+<p>
+<a href="https://lpc.events/event/11/contributions/1127/attachments/922/1792/LPC21%20Direct%20map%20management%20.pdf">https://lpc.events/event/11/contributions/1127/attachment...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/895719/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor895721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solutions for direct-map fragmentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2022 1:33 UTC (Thu)
+                               by <b>hyeyoo</b> (subscriber, #151417)
+                              [<a href="/Articles/895721/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hyeyoo" />
+                <input type="hidden" name="return" value="/Articles/894557/#CommAnchor895721" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Vlastimil Babka cautioned that the existing slab allocator cannot be used for BPF programs; &gt; the slab allocator hands out objects of the same size, but every BPF program is different.</font><br>
+<p>
+Maybe slab can be used for bpf_prog_pack allocator? it allocates bpf_prog_pack_size at once.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/895721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor895722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solutions for direct-map fragmentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2022 1:39 UTC (Thu)
+                               by <b>hyeyoo</b> (subscriber, #151417)
+                              [<a href="/Articles/895722/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hyeyoo" />
+                <input type="hidden" name="return" value="/Articles/894557/#CommAnchor895722" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On second thought, It will not benefit from SLUB if allocation size is bigger than PAGE_SIZE * 2. :(<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/895722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

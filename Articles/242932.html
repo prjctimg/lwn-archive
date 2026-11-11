@@ -1,0 +1,633 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Cache poisoning vulnerability found in BIND [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Cache poisoning vulnerability found in BIND">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Domain Name System (DNS) cache poisoning has been a problem, on and off, for  years.  There ha [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/242236/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Cache poisoning vulnerability found in BIND</h1>
+<div class="Byline">[Posted July 25, 2007 by jake]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+<p>
+Domain Name System (DNS) cache poisoning has been a problem, on and off, for 
+years.  There has
+been a kind of an arms race with security researchers periodically 
+finding problems in DNS server implementations and the vendors racing to 
+fix them.
+Amit Klein of Trusteer recently released a
+<a href="http://lwn.net/Articles/242724/">vulnerability
+report</a> for the <a href="http://www.isc.org/sw/bind/">Berkeley Internet
+Name Daemon</a> (BIND) showing a rather reliable means to poison
+the cache of a nameserver that runs it.  The consequences of this poisoning
+can be quite severe, invisibly rerouting traffic bound for a given host
+to one under an attacker's control.
+</p>
+
+<p>
+We will dispense with the usual overview of DNS, it was briefly described in
+an <a href="http://lwn.net/Articles/230050/">April LWN article</a> -
+the <a href="http://www.trusteer.com/docs/bind9dns_s.html">vulnerability 
+executive summary</a> and 
+<a href="http://en.wikipedia.org/wiki/Dns">Wikipedia article</a> have useful
+descriptions as well.
+</p>
+
+<p>
+There are essentially two types of DNS servers: those that directly reply 
+to queries about a particular zone (zone servers) and those that cache 
+query results (caching servers).  An internet
+service provider or company will typically set up a few caching DNS servers 
+that actually talk to the zone servers, and configure all client machines to
+make their DNS requests to the caching servers.  Once an entry has been entered
+into the cache of those servers, it will not be requested again until the 
+time-to-live (TTL) of the entry expires.  If an attacker can get an incorrect 
+entry put into the cache, especially one with a very long TTL, he can 
+redirect traffic to servers under his control.  This is the "poison" in 
+the cache.
+</p>
+
+<p> DNS uses User Datagram Protocol (UDP), which is stateless rather than
+connection-oriented.  This allows attackers to send "answers" to DNS
+queries that they never received.  They can forge the IP address of the
+nameserver that would be queried; if the bogus response is received before
+the real response, it will be used and the real one dropped.  Several steps
+are taken to make it more difficult for an attacker to forge a response,
+but one of those countermeasures was not correctly implemented in BIND,
+leading to this most recent vulnerability.  </p>
+
+<p>
+The DNS protocol contains a 16-bit transaction ID field that must be matched
+between the query and the response in order to be considered valid.  Early 
+DNS implementations just incremented those transaction IDs for each new query,
+making it trivial for an attacker's program to predict which was coming next.
+The obvious fix is to randomize the transaction IDs, which is exactly what 
+BIND did, unfortunately not quite as randomly as they might have hoped.
+</p>
+
+<p> Random number generation (RNG) is one of those things that <i>seems</i>
+like it should be blindingly simple, but turns out to be incredibly
+difficult to do correctly.  For things like games or simulations, it is
+relatively straightforward to create an RNG with reasonable properties, but
+for security and cryptography, it is much more difficult.  One of the key
+properties that a crypto-strength RNG must have is unpredictability.  One
+way to look at that is to determine how much RNG output an attacker must see
+before they can make informed guesses about the next "random" number.  This
+is where the BIND algorithm was found to be lacking.  </p>
+
+<p>
+By studying the code used to generate the transaction IDs, Klein noticed that
+if the transaction ID was even (least significant bit was zero), there were
+only ten possible values that could be generated as the next transaction ID.
+Other techniques had been able to reduce the search space to around 5000
+possibilities, but forging and sending that many bogus DNS responses 
+<i>before</i> the real reply reaches the recipient is not a very reliable
+poisoning technique.  With only ten responses to send, it is quite possible
+to get the bogus response there first, especially if the real DNS server is 
+busy and responds a little slowly.
+</p>
+
+<p>
+If an attacker (at attacker.com) wanted to poison the
+cache entry of financial-site.com for the users at randomisp.com, they
+would need to lure a user of randomisp.com's caching DNS server to
+visit attacker.com.  When the DNS server at randomisp.com queries the
+attacker.com DNS server, that server looks at the transaction ID, if it
+is odd, it sends back a redirection to itself (using a DNS feature called
+CNAME chaining).  If the transaction ID is even, it quickly calculates the
+ten possible values for the next transaction ID and starts sending responses
+for financial-site.com using those IDs.  In addition, it redirects the query
+to financial-site.com.  If that site is not in the cache, or its cache entry
+has expired, randomisp.com's DNS server will make a query, probably using 
+one of the ten transaction IDs (unless an intervening query has gone out),
+to financial-site.com.  It is very likely that one of the bogus responses 
+will be picked up and the attacker now controls the mapping of 
+financial-site.com to an IP address, for all users of randomisp.com.
+</p>
+
+<p> Normally, the invitation to visit attacker.com would go out as spam or
+by some other means that tricks users into going places that they probably
+should not.  No particular ISP is targeted, the poisoning is used as part
+of a <a href="http://en.wikipedia.org/wiki/Pharming">pharming</a> attack.
+Pharming is typically used to get credentials, usernames and passwords, for
+financial and other sites by spoofing a well-known website on an attacker's
+server.  Because of the cache poisoning, the user could use a bookmark or
+even type in the financial-site.com address, but still end up at the
+attacker's site.  The website graphics and login process are duplicated
+there which causes the user (or his browser's password manager) to type in
+the credentials and hit submit.  </p>
+
+<p> The <a href="http://www.trusteer.com/docs/bind9dns.html">full
+report</a> makes for quite an interesting read.  Klein describes several
+other means of attack and weaknesses in the BIND RNG, including ways to
+completely recover the internal state of the RNG.  Internet Systems
+Consortium (ISC), the maintainers of BIND have released an <a
+href="http://www.isc.org/sw/bind/view?release=9.4.1-P1">updated
+version</a>, with a new RNG, though there was very little description of
+the problem or the fix in their <a
+href="http://www.isc.org/sw/bind/bind-security.php">advisory</a>.  The
+problem has been assigned <a
+href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2007-2926">CVE-2007-2926</a>
+but, as of this writing, that is just a placeholder.  </p>
+
+<p>
+This is quite a serious vulnerability and should be rather embarrassing to
+the folks at ISC.  The problems with transaction IDs and the need for
+their unpredictability have been known for many years.  It is not at
+all beyond the realm of possibility that the analysis done by Klein, was done
+by the attacker community some time ago, and has been used already.  Widespread
+usage would likely have been detected, but if used judiciously, it could
+have been exploited for quite some time.
+</p>
+
+<p>
+Another technique that could help avoid these kinds of attacks would be to
+randomize (crypto-strength RNG, of course) the source UDP port on each query.
+BIND currently chooses a single random UDP source port at startup time and
+uses that throughout its life.  If an attacker could not predict the port
+to send a bogus response to, it almost would not matter that they could 
+predict what response to send.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Berkeley Internet Name Daemon (BIND)</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Domain Name System (DNS)/Cache poisoning</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/242932/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor243065"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 2:15 UTC (Thu)
+                               by <b>elanthis</b> (guest, #6227)
+                              [<a href="/Articles/243065/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="elanthis" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243065" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Fortunately, SSL solves this problem for secure sites.  Even if you end up at the attacker's site, you will get an invalid cert warning.<br>
+<p>
+One of the things IE7 does far, far better than Firefox is the invalid SSL cert dialog.  On Firefox, you get a popup.  Users just hit OK.  On IE7, you get a big huge scary warning page that makes it very clear something is wrong.<br>
+<p>
+One of our support guys asked me the other day what the weird popup he was getting was all about.  He'd been getting it for a few weeks, but had always hit OK and never bothered reading it.  He got a phone call from a user on IE7 who was freaking out about a funny page that always came up before the site that said his site was insecure and broken.  The SSL cert on the client's site had expired.  Our relatively experience tech hadn't realized because he, like 99% of users, ignore popups and hit OK, where-as the client on IE7 was given a very visible and difficult to ignore warning.<br>
+<p>
+Firefox should be doing the same thing as IE7.  I'd go so far as to say that it should even just refuse to access sites with invalid SSL certs unless the user manually adds it to a white-list, and even then it should give the IE7 warning.  The only reason you should ever have to use an invalid cert is for testing, and if you're just testing you can put up with the hassle.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243065/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor243150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 13:13 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/243150/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243150" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      SSL solves it? Not hardly, given that huge numbers of sites use outdated certs and a lot use self-signing. Most people just click 'accept' when asked: they certainly don't look at the cert's content, and even if they did, would they be able to spot a false one, what with VeriSign and others doing minimal verification of applicant identity beyond `do they have a credit card'. (Credit cards are, after all, so very had to get: my friend's daughter could have half a dozen by now, and she's less than a year old).<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor243146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 13:15 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/243146/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243146" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Ah, you're not thinking like a security professional.<br>
+<p>
+Suppose we make it so that _invalid_ certificates just don't work<br>
+<p>
+Attackers may be able to obtain an _expired_ certificate, but that's OK we'll make sure those don't work either.<br>
+<p>
+Or they can create a _self-signed_ certificate just as easily. Maybe we should make those not work?<br>
+<p>
+At this point users will refuse to use your browser, because lots of sites that are concerned about snooping, but not about impersonation, use SSL with certificates that are self-signed (or signed by an unknown CA) to avoid the high cost of a "real" SSL certificate. Users will go to great lengths to bypass security that they regard as excessive or unwieldy.<br>
+<p>
+Since, to an attacker, invalid and self-signed certificates are just as easy to make / obtain, there is no point to what IE did here AFAICT.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor243574"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 29, 2007 23:49 UTC (Sun)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/243574/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dlang" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243574" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      as for avoiding the "high cost of 'real' SSL certs", they are only really expensive if you buy them from the wrong place. you can get 'real' ssl certs for &lt;$100 individually, and if you are a company that needs a lot of them you can get them in quantity for &lt;$50 (you also don't have to get certs that expire after one year either)<br>
+<p>
+the fact that some people think it's necessary to pay $900 per year for a cert is a testimate to stupidity and marketing.<br>
+<p>
+and frankly if you consider $50 or $100 too expensive then I question if what you are protecting is worth bothering with SSL in the first place.<br>
+<p>
+Self signed certs are not a problem if you use them properly and have the users tell their browsers to install it as a valid cert, but just using them without giving the users a way to do this and expecting them to click through the cert warning is bad for everyone and provides little security to your users.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243574/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor243605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SSL Certificate costs...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2007 15:28 UTC (Mon)
+                               by <b>cdmiller</b> (guest, #2813)
+                              [<a href="/Articles/243605/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cdmiller" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243605" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      If you have 50 FQDN's that need SSL, your looking at a $2500 - $5000 per year expense.  Is that a lot to pay given the questionable trustworthiness of the major cert vendors, and the ease of generating a self signed certificate?  For $5000 one can easily find hardware capable of hosting 50 domains, an additional $5k can make this redundant, so the current cost of a "browser approved" SSL cert is exorbitant in many situations.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor243745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2007 11:26 UTC (Tue)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/243745/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cortana" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243745" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>... lots of sites that are concerned about snooping, but not about impersonation, use SSL with certificates that are self-signed (or signed by an unknown CA) to avoid the high cost of a "real" SSL certificate.</blockquote>
+
+<p>But the assurance that one is not being snooped <em>strictly requires</em> the assurance that one is not being impersonated.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor243768"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2007 16:02 UTC (Tue)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/243768/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zlynx" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243768" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Using a self-signed SSL cert still raises the bar considerably.  Especially if you immediately save it in your cert DB.  Just like using SSH and saving the remote system key for the first time.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243768/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor243780"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SSL doesn't solve everything</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2007 16:17 UTC (Tue)
+                               by <b>kevinbsmith</b> (guest, #4778)
+                              [<a href="/Articles/243780/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kevinbsmith" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243780" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      SSL doesn't quite solve the problem for "normal" end-users. How many people bother to type in https when they go to paypal (or ebay, or their bank)? Most just navigate to the non-SSL site, which automatically redirects them to the SSL version.<br>
+<p>
+The attacker can redirect them to a non-SSL site that looks like the real SSL site, or to an SSL site with a different domain and therefore a valid cert.<br>
+<p>
+Bookmarks (to the SSL site) can avoid that problem, but users won't always use their bookmarks.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243780/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor243072"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 3:30 UTC (Thu)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/243072/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smoogen" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243072" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I am not sure about the random source port for UDP transactions.. would it not require intervening firewalls to have a connection tracker that did DNS, and would need to be able to decode the UDP port coming back so that they were part of the transaction. <br>
+<p>
+I would agree that either this attack or something similar might have been in use for a while. Looking over DNS traffic to our university servers.. there has been some stuff that has got the back fo the head going.. hmmm.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243072/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor243081"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 4:49 UTC (Thu)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/243081/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flewellyn" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243081" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      No, the only thing that would matter to the firewall is the destination port, which, since DNS is a <br>
+Well Known Service, is always the same.  The source port for the querying machine could be <br>
+anything; unless the firewall is configured to block outgoing ports, which is just silly, the DNS <br>
+server can respond on any port.  If the port in question is randomized for each query, it makes <br>
+no difference.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243081/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor243176"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 14:36 UTC (Thu)
+                               by <b>jond</b> (subscriber, #37669)
+                              [<a href="/Articles/243176/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jond" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243176" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Isn't relying on an unpredictable source port a bit like relying on the current PID as an unguessable number? I.e. couldn't an attacker just forge 65,000-odd UDP packets, one per possible source address?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243176/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor243256"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 19:06 UTC (Thu)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/243256/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flewellyn" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243256" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Not in a time-sensitive exploit like this one.  Remember, cache-poisoning only works if the attacker's phony DNS reply can reach the querying machine prior to the legitimate one.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243256/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor243310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2007 23:36 UTC (Thu)
+                               by <b>xorbe</b> (guest, #3165)
+                              [<a href="/Articles/243310/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="xorbe" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor243310" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Wait -- so normally an attacker has a 1/65536 chance of poisoning a DNS caching nameserver?!  That's criminal!<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/243310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor244041"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cache poisoning vulnerability found in BIND</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2007 10:32 UTC (Thu)
+                               by <b>akukula</b> (guest, #3862)
+                              [<a href="/Articles/244041/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="akukula" />
+                <input type="hidden" name="return" value="/Articles/242932/#CommAnchor244041" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Just for the archives, dnscache, the caching daemon from djbdns uses random UDP ports since the beginning, that is 1997. See <a rel="nofollow" href="http://cr.yp.to/djbdns/blurb/security.html">http://cr.yp.to/djbdns/blurb/security.html</a>.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/244041/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

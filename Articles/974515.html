@@ -1,0 +1,204 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Documenting page flags by committee [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Documenting page flags by committee">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="For every page of memory in the system, the kernel maintains a set of page flags describing how [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/973889/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Documenting page flags by committee</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 22, 2024</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2024/">LSFMM+BPF</a>
+</div>
+For every page of memory in the system, the kernel maintains a set of page
+flags describing how the page is used and various aspects of its current
+state.  Space for page flags has been in <a
+href="/Articles/335768/">chronic short supply</a>, leading to a desire to
+eliminate or consolidate them whenever possible.  That objective, though,
+is hampered by the fact that the purpose of many page flags is not well
+understood.  In a memory-management-track session at the <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">2024 Linux Storage,
+Filesystem, Memory-Management and BPF Summit</a>, Matthew Wilcox set out to
+cooperatively update the page-flag documentation to improve that situation.
+<p>
+Wilcox had no presentation to give; instead, he put up an editor window
+containing a new documentation file for page flags, then told the audience
+"shout at me, I'll write it down".  The first flag to be covered was
+<tt>Locked</tt>; the text that resulted was:
+<p>
+<blockquote class="bq">
+	This flag is per-folio.  If you attempt to lock a page, you will
+	lock the entire folio.  The folio lock is used for many purposes.
+	In the page cache, folios are locked before reads are started and
+	unlocked once the read has completed.  The folio is also locked
+	before writeback starts; see the writeback flag for more detail.
+	The truncation path takes the folio lock, and folios are also
+	locked while being inserted into page tables in order to prevent
+	races between truncation and page fault.
+</blockquote>
+<p>
+These semantics, Wilcox said, are why the lockdep locking checker does not
+work with this flag; it is taken and released in different contexts, which
+lockdep cannot handle.
+<p>
+The next flag was <tt>Writeback</tt>, which ended up being described as:
+<p>
+<blockquote class="bq">
+	Per-folio.
+	This is kind of a lock.
+	We downgrade to it having taken the lock [<tt>Locked</tt>] flag.
+	Released after writeback completes, but lock flag may be released any time
+	after writeback flag set.  Depends on filesystem whether needs to do more
+	between.
+	We can wait for writeback to complete by waiting on this flag.
+	Folio put to tail of LRU for faster reclaim.
+	<p>
+	Can prevent tearing write is filesystem needs stable folios.
+	Truncate will wait for flag to clear.
+</blockquote>
+<p>
+Clearly, there is some editing work yet to be done.
+<p>
+For the <tt>Dirty</tt> flag, the result was:
+<p>
+<blockquote class="bq">
+	Also set during buffered IO.  Referenced first time, accessed
+  	second time.  Used during reclaim to determine disposition
+  	(activate, reclaim, etc). At least one byte of the folio contents is
+  	newer than on disk and the writeback flag is not yet set. Folios may
+  	be both dirty and not uptodate. Lazyfree pages can drop the dirty
+  	bit.  Dirty flag clear for file folios when we start writeback.
+	Set
+  	dirty flag when removed from swapcache.  If already dirty, folios can
+  	be mapped writable without notifying filesystem.  Complicated
+  	interfaces to set, easy to get wrong.
+</blockquote>
+<p>
+Jason Gunthorpe added that there are a lot of users of
+<tt>get_user_pages()</tt> that set this flag; all of them are wrong.
+<p>
+For <tt>Uptodate</tt>: "<q>Every byte of the folio contents is at least as
+new as the contents of disk.  Implicit write barrier</q>".  In the room, it
+was suggested that some filesystems clear this bit when writeback fails,
+but others thought that perhaps this behavior had been removed.
+<p>
+For the <tt>LRU</tt> flag, all that was said was: "<q>Folio has been added
+to the LRU and is no longer in percpu folio_batch</q>".  The <tt>Head</tt>
+flag was described equally tersely as: "<q>This folio is a large folio.  It
+is not set on order-0 folios</q>".  The <tt>Waiters</tt> flag means:
+"<q>Page has waiters, check its waitqueue.  Only used by core code.  Don't
+touch</q>".  For the <tt>Active</tt> flag: "<q>On the active LRU list.  Can
+be set in advance to tell kernel to put it on the right list</q>".
+<p>
+When it came to <tt>Workingset</tt>, it seemed that nobody really knows
+what this flag means.  Wilcox wrote down:
+<p>
+<blockquote class="bq">
+	Set on folios in pagecache once readahead pages actually accessed.
+	Set on LRU pages that were activated have been deactivated, treat
+	refault as thrashing.  Refault handler also sets it on folios that
+	were hot before reclaimed used by PSI computation.
+</blockquote>
+<p>
+The <tt>Referenced</tt> flag means:
+<p>
+<blockquote class="bq">
+	Per-folio flag.  At least one page table entry has a accessed bit
+	set for this folio. We set this during scan.  Also set during
+	buffered IO.  Referenced first time, accessed second time.  Used
+	during reclaim to determine disposition (activate, reclaim, etc).
+</blockquote>
+<p>
+The flag named <tt>Owner_Priv_1</tt> was described as: "<q>Owner use. If
+pagecache, fs may use Used as Checked flag by many filesystems.  Used as
+SwapBacked flag by swap code</q>".  The final flag discussed in the session
+was <tt>Arch_1</tt>, with this result:
+<p>
+<blockquote class="bq">
+	Many different uses depending on architecture.  Often used as a
+	"dcache clean" or, confusingly as "dcache dirty".  Check with your
+	architecture.
+	<p>
+	s390 uses it for basically everything.
+	<p>
+	Historically was used on a per page basis.  Think we've eliminated all
+	per-page uses now so should only be set on folios.
+</blockquote>
+<p>
+After the session, Wilcox <a
+href="/ml/linux-mm/ZkOu4yXP-sGGtwc4@casper.infradead.org/">posted the
+result</a> on the linux-mm mailing list, where there have been a couple of
+follow-on comments.  Whether this kind of whole-room documentation
+authoring will (or should) catch on remains to be seen; the information
+that was captured is more than was available before, but one might be
+forgiven for concluding that the use of these flags remains obscure for
+almost everybody.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Documentation</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/struct page</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2024</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/974515/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

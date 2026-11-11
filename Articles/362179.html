@@ -1,0 +1,203 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>High-order GFP_ATOMIC allocation trouble [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="High-order GFP_ATOMIC allocation trouble">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="On its face, memory management would appear to be a straightforward task. When memory gets tigh [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/361698/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>High-order GFP_ATOMIC allocation trouble</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 17, 2009</br>
+           </div>
+On its face, memory management would appear to be a straightforward task.
+When memory gets tight, the VM code need only evict the pages which will be
+unused for the longest time, making that memory available
+for shorter-term use.  The hard part, of course, is identifying those
+pages.  In the absence of perfect predictions of future memory use, the VM
+subsystem must rely upon a set of heuristics to make a set of (hopefully)
+reasonable choices.  The design of heuristics which can handle most
+workloads is tricky, and even subtle code changes can lead to big changes
+in system behavior.
+<p>
+Since the beginning of the 2.6.31 development cycle, some users have been
+complaining about an increase in kernel memory allocation failures, leading
+to log messages, failed applications, and the occasional unwelcome
+appearance of the out-of-memory killer.  Various bugs have been filed (see
+<a href="http://bugzilla.kernel.org/show_bug.cgi?id=14141">#14141</a> and
+<a href="http://bugzilla.kernel.org/show_bug.cgi?id=14265">#14265</a>, for
+example) and a fair amount of head-scratching has gone on.  But few
+developers really know where to start when looking at this kind of problem,
+and, of those who do, some have been content to write off the problem as
+being caused by higher-order allocations.  So progress has been slow.
+<p>
+High-order (multi-page) allocations are a perennial problem on Linux
+systems; as memory fragments, it gets increasingly hard to find groups of
+physically-contiguous pages to satisfy higher-order allocation requests.
+Whenever possible, kernel code is written to avoid high-order allocations,
+but there are times when that is difficult.  Many of the recently-reported
+problems seemingly have to do with certain not-top-of-the-line wireless
+network adapters which require contiguous memory chunks to operate.  Fixing
+the problem is important - users of cheap network interfaces want to run
+Linux too - but there are also reports of single-page allocation failures.
+<p>
+Fortunately, Mel Gorman is not afraid to wander into that part of the
+kernel; he has been putting some serious time into reproducing the problem
+and trying to understand what has gone wrong since 2.6.30.  Mel has posted
+<a href="/Articles/362184/">a five-part patch series</a> which tries to
+make allocation failures less likely again.  Looking at what Mel has done
+provides a good lesson on just how subtle this kind of programming can be.
+<p>
+When looking at this code, it's worth bearing in mind that the kernel has
+two fundamental mechanisms for recovering memory when it is needed for new
+allocations.  <b>Direct reclaim</b> is active memory cleaning done at
+allocation time; when an allocation falls short, the process trying to
+allocate the memory will go off and try to free some memory elsewhere in
+the system.  Direct reclaim has the advantages of immediacy - reclaim work
+happens right away when memory pressure hits - and of dumping the
+work into processes which are allocating memory, but there are limits to
+how long any one process can spend reclaiming memory without introducing
+unacceptable latencies.  So more extensive cleaning is pushed off to the
+<b>kswapd</b> kernel thread, which is dedicated to that task.
+<p>
+Current mainline kernels do not wake up kswapd from the direct reclaim code
+if the direct reclaim operation fails to get the job done.  But if memory
+is that tight, kswapd should be running, especially if high-order
+allocations are needed.  So the first patch in Mel's series is a simple
+one-liner which causes kswapd to be waked on direct allocation failure and,
+perhaps, to work harder on recovering higher-order chunks as well.  That
+change brings behavior back to something closer to what older kernels did.
+<p>
+Patch #2 is a simple tweak which keeps realtime interrupt handlers from
+driving the memory allocation code too hard.  Again, this is a reversion to
+behavior seen back in the 2.6.30 days.
+<p>
+The third patch is a bit more subtle.  Direct reclaim will, if it is
+successful, result in the creation of I/O operations to write dirty pages
+to their backing store.  There are limits to the number of block I/O
+operations which can be outstanding, though; once that limit is hit the
+underlying device is said to be "congested" and the task performing reclaim
+is forced to wait until things clear out a bit.  This "congestion wait"
+keeps the system from filling up with pending I/O operations and serves to
+throttle processes performing memory allocations.
+<p>
+As it happens, there are actually two "wait for congestion" queues - one
+each for synchronous and asynchronous requests.  "Synchronous" requests are
+those for which a process is actively waiting - read requests, usually - 
+while asynchronous requests are those which do not have active waiters.  In current
+kernels, direct reclaim waits on the asynchronous queue, while older
+kernels used the synchronous queue instead.  Moving back to the synchronous
+queue makes a number of problems go away, but Mel sees that fix as being
+workload-specific.  Instead, he has changed the direct reclaim code to make
+it wait for congestion to clear on <i>both</i> queues.
+<p>
+Why does this help?  It seems to be a matter of letting kswapd get its job
+done.  Kswapd, too, must wait when queues become congested; if direct
+reclaimers are frequently filling the I/O queues, kswapd will stall more
+often.  It turns out that better results are had if kswapd is allowed to
+run for longer periods of time.  Making direct reclaimers wait until both
+queues have cleared allows kswapd to get some real work done once it gets
+going.  That is good for the creation of high-order chunks and the
+performance of the system in general.
+<p>
+Patch #4 also relates to kswapd's duty cycle.  Kswapd will stop working and
+go to sleep once it decides that it has done enough; one definition of
+"enough" is when the amount of free memory reaches an upper watermark
+value.  But if kswapd is running, chances are good that there is unmet
+demand for memory in the system; in that situation, the amount of free
+memory may not stay above the high watermark for very long.  Mel's patch
+has kswapd start with a catnap rather than a real sleep; after
+0.1&nbsp;sec., kswapd wakes back up and reassesses the situation.  If the
+amount of free memory has fallen below the high watermark in that time,
+kswapd goes back to work; otherwise it goes to sleep for real.  In this
+way, kswapd will continue to work to free memory if the system is consuming
+it quickly.
+<p>
+The final patch touches on another aspect of waiting for congestion.  When
+block devices become congested, kswapd waits for things to clear.  But, Mel
+notes, that may not be the right thing to do in all situations:
+<p>
+<div class="BigQuote">
+	However, on systems with large numbers of high-order atomics due to
+	crappy network cards, it's important that kswapd keep working in
+	parallel to save their sorry ass.
+</div>
+<p>
+In the original version of the patch, kswapd would become increasingly
+resistant to waiting for congestion as the situation got worse.  Motohiro
+Kosaki <a href="/Articles/362218/">suggested an alternative approach</a>,
+though, wherein kswapd simply refuses to wait as long as the high watermark
+is not reached, and Mel adopted it.
+<p>
+Mel's patch posting includes a fair amount of information on how he has
+tested it and what the results are.  With the patch set applied, allocation
+failures are fewer, and system throughput improves as well.  The sad truth
+about memory management patches, though, is that a change which improves
+one workload may worsen another.  So these changes really need some
+widespread testing, especially since there is some interest in getting them
+into 2.6.32.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/362179/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

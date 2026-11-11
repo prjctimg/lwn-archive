@@ -1,0 +1,383 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>open() flags: O_TMPFILE and O_BENEATH [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="open() flags: O_TMPFILE and O_BENEATH">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Not much happens on a Linux system without one or more calls to open() or one of its variants.  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/618616/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>open() flags: O_TMPFILE and O_BENEATH</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 5, 2014</br>
+           </div>
+Not much happens on a Linux system without one or more calls to
+<tt>open()</tt> or one of its variants.  There is no other way to create a
+file or access a file that already exists.  It thus follows that the
+various flags that control the behavior of <tt>open()</tt> have a
+significant effect on the functionality of the system as a whole.  Here,
+we'll look at two specific <tt>open()</tt> flags; one of them is a
+relatively recent addition to the kernel, while the other is still in the
+proposal stage.
+<p>
+<h4>O_TMPFILE</h4>
+<p>
+The <tt>O_TMPFILE</tt> flag has been discussed a few times in these pages;
+the <a href="562294.html">abrupt nature of its addition</a> meant
+that it had little review and a fair number of post-merge problems.  The
+concept behind this flag is simple enough: it requests the creation of a
+file with no associated directory entry.  It is thus meant for temporary
+files that will not be opened by any other process.
+<p>
+Eric Rannaud recently <a href="/Articles/619147/">asked a question</a>:
+what should happen when a process makes a call like the following?
+<p>
+<pre>
+    int fd = open("/tmp", O_TMPFILE | O_RDWR, 0);
+</pre>
+<p>
+The flags request the creation of a writable temporary file, but the third
+argument (the file mode) says that there should be no access (read or
+write) allowed.  As it happens, POSIX is clear enough about this situation
+when a file is created with ordinary <tt>O_CREAT</tt>: the provided mode
+only applies <i>after</i> the creation of the file.  So, while a process
+can create a file that it cannot itself access in general, it can still get
+a working file descriptor in the act of creation itself.
+<p>
+As it happens, though, file creation with <tt>O_TMPFILE</tt> does not work
+that way; the file mode is applied from the beginning, so the
+<tt>open()</tt> call listed above will fail.  This behavior was widely
+recognized to be a bug, and Eric's fix was merged for the 3.18-rc3
+release.  But there are a couple of interesting side notes that are worth
+looking at.
+<p>
+One is that this call:
+<p>
+<pre>
+    int fd = open("/tmp", O_TMPFILE | O_RDONLY, 0666);
+</pre>
+<p>
+will still fail.  When the <tt>O_TMPFILE</tt> feature was implemented, it
+seemed that there 
+was no use case for a temporary file that could not be written to, so this
+case (<tt>O_TMPFILE</tt> with <tt>O_RDONLY</tt>) was explicitly forbidden.
+But it <a href="/Articles/619148/">turns 
+out</a> that there is a use case for this type of file: creating an empty
+file with a specific set of extended attributes atomically.  The
+<tt>open()</tt> call would be followed by one or more <tt>fsetxattr()</tt>
+calls; once everything is in place, <tt>linkat()</tt> can be used to make
+the file visible in the filesystem.  Linus initially <a
+href="/Articles/619149/">agreed</a> that this use case should be supported,
+but later <a href="/Articles/619224/">changed his mind</a>.  So read-only
+<tt>O_TMPFILE</tt> files will remain unsupported.
+<p>
+Amusingly, the original bug was discovered while digging into <a
+href="https://sourceware.org/bugzilla/show_bug.cgi?id=17523">a related
+glibc bug</a>.  It seems that, when <tt>O_TMPFILE</tt> is used, the mode
+argument isn't passed into the kernel at all.  In the case of
+<tt>open()</tt> on x86-64 machines, things work out of sheer luck: the mode
+argument just happens to be sitting in the right register when glibc makes
+the call into the kernel.  Things do not work as well with
+<tt>openat()</tt>, though, with the result that, in current glibc
+installations, <tt>O_TMPFILE</tt> cannot be used with <tt>openat()</tt> at
+all.  The bug is well understood and should be fixed soon.
+<p>
+<h4>O_BENEATH</h4>
+<p>
+When a developer makes a call to <tt>openat()</tt>, they will normally
+expect that the file being opened or created will be located in the
+specified directory.  As is often the case, though, surprises lurk for the
+unwary.  Trouble can come from a surprising symbolic link or deliberately
+malicious input; either way, it can lead to files being created or opened
+where they should not be.
+<p>
+David Drysdale has a solution in the form of <a
+href="/Articles/619151/">the <tt>O_BENEATH</tt> flag</a> for
+<tt>openat()</tt>.  If this flag is included in the call, the file being
+accessed must exist in or below the directory provided.  The enforcement of
+this rule is simple enough: the provided path is constrained to not start
+with "<tt>/</tt>" or contain "<tt>../</tt>".  Any symbolic links traversed
+while resolving the path must meet the same conditions.
+<p>
+This feature was implemented as part of the filesystem access restrictions
+found in the <a href="/Articles/604015/">Capsicum</a> patch set.  It turns
+out that there are other potential users as well, though.  In particular,
+when combined with a secure computing ("seccomp") filter,
+<tt>O_BENEATH</tt> can be used to safely give a sandboxed process a
+directory to create files in.
+<p>
+The initial review concerns raised against this patch have been addressed
+in the current version.  It is a relatively simple and non-invasive patch,
+so there is a reasonable chance that we'll see it enter the mainline during
+a near-future merge window.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">O_BENEATH</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">O_TMPFILE</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/619146/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor619372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">open() flags: O_TMPFILE and O_BENEATH</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2014 17:20 UTC (Thu)
+                               by <b>RobSeace</b> (subscriber, #4435)
+                              [<a href="/Articles/619372/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="RobSeace" />
+                <input type="hidden" name="return" value="/Articles/619146/#CommAnchor619372" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There is no other way to create a file</font><br>
+<p>
+Just to be a pedant: creat()...  Though it's redundant, it is a separate syscall!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/619372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor619605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">open() flags: O_TMPFILE and O_BENEATH</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 9, 2014 9:47 UTC (Sun)
+                               by <b>richard_weinberger</b> (subscriber, #38938)
+                              [<a href="/Articles/619605/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="richard_weinberger" />
+                <input type="hidden" name="return" value="/Articles/619146/#CommAnchor619605" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+...which is just another wrapper around open:<br>
+<p>
+SYSCALL_DEFINE2(creat, const char __user *, pathname, umode_t, mode)<br>
+{<br>
+        return sys_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);<br>
+}<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/619605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor622488"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">open() flags: O_TMPFILE and O_BENEATH</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 21, 2014 6:33 UTC (Fri)
+                               by <b>sstewartgallus</b> (guest, #99898)
+                              [<a href="/Articles/622488/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sstewartgallus" />
+                <input type="hidden" name="return" value="/Articles/619146/#CommAnchor622488" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Pedant time, there are a bunch of ways to create files, pipe, socketpair, eventfd, etc.. but for regular files the only way to create a file is to use open, openat and mknod.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/622488/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor979767"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">system call __NR_creat is different from __NR_open</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2024 15:59 UTC (Wed)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/979767/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/619146/#CommAnchor979767" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In addition to __NR_open*, there are separate system calls __NR_creat:<br>
+<p>
+/usr/include/asm/unistd_32.h:#define __NR_creat 8<br>
+/usr/include/asm/unistd_64.h:#define __NR_creat 85<br>
+/usr/include/asm/unistd_x32.h:#define __NR_creat (__X32_SYSCALL_BIT + 85)<br>
+<p>
+/usr/include/asm/unistd_32.h:#define __NR_open 5<br>
+/usr/include/asm/unistd_32.h:#define __NR_openat 295<br>
+/usr/include/asm/unistd_32.h:#define __NR_openat2 437<br>
+<p>
+/usr/include/asm/unistd_64.h:#define __NR_open 2<br>
+/usr/include/asm/unistd_64.h:#define __NR_openat 257<br>
+/usr/include/asm/unistd_64.h:#define __NR_openat2 437<br>
+<p>
+/usr/include/asm-generic/unistd.h:#define __NR_openat 56<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/979767/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor622836"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">open() flags: O_TMPFILE and O_BENEATH</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 23, 2014 22:09 UTC (Sun)
+                               by <b>oak</b> (guest, #2786)
+                              [<a href="/Articles/622836/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="oak" />
+                <input type="hidden" name="return" value="/Articles/619146/#CommAnchor622836" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Let the devious adventure begin: fd = open("a Steel Sky", O_BENEATH, 666);<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/622836/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor623048"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">open() flags: O_TMPFILE and O_BENEATH</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 25, 2014 15:59 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/623048/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/619146/#CommAnchor623048" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, this is trying to solve a problem that's only going to be be triggered by a malicious attacker, "far from the light of day".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/623048/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

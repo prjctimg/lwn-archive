@@ -1,0 +1,1538 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Reconsidering O_CREAT|O_DIRECTORY [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Reconsidering O_CREAT|O_DIRECTORY">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Linux provides a system call (mkdir()) to create a directory, and a few variants of open() that [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1086135/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Reconsidering O_CREAT|O_DIRECTORY</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 30, 2026</br>
+           </div>
+Linux provides a system call (<a
+href="https://man7.org/linux/man-pages/man2/mkdir.2.html"><tt>mkdir()</tt></a>)
+to create a directory, and <a
+href="https://man7.org/linux/man-pages/man2/open.2.html">a few variants of
+<tt>open()</tt></a> that can open a directory.  There is, however, no
+system call in Linux that can create and open a directory in a single,
+race-free call.   Jori Koolstra has been working on remedying that
+situation, most recently by repurposing a set of <tt>open()</tt> flags that currently
+return an error.  There are, however, concerns that show just how hard it
+can be to create user-space interfaces that do not present traps for
+application developers.
+<p>
+Creating and opening a directory in a single system call is simpler and
+more efficient than using two, of course.  It also can guard against the
+possibility that some other process will, between the creation and open
+steps, replace a directory with something else.  Detecting that case
+<i>is</i> possible on Linux now, but it requires some defensive programming
+of the type that application developers are not always good at.  Thus the
+desire for a more straightforward way to accomplish that pair of operations.
+<p>
+In March, Koolstra attempted to address this problem with <a
+href="/ml/all/20260331172011.3512876-1-jkoolstra@xs4all.nl/">a patch
+series</a> adding a new system call, <tt>mkdirat_fd()</tt>, that would
+return a file descriptor for the newly created directory.  That system call
+was changed to <tt>mkdirat2()</tt> in <a
+href="/ml/all/20260412135434.3095416-1-jkoolstra@xs4all.nl">a subsequent
+patch</a>.  There were a number of concerns about the implementation, but
+also about creating a new system call in the first place.  Christian
+Brauner, in particular, <a
+href="/ml/all/20260511-hochdekoriert-neoliberale-f7a2922bc57c@brauner">thought</a>
+that this problem was better solved with a modification to how
+<tt>open()</tt> handles a couple of existing flags.
+<p>
+Specifically, all of the <tt>open()</tt> variants support the
+<tt>O_DIRECTORY</tt> flag, which is necessary if the application is trying
+to open a directory rather than a normal file.  Also supported is
+<tt>O_CREAT</tt>, which instructs <tt>open()</tt> to create the named file
+if it does not already exist.  It would make sense to interpret the
+combination of those two flags as a request to create a directory and open
+it at the same time.  Adding this capability to <tt>open()</tt>, Brauner
+said, would also make many of the other features of the system call, such
+as the ability to place restrictions on how the name is resolved, available
+for free.  So, he concluded: "<q>I think here it is pretty clear that
+O_DIRECTORY|O_CREAT is the right thing to do</q>".
+<p>
+Koolstra duly implemented the new API as <a
+href="/ml/all/20260517170244.1832119-1-jkoolstra@xs4all.nl">an RFC patch
+set</a>, followed by three more RFC and three non-RFC versions; it was only
+after <a href="/ml/all/20260704164149.3480051-1-jkoolstra@xs4all.nl">the
+last of those</a> was posted that other developers started to take a
+serious look at the proposed API, and not all of them were convinced that
+it was the right approach.  Pedro Falcato, in particular, <a
+href="/ml/all/akyyqnv9EpY7xVdC@pedro-suse.lan">argued</a> that this API
+would be nearly impossible for applications to use in a portable way, given
+the number of different ways that <tt>O_CREAT|O_DIRECTORY</tt> has been
+interpreted in the past.
+<p>
+That story is, indeed, a bit complicated; LWN <a
+href="926782.html">covered it</a> in 2023.  The ways in which Linux has handled
+an <tt>open()</tt> call with that flag combination include:
+<p>
+<ul class="spacylist">
+<li> Older kernels would fail if the named file existed, returning
+     <tt>ENOTDIR</tt> if it is a regular file and <tt>EISDIR</tt> if it is
+     a directory.  If, instead, nothing existed by the given name,
+     <tt>open()</tt> would create a regular file, which seems unlikely to
+     be what the caller wanted.
+<li> As of the 5.7 release in 2020, the kernel started returning an error
+     in the last case, while <i>still creating the file</i>, which seemed
+     even less likely to be what the developer was hoping for.
+<li> Brauner added <a href="https://git.kernel.org/linus/43b450632676">a
+     patch</a> to 6.4 causing the kernel to fail with <tt>EINVAL</tt> for
+     that flag combination in all cases.
+</ul>
+<p>
+Add in the fact that other systems supporting POSIX system calls have their
+own interpretation of that flag combination, Falcato said, and the result
+is going to be difficult to use properly:
+<p>
+<blockquote class="bq">
+	If you're writing something that wants to be portable, or that
+	intends to standardize on something, you have some 5 different
+	behaviors all across the FOSS UNIX landscape, not considering
+	everything else. It's also something that will, FWIW, probably
+	never be included in POSIX because no one can agree on the
+	semantics here.
+<p>
+	TL;DR I don't see, given the reasons above, how users are supposed to use
+	this without it being a total minefield.
+</blockquote>
+<p>
+He suggested that limiting the change to <tt>openat2()</tt> might be a
+better approach.
+<p>
+Brauner, though, <a
+href="/ml/all/20260707-vorteil-unhaltbar-apotheke-47bb105161ff@brauner">dismissed</a>
+the concern, saying: "<q>I don't think any of this is really an argument
+worth considering</q>".  The behavior of that flag combination has been
+consistent on Linux for years, he said, so it makes sense to make better
+use of it now.  Falcato <a
+href="/ml/all/akznq3Tzkg3XbPAc@pedro-suse">pointed out</a> that the older
+LTS kernels never received the 6.4 change and, as a result, do not have
+consistent behavior, and that user space would still have to perform
+"<q>some pretty gnarly tests</q>" to use the feature safely.  Brauner <a
+href="/ml/all/20260707-latschen-positionieren-akkord-314a884b8868@brauner">suggested</a>
+backporting the 6.4 fix, and added: "<q>Feature testing has always been a
+pain that we forced onto userspace. I think we should continue with that
+proud tradition</q>".
+<p>
+Christoph Hellwig <a
+href="/ml/all/alS10NN_OduZEqvt@infradead.org">disagreed</a>:
+<p>
+<blockquote class="bq">
+	 We need an interface that is self discoverable on Linux.  Any
+	 combination of flags that was accepted by previous kernels and
+	 gave different results than the new interface do not qualify for
+	 that.
+</blockquote>
+<p>
+He added that it was not possible to rely on a fix being backported to all
+of the old kernels in use.
+<p>
+Neil Brown <a
+href="/ml/all/178397852844.3371781.6900199568039042534@noble.neil.brown.name">suggested</a>
+adding a new flag, <tt>OPENAT2_NEW_COMBINATION</tt>, that would cause
+<tt>openat2()</tt> to reject any flag combination that is not recognized.
+Any older kernels will immediately fail a call with that flag; new kernels
+can use it to enable combinations that were not previously supported,
+including <tt>O_CREAT|O_DIRECTORY</tt>.  Brauner, though, once again <a
+href="/ml/all/20260722-mundpropaganda-vorwahl-funkverkehr-48efdde92a00@brauner">dismissed</a>
+Hellwig's concern as "<q>a strawman</q>".  The fact that he was able to
+make that flag combination return an error without generating a single
+regression report, he said, was evidence that there is no risk to adding
+meaning to it now.  Hellwig <a
+href="/ml/all/amDBQN5lCGbRxGWm@infradead.org">disagreed</a>, saying that,
+once the combination is supported, applications will start using it, and
+they will break on older systems.  It is, he said, necessary to add
+"<q>APIs that don't accidentally do the wrong thing on any old kernel</q>".
+<p>
+Koolstra had <a
+href="/ml/all/1713122837.215334.1784765444011@kpc.webmail.kpnmail.nl">a
+different concern</a> about the <tt>openat2()</tt> suggestion: seemingly a
+lot of <a
+href="https://man7.org/linux/man-pages/man2/seccomp.2.html"><tt>seccomp()</tt></a>
+configurations still block <tt>openat2()</tt>.  That could make the new
+feature unavailable on a lot of systems, reducing its value.
+<p>
+Toward the end of the discussion (so far), Brauner <a
+href="/ml/all/20260724-jazzband-benannt-bauzeit-08186a6e1986@brauner">asked</a>
+Koolstra to send a version with support in <tt>openat()</tt> and
+<tt>openat2()</tt>.  He did not say whether the change to <tt>open()</tt>
+should remain, but complained that "<q>we're deliberately crippling a
+useful extension for userspace</q>".  The <a
+href="/ml/all/20260712175539.1565444-1-jkoolstra@xs4all.nl">latest
+version</a> of the series from Koolstra enables that flag combination for
+all <tt>open()</tt> variants without any additional checks.  Brauner has
+not yet applied that series, so we do not yet know if it will find its way
+into the mainline in that form or not.
+<p>
+Maintaining compatibility over the long term is not an easy task.  It is
+hard enough to ensure that new kernels do not break older applications, but
+it can often be trickier to avoid breaking newer applications on older
+kernels.  One of the key ways to do that is to provide ways for
+applications to discover whether a given feature is supported by the kernel
+or not.  The disagreement here is over whether the proposed feature
+provides that discovery mechanism, with developers like Falcato and Hellwig
+saying "no", while Brauner feels that it is discoverable on all kernels
+that actually matter.  There is only one chance to make the correct
+decision; once the new feature is exposed in a kernel release, it will be
+difficult to change thereafter.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development model/User-space ABI</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">System calls/open()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1085617/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1086290"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 14:10 UTC (Thu)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1086290/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086290" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At the expense of suggesting something overly simple, what about O_CREAT_DIRECTORY as a new option, with a very specific interpretation?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086290/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086292"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 14:16 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1086292/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086292" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      One problem, as always, is that <tt>open()</tt> does not check its flags for validity, so it is almost impossible to add new ones in a safe way.
+<p>
+Besides, we would want <tt>O_CREAT<b><i>E</i></b>_DIRECTORY</tt>, it's not the 1970s anymore :)
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086292/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 16:03 UTC (Thu)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1086317/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086317" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Besides, we would want O_CREATE_DIRECTORY, it's not the 1970s anymore :) </span><br>
+<p>
+Not to mention that "spelling `creat` with an 'e'` was one thing that Ken Thompson would have changed about Unix given a redo.<br>
+<p>
+<a href="https://en.wikiquote.org/wiki/Kenneth_Thompson">https://en.wikiquote.org/wiki/Kenneth_Thompson</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086669"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2026 9:57 UTC (Sun)
+                               by <b>wjb</b> (subscriber, #71810)
+                              [<a href="/Articles/1086669/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wjb" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086669" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's a feature of fixed length naming conventions (or strings) that the length being one character longer would have been better.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086669/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1086318"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 16:05 UTC (Thu)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/1086318/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ejr" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086318" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I still work in the BLAS/LAPACK community. Keeping the olde names is a point of pride to some. ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086318/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1086345"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 20:28 UTC (Thu)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1086345/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086345" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Besides, we would want O_CREATE_DIRECTORY, it's not the 1970s anymore :)</span><br>
+<p>
+Yes, and no.  I think consistency is more important.<br>
+<p>
+While creat(2) is a well-known example of what we would have all done different with a time machine, now that we have O_CREAT, if we're adding a new flag that is a sibling of it, it should be O_CREAT_xxx.  That way, users can immediately expect that it does essentially the same as O_CREAT, with the minor difference related to the trailing of the name.  Otherwise, one could legitimately wonder why it's CREATE instead of CREAT, and be puzzled about whether it's be different in any other ways.<br>
+<p>
+That said, I hope `O_DIRECTORY|O_CREAT` passes.  I agree with Brauner that given that no regressions have appeared when changing to EINVAL means that there are no existing users, and that means EINVAL could be backported to all LTS kernels, thus resulting in either correct behavior or an error, but not incorrect behavior.<br>
+<p>
+It'd be interesting to know what the BSDs and other FOSS Unix systems do with this combination.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086345/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 21:15 UTC (Thu)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1086352/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086352" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Quoting the previous LWN article (referenced in the article), these are the behavior of the BSDs:<br>
+<p>
+<span class="QuotedText">&gt; Falcato did some research on what other systems do in response to that combination of flags. NetBSD, it seems, will simply fail an open() call in that situation, returning EINVAL. FreeBSD, instead, will allow the call to succeed if the path exists and is a directory; otherwise it will fail. He also noted that all of the behaviors seen — Linux pre- and post-5.7, NetBSD, and FreeBSD — are allowed by POSIX: ""I would not call the old Linux behavior a *bug*, just really odd semantics"".</span><br>
+<p>
+(And unrelated, but as a comment to the last sentence from Falcato above):<br>
+<p>
+FWIW, "really odd semantics" are a bug, IMO.  A bug that conforms to POSIX is still a bug.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1086382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 6:17 UTC (Fri)
+                               by <b>lmartelli</b> (subscriber, #11755)
+                              [<a href="/Articles/1086382/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="lmartelli" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086382" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It makes me wonder why did they choose O_DIRECTORY rather than O_DIR ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086389"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 8:12 UTC (Fri)
+                               by <b>pm215</b> (subscriber, #98099)
+                              [<a href="/Articles/1086389/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pm215" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086389" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+O_DIRECTORY is a much later addition, and presumably done when there was much less cultural pressure towards abbreviations in naming. In 7th edition unix the only valid mode flags were 0, 1 and 2 for read, write and readwrite, and the manpage documents them as magic numbers without any named symbols provided. By 2.10BSD the O_ names have been defined, but O_DIRECTORY is not yet among them, and it's not in 4.4BSD either.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086389/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086574"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 18:35 UTC (Fri)
+                               by <b>huntermatthews</b> (subscriber, #4490)
+                              [<a href="/Articles/1086574/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="huntermatthews" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086574" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It wasn't _just_ cultural pressure - some early linkers had a 6 char limit. "O_CREAT" is 6 chars. My memory says the linker only cared that the first 6 chars were unique and you could have identifiers longer than that - but maybe that was a half way mark? <br>
+<p>
+<p>
+My understanding is that this was corrected or worked around by the late 70's. <br>
+<p>
+HOWEVER, I was still dealing with scientific software in C in the mid 00's that had broken six char clean C pre-processor macros. <br>
+The answer was to turn them all off, but thats a different issue.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086574/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086584"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 19:48 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1086584/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086584" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      My understanding is that this all comes down to <a href="https://en.wikipedia.org/wiki/SQUOZE#Identifier_name_character_encoding">IBM SQUOZE</a> and <a href="https://en.wikipedia.org/wiki/DEC_RADIX_50">DEC RADIX 50</a> (and I suspect that DEC RADIX 50 was what influenced early UNIX, since it started on a PDP-7, an 18-bit DEC machine).
+<p>Those encodings get you 6 characters and a few flag bits in two 18-bit machine words, which is useful for both linkers and preprocessors alike; they were commonly used on the PDP-7 (and a slight variant on 16-bit minis like the PDP-11) for linkers, and almost certainly explain where the 6 significant character limit comes from - you squish the first 6 characters into a fixed 32 bit (on PDP-11) or 36-bit (on PDP-7) word, making lookup etc much simpler.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086584/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1086614"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 23:45 UTC (Fri)
+                               by <b>pm215</b> (subscriber, #98099)
+                              [<a href="/Articles/1086614/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pm215" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086614" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+O_CREAT is seven chars :)  It also didn't arrive until 2.10BSD or so, which also added longer identifiers like O_APPEND and O_RDONLY. It's obviously named for the older creat() syscall.<br>
+<p>
+For that matter, creat is also not six characters. Even back in the  PDP-7 Unix that is as early as the tuhs website has, there are some six character syscall names, like rename. The linker being used on that PDP-7 seems to have had a "truncates to 8 chars" limit, as symbols like ttyrestart come out as ttyresta in the linker map; the convention seems to have been a leading '.' on syscall entrypoints, but that still leaves 7 chars. So it seems to me that while you're right that some older systems definitely did have very short limits, at the point when Thompson and Ritchie were defining unix syscall names, the choice of "creat" over "create" was not imposed by a technical limit but was rather "we like and are used to abbreviated names".<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086614/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2026 7:45 UTC (Mon)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/1086734/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anselm" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086734" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>at the point when Thompson and Ritchie were defining unix syscall names, the choice of &quot;creat&quot; over
+&quot;create&quot; was not imposed by a technical limit but was rather &quot;we like and are used to abbreviated
+names&quot;.</p>
+</blockquote>
+<p>Remember that these are the folks who brought you <code>ls</code>, <code>cp</code>,  and <code>rm</code>. If all you have to interact with your computer is an actual <em>teletype</em> (with a roll of paper rather than a CRT display), brevity becomes very enticing.</p>
+<p>Also, people were presumably used to the idea of identifiers with at most six significant characters from Fortran.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1086997"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about O_CREAT_DIRECTORY?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 12:49 UTC (Tue)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1086997/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086997" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+how is a linker implementation detail relevant for a macro? O_CREAT is not an object symbol.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086997/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1086378"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 5:57 UTC (Fri)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1086378/">Link</a>] (20 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086378" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I'd love to have O_DIRECTORY|O_TMPFILE but I know its impossible, because the filesystems can't support that easily. Transactions, ordering, isloations modes and ponies were nice, too. All that working over nfs of course. Santa?
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086378/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 11:32 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1086405/">Link</a>] (19 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086405" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"impossible" is a strong word.<br>
+I don't see why we couldn't come up with implementable semantics if we had a clear justification and no easy alternate approach.<br>
+<p>
+Presumably you particularly want the dir tree to disappear when the root is no longer open. That would be an interesting challenge but I suspect a tmpfs implementation wouldn't be too intrusive.<br>
+<p>
+What is your compelling use case?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086557"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 19:23 UTC (Fri)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1086557/">Link</a>] (18 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086557" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Presumably you particularly want the dir tree to disappear when the root is no longer open.</p>
+</blockquote>
+<p>Yes, the guaranteed cleanup by the system would be the main point of this wish. Additionally, it would be convenient if you were able to create a temporary directory without the need to address name clashes and races.</p>
+<blockquote class="bq"><p>That would be an interesting challenge but I suspect a tmpfs implementation wouldn't be too intrusive.</p>
+</blockquote>
+<p>That would be nice to have, although I also have use cases for persistent filesystems like the root filesystem or big, secondary filesystems.</p>
+<blockquote class="bq"><p>What is your compelling use case?</p>
+</blockquote>
+<p>I think about all the bash scripts which use mktemp and trap, which is unreliable. I imagine a wrapper to create an unlinked directory and call a command (script) maybe with cwd in it or with TMPDIR or another environment variable pointing to /proc/self/fd/N for the scripts usage. The script could just use that directory for all its scratch files including calling external tools (e.g. <code>git clone</code>) without the need to address cleanup or name collisions in any way. Yes, the wrapper could do the cleanup, too, but this would also not be reliable. For example, the wrapper could be killed by the user or the users session manager before completing the cleanup. Even if you make the wrapper privileged or a us a privileged service, you still would have the cleanup problem if the system goes down (not on tmpfs, though).</p>
+<p>I think you don't necessarily need a script to be called from a wrapper, the script could also make use of the feature by its own code and  a helper program: For example, bash could use coproc to run an external program which creates the directory, echos the fd-number to stdout and than waits forever or for a reply. bash would read the fdnum, open the directory via /proc/PID/fd/N itself and than kill  the coproc or tell it to finish.</p>
+<p>For the system disk usage: We distribute system software by sending tar archives to clients. These tar archives are extracted to a temporary directory on the system disk and than the files are moved into place.</p>
+<p>For the usage on real on-disk filesystems: Just programs which need lot of scratch space that don't fit into a memory filesystem.</p>
+<p>We have more interest in non-tmpfs solutions, because we operate multi-user systems. We don't want users to exhaust memory by using /tmp , so our /tmp is not tmpfs. Users should use &quot;real&quot; filesystems for temporary data  and we hope that the filesystem caches partly compensates for the performance loss.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086557/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2026 3:01 UTC (Sun)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1086664/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086664" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Given how we've moved towards referencing directories by file handle, it's not a crazy ask, and it would solve real problems.<br>
+<p>
+It'd create others, though: unlinked files are a problem for observability; if you forget to kill something, or a program is doing something unexpected, it makes "where'd my disk space go" into a real game.<br>
+<p>
+Private mount namespaces can create similar problems.<br>
+<p>
+So, as the bcachefs maintainer: I'd be happy to take patches or implement O_DIRECTORY|O_TMPFILE in bcachefs - after we have a solution to that one.<br>
+<p>
+It'd need major cooperation between the VFS and the filesystem. The filesystem would have to implement rm -rf in .evict(), and that means on disk format changes because unlinked files have to be processed in recovery, and an unlinked file is not quite the same thing as an unlinked directory.<br>
+<p>
+You'd need the VFS to track when the tree has gone away, and the dcache would have to be able to operate on disconnected subtrees. The VFS does this sort of tracking today only in the context of a mount, not a random disconnected directory, to my knowledge.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086667"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2026 5:37 UTC (Sun)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1086667/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086667" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>It'd create others, though: unlinked files are a problem for observability; if you forget to kill something, or a program is doing something unexpected, it makes &quot;where'd my disk space go&quot; into a real game.</p>
+</blockquote>
+<p>Yes, but we already have that with unlinked regular files.</p>
+<blockquote class="bq"><p>So, as the bcachefs maintainer: I'd be happy to take patches or implement O_DIRECTORY|O_TMPFILE in bcachefs - after we have a solution to that one.</p>
+</blockquote>
+<p>Would anyone other than you be able to do that? There is no point even asking my employer to release me from work for the last few years leading up to retirement. :-)</p>
+<blockquote class="bq"><p>You'd need the VFS to track when the tree has gone away, and the dcache would have to be able to operate on disconnected subtrees.</p>
+</blockquote>
+<p>So I think an implementation for tmpfs, which already has its own independent value, would indeed be a good first target and an implementation on a persistent filesystem might come after that.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086667/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086668"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2026 7:33 UTC (Sun)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1086668/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086668" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Would anyone other than you be able to do that? There is no point even asking my employer to release me from work for the last few years leading up to retirement. :-)</span><br>
+<p>
+Your estimate is a couple years for figuring out an API for tracking and viewing unlinked-but-open files? Yeesh.<br>
+<p>
+I get pretty scathing when people pile on complexity without thinking about how it'll be debugged. There's too many opaque black boxes already in the kernel.<br>
+<p>
+My rule is, before you pile something on, you need to make sure what you already have is understandable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086668/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1086733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2026 6:48 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1086733/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086733" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>The filesystem would have to implement rm -rf in .evict(), and that means on disk format changes because unlinked files have to be processed in recovery, and an unlinked file is not quite the same thing as an unlinked directory.</p>
+</blockquote>
+<p>The &quot;rm -rf' in .evict() would be lazy I think and could proceed breadth-first rather than the depth-first that &quot;rm -r&quot; does.  It would do a &quot;readdir&quot; and attach each directory to the list of unattached directories, and schedule a truncate of each file however that normally happens.  The unattached directories would be recorded however unattached files are (and orphan list?) and on recovery you wouldn't need to process them immediately, but simply add them to the list of unattached directories.  Then let the lazy cleanup continue.</p>
+<p>I think this might be sufficiently generic that the VFS could provide code to handle it.</p>
+<p>Then we could add at AT_RECURSIVE flag to be used with AT_REMOVEDIR in unlinkat().  Wouldn't that be fun!</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087127"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 16:54 UTC (Tue)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1087127/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1087127" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, if you've got an unlinked directory with files in it, the filesystem has to handle that in recovery. But breadth first is a good point, that does simplify.<br>
+<p>
+And I like your AT_RECURSIVE|AT_REMOVEDIR idea. I think there's actually no need for unlinked-but-open directories, it's the rm -rf on close that we want; that means we don't have open but invisible files and it might even be possible to use in bash scripts. Done that way, maybe it could be a purely VFS thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087127/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087161"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 23:16 UTC (Tue)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1087161/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1087161" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>I think there's actually no need for unlinked-but-open directories, it's the rm -rf on close that we want</p>
+</blockquote>
+<p>&quot;man 2 open&quot; identifies 4 important aspects of O_TMPFILE:</p>
+<ol class="spacylist"><li>are  automatically  deleted    when  closed;</li>
+<li>can never be reached via any pathname;</li>
+<li>are not subject to symlink attacks; and</li>
+<li>do  not require the caller to devise unique names.</li>
+</ol>
+<p>I think these are all important.  However this is the VFS view, not the internal FS view.
+For example, I imagine a filesystem could implement these just like regular directories which are subdirs of the root, but with names that contain a &quot;/'.  .iterate_shared() would skip over these. This would answer 2 and 3.  The fs would choose a unique name (sprintf(s, &quot;/%d&quot;, i-&gt;i_ino) which would answer 4.  Then you just need the &quot;rm -rf&quot; on close which the VFS could handle most of.</p>
+<p>Maybe the fs would provide:</p>
+<ul class="spacylist"><li>.tmpdir() which does .mkdir() in the root directory with a synthesized name</li>
+<li>.mvtmp() which take a dentry and moves it to the root with a sythesized name</li>
+<li>.iterate_tmp() which is like iterate_shared() but returns dentries for the hidden objects, which can be passed to .unlink() or .rmdir()</li>
+</ul>
+<p>The VFS could have code that uses iterate_tmp() and everything that it finds which isn't open is unlink()ed if a file, rmdir()ed if an empty directory, or iterate_shared() with everything passed to .mvtmp() (or maybe unlink()).  This code would be called at mount time and whenever a tmp file/dir is closed for the last time.</p>
+<p>So yes, the FS doesn't need to have a concept of unlinked-but-open, but the VFS must have access to &quot;open, but no link that is visible/accessable&quot;.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087161/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087169"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 2:34 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1087169/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1087169" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why is "can not be reached via any pathname" important, though?<br>
+<p>
+It breaks the recursively enumerable property of filesystems; i.e. I can recursively enumerate to find all the consumed resources. I'm not a fan of private mount namespaces for the same reason :)<br>
+<p>
+And considering that the implementation you're proposing has them having dirents anyways - to be that's another reason to consider just skipping the "unlinked directories idea".<br>
+<p>
+<span class="QuotedText">&gt; For example, I imagine a filesystem could implement these just like regular directories which are subdirs of the root</span><br>
+<p>
+Not of the root, they'd need to be subdirectories of the directory that userspace specified. Project quota in practice already inherits from the parent directory on other filesystems, and on bcachefs IO path options inherit from the parent directory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087169/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087170"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 3:34 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1087170/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1087170" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Why is &quot;can not be reached via any pathname&quot; important, though?</p>
+</blockquote>
+<p>I suspect that is primarily about supporting &quot;are not subject to symlink attacks&quot;, though that ends up meaning a bit more with directories.</p>
+<p>I think the key idea is that no other process has any write capability to anything in the &quot;TMP&quot; file or tree, so that it is easier to write safe code that cannot be subverted.  I suspect read access is not so important - normal permissions should be enough.  Not giving a name to something is a simple way to avoid anyone getting any capability at all.</p>
+<p>If we were to add an FMODE flag which denies write access and is inherited through openat() and friends, then I think it would be safe to allow these TMP dirs to have a name as long as the new FMODE flag was imposed whenever a path lookup crossed into a TMP dir via the name.  It isn't a obviously-secure as not having a name, but maybe it is close enough.</p>
+<p>Of course unlinked things have names via /proc/$PID/fd/$FD so maybe having a name in the fs doesn't reduce access.</p>
+<blockquote class="bq"><p>Not of the root, they'd need to be subdirectories of the directory that userspace specified.</p>
+</blockquote>
+<p>Sure, put them wherever you like as long as they can be found with .iterate_tmp(). I was just presenting a proof-of-concept approach.</p>
+<blockquote class="bq"><p>Project quota in practice already inherits from the parent directory on other filesystems, and on bcachefs IO path options inherit from the parent directory.</p>
+</blockquote>
+<p>When you create the tmp directory inode it would certainly make sense to inherit from the given parent.  Whether it then needs to be linked from that parent or not would depend on internal implementation details of the FS.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087170/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087356"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 18:18 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1087356/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1087356" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I think the key idea is that no other process has any write capability to anything in the "TMP" file or tree, so that it is easier to write safe code that cannot be subverted. I suspect read access is not so important - normal permissions should be enough. Not giving a name to something is a simple way to avoid anyone getting any capability at all.</span><br>
+<p>
+Well, I think you described the real issue right there, a shared world writeable /tmp was never a good idea :) We've been going through contortions and pointing at symlinks, but really that was the biggest footgun. It boggles my mind that a world writeable /tmp is still the default for most code, that one is plenty fixable.<br>
+<p>
+Similarly with programs invoked by sudo and unprepared for all the ways that they can be maliciously pointed at something they shouldn't write to. There's a better solution to that one, but we've been stuck with the Unix security model for too long and it's become too ingrained.<br>
+<p>
+The question is if it's even possible to bring a better security model to Linux, and I'm not sure about that one. The biggest thing that needs fixing is that users and groups are integer namespaces when they really should be heirarchical; Plan 9 representing users and groups as strings everywhere was a step in the right direction, and extending that and making users paths gets you something much saner than Linux namespaces. And there's been a lot of development on capability based systems, but it's hard to see doing that well in a system where APIs are still C.<br>
+<p>
+Just consider this article, where a lot of bits and brain cycles are being devoted to "can we extend bitflags to represent a new mode without screwing something else up". That sort of thing is a complete non issue when you've got algebraic data types - this clearly wants to be a Rust style enum.<br>
+<p>
+We're in an awkward moment in the history of systems engineering... things should be getting a whole lot better, cleaner, easier to reason about over the next decade, if we can put in the work to clean stuff up and make the Rust transition happen (among other things). But it's going to be a lot of tedious grindy work and messy transitions before we get there and can start doing the genuinely fun and interesting stuff.<br>
+<p>
+This thread is of real interest to me because Valve keeps nagging me about "can we get better filesystem interfaces to solve stuff that's been a giant pain in the backside of userspace for decades?", and I see this thread and O_DIRECTORY|O_TMPFILE and my first reaction is "OF COURSE WE WANT THAT! WE'VE WANTED THAT FOR YEARS!".<br>
+<p>
+But then by the time monthly meetings roll around I have to put on my hard nosed realist hat and tell them "yes, that's a really good idea and something we have all the pieces to give you, but right now I have to focus on getting in-kernel Rust out the door and getting that transition underway - what you want is going to be much cleaner and more straightforward once that's done".<br>
+<p>
+Anyways, filing this away for who knows when :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087356/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1089054"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2026 9:27 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1089054/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1089054" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am not sure introducing yet another hierarchy is such a great idea. Hierarchies tend to be bad for composition. We have seen that with inheritance-based interface systems in languages like C++. Something like Rust's traits compose much better and in the security domain in particular we have use cases for that too.<br>
+<p>
+One simple use case that hierarchies are bad at comes up when you need to look at the same objects from different angles, e.g. organisational structure in one case, physical limits in another. Say you want to give everyone who works under manager x certain permissions, everyone with a certain seniority certain permissions and everyone who works in a specific building certain permissions. Those could all include the same person but you can't have them in one hierarchy.<br>
+<p>
+In practice I have encountered this e.g. with cgroups when trying to setup shared memory limits for systemd-oomd for systemd --user units owned by different users (the sum of memory used by the processes of a specific unit across all users shouldn't exceed a certain limit, e.g. PHP-FPM pools for all vhosts).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1089054/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1086672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2026 14:47 UTC (Sun)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/1086672/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiederm" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086672" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is already something similar in the VFS to handle the case where a mount point is unlinked under you, and processes are still using that directory.<br>
+<p>
+I expect an implementation of O_DIRECTORY|O_TMPFILE could reuse that code to get the dcache details correct.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086673"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2026 15:15 UTC (Sun)
+                               by <b>jkoolstra</b> (subscriber, #180288)
+                              [<a href="/Articles/1086673/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jkoolstra" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086673" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You cannot do this in this fashion since we have:<br>
+<p>
+#define O_TMPFILE (__O_TMPFILE | O_DIRECTORY)<br>
+<p>
+This is a terrible hack that we unfortunately have to live with :')<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086673/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086731"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2026 5:56 UTC (Mon)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1086731/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086731" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>#define O_TMPFILE (__O_TMPFILE | O_DIRECTORY)</p>
+<p>This is a terrible hack that we unfortunately have to live with :')</p>
+</blockquote>
+<p>Ouch!</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086731/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1086732"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2026 6:37 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1086732/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086732" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>You cannot do this in this fashion since we have:</p>
+<p>#define O_TMPFILE (__O_TMPFILE | O_DIRECTORY)</p>
+</blockquote>
+<p>True, but opening with  O_CREAT | O_TMPFILE | O_DIRECTORY could work.
+That combination is currently illegal and has been since O_DIRECTORY was added to O_TMPFILE.</p>
+<p>That isn't exactly elegant, but isn't as inelegant as combining O_DIRECTORY with O_TMPFILE.</p>
+<p>(I would have added O_EXCL to __O_TMPFILE as old kernels would return -EEXIST if O_TMPFILE we given but not understood).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086732/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087964"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE  - sample code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2026 2:48 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1087964/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1087964" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I decide to play and wrote some code which implements this idea for tmpfs.<br>
+It is in the TMPDIR branch of my "linux" tree on github.<br>
+<p>
+<a href="https://github.com/neilbrown/linux/tree/TMPDIR">https://github.com/neilbrown/linux/tree/TMPDIR</a><br>
+<p>
+There is a .c file in the root for testing.<br>
+<p>
+No promises - it might eat your data.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087964/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087978"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE  - sample code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2026 9:07 UTC (Mon)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1087978/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1087978" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>I decide to play and wrote some code which implements this idea for tmpfs.</p>
+</blockquote>
+<p>Oh, just wow. This alone has so much value that I might include it as an out-of-tree patch if it doesn't go upstream.</p>
+<pre><code>buczek@dose:/scratch/local2/linux (x)$ df -k /dev/shm
+Filesystem     1K-blocks  Used Available Use% Mounted on
+tmpfs            5096620     0   5096620   0% /dev/shm
+buczek@dose:/scratch/local2/linux (x)$ ./tmpcd /dev/shm /usr/bin/bash
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+buczek@dose:/scratch/local2/linux$ cp -a /scratch/local2/linux/Documentation .
+buczek@dose:/scratch/local2/linux$ df -k /dev/shm
+Filesystem     1K-blocks  Used Available Use% Mounted on
+tmpfs            5096620 81904   5014716   2% /dev/shm
+buczek@dose:/scratch/local2/linux$ exit
+exit
+buczek@dose:/scratch/local2/linux (x)$ df -k /dev/shm
+Filesystem     1K-blocks  Used Available Use% Mounted on
+tmpfs            5096620     0   5096620   0% /dev/shm
+</code></pre>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087978/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1088368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE  - sample code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 12, 2026 13:19 UTC (Wed)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1088368/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1088368" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>You can avoid the bash warnings by setting the <code>PWD</code> environment variable to &quot;/proc/PID/fd/FD&quot; in the wrapper. However <code>git</code>, for example, uses  <code>getcwd()</code> from glibc (not the system  call) which translates &quot;(unreachable)&quot; names to errors. So my hope, that a script could use any external tool, is not fulfilled. Still very useful, though.</p>
+<pre><code>buczek@dose:/scratch/local2/linux (x)$ ./tmpcd /dev/shm /bin/bash
+buczek@dose:/proc/837/fd/3$ pwd
+/proc/837/fd/3
+buczek@dose:/proc/837/fd/3$ /bin/pwd
+/bin/pwd: couldn't find directory entry in ‘..’ with matching i-node
+buczek@dose:/proc/837/fd/3$ git status
+fatal: Unable to read current working directory: No such file or directory
+buczek@dose:/proc/837/fd/3$ strace git status 2&gt;&amp;1 | fgrep getcwd
+getcwd(&quot;(unreachable)/&quot;, 129)           = 15
+getcwd(&quot;(unreachable)/&quot;, 129)           = 15
+buczek@dose:/proc/837/fd/3$ ltrace git status 2&gt;&amp;1 | fgrep getcwd
+getcwd(0x7de8a0, 129 &lt;unfinished ...&gt;
+&lt;... getcwd resumed&gt; )                           = nil
+getcwd(0x7de8a0, 129 &lt;unfinished ...&gt;
+&lt;... getcwd resumed&gt; )                           = nil
+</code></pre>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1088545"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY|O_TMPFILE  - sample code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 1:47 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1088545/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1088545" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>You can avoid the bash warnings by setting the PWD environment variable to ...</p>
+</blockquote>
+<p>You can also avoid the bash warnings by actually mounting the directory.  You would want to do that in a private namespace to keep the directory private.  The namespace would be torn down on exit which would clean up the mount and the temp directory.</p>
+<p>Where to mount it?  I would designate a place which is otherwise unused where anyone can mount a private directory in a private namespace.  Maybe /run/scratch ??</p>
+<p>I've pushed out some changes to github which you can experiment with.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088545/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1086735"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">still on 6.1</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2026 7:54 UTC (Mon)
+                               by <b>grmnsftphr</b> (subscriber, #178591)
+                              [<a href="/Articles/1086735/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="grmnsftphr" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1086735" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Still on 6.1 and civil infrastructure even on 5.x. Not that I like the situation but it is the IRL situation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086735/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1098454"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">O_DIRECTORY necessary?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 4, 2026 7:56 UTC (Sun)
+                               by <b>ralfj</b> (subscriber, #172874)
+                              [<a href="/Articles/1098454/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ralfj" />
+                <input type="hidden" name="return" value="/Articles/1085617/#CommAnchor1098454" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Specifically, all of the open() variants support the O_DIRECTORY flag, which is necessary if the application is trying to open a directory rather than a normal file.</span><br>
+<p>
+That's not correct, is it? Or at least, it is stated in a confusing way. open() will open directories just fine even without O_DIRECTORY. The flag just makes it so that it is an error for the file to not be a directory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1098454/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

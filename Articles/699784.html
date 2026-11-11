@@ -1,0 +1,239 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Reimplementing mutexes with a coupled lock [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Reimplementing mutexes with a coupled lock">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Oscar Wilde once famously observed that fashion 'is usually a form of ugliness so intolerable t [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/698958/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Reimplementing mutexes with a coupled lock</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 8, 2016</br>
+           </div>
+Oscar Wilde once famously observed that fashion "<q>is usually a form of
+ugliness so intolerable that we have to alter it every six months</q>".
+Perhaps the same holds true of locking primitives in the kernel; basic
+mechanisms like the mutex have been through many incarnations over the
+years.  This season, it would appear that <a
+href="699094.html">coupled atomic locks</a> are all the rage with the
+trendiest kernel developers, so it should not be surprising that a new
+mutex implementation using those locks is making the rounds.  This code may
+be glittering and shiny, but it also has the potential to greatly simplify
+the mutex implementation.
+<p>
+A mutex is a sleeping lock, meaning that kernel code that tries to acquire
+a contended 
+mutex may go to sleep to wait until that mutex becomes available.  Early mutex
+implementations would always put a waiter to sleep, but, following the
+scalability trends of the day, mutexes soon gained a glamorous accessory:
+optimistic spinning.  Waking a sleeping thread can take a long time and,
+once that thread gets going, it may find that the processor cache contains
+none of its data, leading to unfashionable cache misses.  A thread that spins
+waiting for a mutex, instead, will 
+be able to grab it quickly once it becomes available and will likely still
+be cache-hot.  Enabling optimistic spinning can improve performance
+considerably.  There is a cost, in that mutexes are no longer fair (they
+can be "stolen" from a thread that has been waiting for longer), but being
+properly <i>à la mode</i> is never free.
+<p>
+Optimistic spinning brings with it an interesting complication, though, in
+that it requires tracking the current owner of the mutex.  If that owner
+sleeps, or if the owner changes while a thread is spinning, it doesn't
+make any sense to continue spinning, since the wait is likely to be long.
+As a field within the mutex, the owner information is best 
+protected by the mutex itself.  But, by its nature, this information must
+be accessed by threads that do not own the mutex.  The result is some
+tricky code that is trying to juggle the lock itself and the owner
+information at the same time.
+<p>
+Peter Zijlstra has sent <a href="/Articles/699566/">an alternative
+mechanism</a> down the runway; it takes care of this problem by combining
+the owner 
+information and lock status into a single field within the mutex.  In
+current kernels, the <tt>count</tt> field, an <tt>atomic_t</tt> value,
+holds the status of the lock itself, while <tt>owner</tt>, a pointer to
+<tt>struct task_struct</tt>, indicates which thread owns the mutex.
+Peter's patch removes both of those fields, replacing them with a single
+<tt>atomic_long_t</tt> value called "<tt>owner</tt>".
+<p>
+This value is 64 bits wide, large enough to hold a pointer value.  If
+the mutex is available, there is no owner, so the new <tt>owner</tt> field
+contains zero.  When the mutex is taken, the acquiring thread's
+<tt>task_struct</tt> pointer is placed there, simultaneously indicating
+that the mutex is unavailable and which thread owns it.  The
+<tt>task_struct</tt> structure must be properly aligned, though, meaning
+that the bottom bits of a pointer to it will always be zero, so those bits
+are available for other locking-related purposes.  Following this season's
+coupled-lock trend, two of those bits are so
+used, in ways that will be described shortly.
+<p>
+With the new organization, the code to attempt to acquire a mutex now looks
+like this:
+<p>
+<pre>
+    static inline bool __mutex_trylock(struct mutex *lock)
+    {
+    	unsigned long owner, curr = (unsigned long)current;
+    
+    	owner = atomic_long_read(&amp;lock-&gt;owner);
+    	for (;;) { /* must loop, can race against a flag */
+    	    unsigned long old;
+    
+    	    if (__owner_task(owner))
+    		return false;
+    	    old = atomic_long_cmpxchg_acquire(&amp;lock-&gt;owner, owner,
+    					      curr | __owner_flags(owner));
+    	    if (old == owner)
+    		return true;
+    	    owner = old;
+    	}
+    }
+</pre>
+<p>
+
+The <tt>__owner_task()</tt> and <tt>__owner_flags()</tt> macros simply mask
+out the appropriate parts of the <tt>owner</tt> field.
+The key is the <tt>atomic_long_cmpxchg_acquire()</tt> call, which attempts
+to store the current thread as the owner of the mutex on the assumption
+that it is available.  Should some other thread own the mutex, that call
+will fail, and the mutex code will know that it will have to work harder.
+<p>
+There are currently two flags that can be stored in the least significant
+bits of <tt>owner</tt>.  If a thread finds it must sleep while waiting for
+a contended mutex, it will set <tt>MUTEX_FLAG_WAITERS</tt>; the thread
+currently holding the mutex will then know it must wake the waiters when
+the mutex is freed.  Most of the time, it is hoped, there will be no
+waiters; maintaining this bit allows for a bit of unnecessary work to
+be skipped. 
+<p>
+As mentioned above, optimistic spinning, while good for performance, is
+unfair; in the worst case, an unlucky thread contending for a highly
+contended mutex could be starved for a long time.  In an attempt to prevent
+that problem, the second <tt>owner</tt> bit, <tt>MUTEX_FLAG_HANDOFF</tt>,
+can be used to change how a contended mutex changes ownership.
+<p>
+If a thread tries and fails to obtain a mutex after having already slept
+waiting for it to become available, it can set
+<tt>MUTEX_FLAG_HANDOFF</tt> prior to returning to sleep.  Later on, when the
+mutex is freed, the freeing thread will notice the flag and behave
+differently.  In particular, it must avoid clearing the <tt>owner</tt>
+field as it normally would, lest some other thread, spinning on the mutex,
+steal it away.  Instead, it finds the first thread in the wait queue for
+the mutex and transfers ownership directly, waking that thread once the
+job is done.  This dance restores some fairness, at the cost of making
+everybody wait for the sleeping thread to wake up and get its work done.
+<p>
+The new code simplifies the mutex implementation considerably by getting
+rid of a number of strange cases involving the separate <tt>count</tt> and
+<tt>owner</tt> fields.  But it gets a bit better than that, since the new
+code is also architecture-independent; all of the old,
+architecture-specific mutex code can go away.  So the bottom line of
+Peter's cover letter reads:
+<p>
+<pre>
+    49 files changed, 382 insertions(+), 1407 deletions(-)
+</pre>
+<p>
+Removing code, as it happens, is always in fashion, and removing 1000 lines
+of tricky assembly-language locking code is especially chic.  Assuming that
+this code manages to avoid introducing performance regressions, it could be
+a must-have item at a near-future merge-window ball.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Locking mechanisms/Mutexes</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/699784/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor701669"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reimplementing mutexes with a coupled lock</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 23, 2016 2:21 UTC (Fri)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/701669/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kevinm" />
+                <input type="hidden" name="return" value="/Articles/699784/#CommAnchor701669" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Couldn't the MUTEX_FLAG_HANDOFF case also be handled by having the spinning tasks notice the flag and immediately stop spinning and switch to the slow path?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/701669/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

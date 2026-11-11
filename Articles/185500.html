@@ -1,0 +1,229 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Notifiers, 2.6.17 style [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Notifiers, 2.6.17 style">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="While plowing through the flood of patches early in the 2.6.17 cycle, your editor missed a sign [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/185078/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Notifiers, 2.6.17 style</h1>
+<div class="Byline">[Posted May 29, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+While plowing through the flood of patches early in the 2.6.17 cycle, your
+editor missed a significant API change: the new notifier interface.
+Notifiers are an internal kernel mechanism allowing code to register to be
+told about events of interest.  There are notifiers for memory hotplug
+events, CPU frequency policy changes, USB hotplug events, module loading
+and unloading, system reboots, network device changes, and more.  
+<p>
+
+Back in November, 2005, this page <a
+href="160953.html">looked at a proposed notifier API
+change</a> motivated by the lack of locking on the notifier chains
+themselves.  That proposal received a lukewarm reception.  Many low-level
+data structures in the kernel explicitly avoid performing any locking, on
+the assumption that the higher layers will have to be concerned with their
+own locking in any case.  So, it was asked, why should notifiers be any
+different?  The answer seems to be that, unlike many other data structures,
+notifiers tend to be used across relatively wide parts of the kernel,
+making it hard to use any locking regime except one designed for the
+notifiers themselves.  In any case, a version of the notifier patch was
+merged for 2.6.17-rc1.
+<p>
+
+The current form of the API defines three different types of notifiers:
+<p>
+<ul>
+<li> Blocking notifiers are always called from process context.  The
+     notifier code - along with the notification routines it calls - is
+     allowed to sleep.
+<p>
+<li> Atomic notifiers can be called from atomic context, no sleeping
+     allowed.
+<p>
+<li> Raw notifiers have no internal locking and no associated rules; they
+     are simply the older form of the notifier API, preserved as a
+     historical relic.
+</ul>
+<p>
+For 2.6.17, all notifier chains have been converted to the blocking or
+atomic types; there are no users of the raw interface in the mainline
+kernel.  The notifier patch includes no threatening noises about removing
+the raw interface, but, sooner or later, somebody is likely to come along
+and want to clean it up.  So avoiding raw notifiers is probably a good
+idea; this article will concentrate on the other two types.
+<p>
+
+Blocking notifiers are essentially a raw notifier with an rwsem added for
+mutual exclusion.  Any operation on a blocking notifier may, well, block on
+that rwsem.  These notifiers can be created in the usual two ways:
+<p>
+<pre>
+    #include &lt;linux/notifier.h&gt;
+
+    BLOCKING_NOTIFIER_HEAD(my_notifier);
+
+    struct blocking_notifier_head my_notifier;
+    BLOCKING_INIT_NOTIFIER_HEAD(my_notifier);
+</pre>
+<p>
+
+Code which wishes to hook into a blocking notifier should first fill in a
+<tt>notifier_block</tt> structure:
+<p>
+<pre>
+    struct notifier_block {
+	int (*notifier_call)(struct notifier_block *block, 
+                             unsigned long event, 
+			     void *data);
+ 	int priority;
+	/* ... */
+    };
+</pre>
+<p>
+The <tt>notifier_call</tt> field should point to the function to be called
+when something interesting happens; the <tt>event</tt> and <tt>data</tt>
+parameters will be provided by the code generating the event.  Notifiers
+are called in order of increasing <tt>priority</tt>; the return value from
+the final notifier called will be passed back to the code signalling the
+event.  Normally, the final notifier is the one with the highest
+<tt>priority</tt> value, but any notifier can halt further processing by
+returning a value with the bit indicated by <tt>NOTIFIER_STOP_MASK</tt>
+set.  Other than that one bit (currently <tt>0x8000</tt>), the return
+values are arbitrary (as far as the notification code is concerned), but
+the convenience values <tt>NOTIFY_OK</tt> ("so far so good"),
+<tt>NOTIFY_STOP</tt> ("all is well, but don't call any more notifiers") and
+<tt>NOTIFY_BAD</tt> ("stop calling notifiers and veto the proposed action")
+are available.
+<p>
+Once the code has a <tt>notifier_block</tt> ready, it should register it
+with:
+<p>
+<pre>
+    int blocking_notifier_chain_register(struct blocking_notifier_head *chain,
+                                         struct notifier_block *nb);
+</pre>
+<p>
+The return value is apparently intended to allow an error status to be
+returned if the registration fails, but the 2.6.17 version of the code
+cannot fail.
+<p>
+A blocking notifier can be unregistered with:
+<p>
+<pre>
+    int blocking_notifier_chain_unregister(struct blocking_notifier_head *chain,
+                                           struct notifier_block *nb);
+</pre>
+<p>
+This call will return <tt>-ENOENT</tt> if the given notifier was not
+actually registered.
+<p>
+Code which wishes to use a blocking notifier chain to signal an event can
+do so with:
+<p>
+<pre>
+    int blocking_notifier_call_chain(struct blocking_notifier_head *chain,
+		                     unsigned long event, 
+				     void *data);
+</pre>
+<p>
+This function will call all notifiers in <tt>chain</tt> (unless one of them
+stops the process partway through), returning the value from the last
+notifier called.
+<p>
+
+Atomic notifiers replace the rwsem with a spinlock; the API 
+is very similar:
+<p>
+<pre>
+    ATOMIC_NOTIFIER_HEAD(my_notifier);
+
+    struct atomic_notifier_head my_notifier;
+    ATOMIC_INIT_NOTIFIER_HEAD(my_notifier);
+
+    int atomic_notifier_chain_register(struct atomic_notifier_head *chain,
+                                       struct notifier_block *nb);
+    int atomic_notifier_chain_unregister(struct atomic_notifier_head *chain,
+                                         struct notifier_block *nb);
+
+    int atomic_notifier_call_chain(struct atomic_notifier_head *chain,
+		                   unsigned long event, 
+				   void *data);
+</pre>
+<p>
+
+Note that atomic notifiers use the same <tt>notifier_block</tt> structure
+as the blocking variety does.  Nothing will ever sleep in the atomic
+notifier code, however, and notifier functions called from an atomic chain
+are not allowed to sleep either.
+<p>
+As noted above, all notifier chains in the kernel have been changed to
+one of the above types; any out-of-tree code which uses a kernel chain will
+have to be updated accordingly.  See the explanatory text for <a
+href="http://permalink.gmane.org/gmane.linux.kernel.commits.head/76328">the
+notifier patch</a> for a summary of what type was assigned to each existing
+chain in the mainline kernel.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Notifiers</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/185500/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

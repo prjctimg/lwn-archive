@@ -1,0 +1,498 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Safer speculation-free user-space access [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Safer speculation-free user-space access">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Spectre class of hardware vulnerabilities truly is a gift that keeps on giving.  New varian [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1042981/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Safer speculation-free user-space access</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 23, 2025</br>
+           </div>
+The Spectre class of hardware vulnerabilities truly is a gift that keeps on
+giving.  New variants are still being discovered in current CPUs nearly
+eight years after the <a href="/Articles/742702/">disclosure</a> of this
+problem, and developers are still working to minimize the performance costs
+that come from defending against it.  The masked user-space access
+mechanism is a case in point: it reduces the cost of defending against some
+speculative attacks, but it brought some challenges of its own that are
+only now being addressed.
+<p>
+The Spectre vulnerabilities can be used to exfiltrate data from the kernel
+in a number of ways, but the attacks usually come down to exercising a
+kernel path that will speculatively execute with an attacker-provided
+address, leaving traces of the target data that can then be recovered via a
+side channel.  One of the most common ways to defeat such attacks is to
+simply prevent speculative execution of some code; it is effective, but
+also expensive.
+<!-- middle-ad -->
+<p>
+<h4>Defending user-space access</h4>
+<p>
+One common target for speculative attacks is accesses to user space by the
+kernel, since the address in question is often controlled by user space.
+Since the tests for the validity of an address nearly always succeed,
+speculative execution tends to take the "address is valid" path, even when
+the address is anything but.  The functions used by most of the kernel for
+user-space access (such as <a
+href="https://elixir.bootlin.com/linux/v6.17.3/source/include/linux/uaccess.h#L204"><tt>copy_from_user()</tt></a>)
+are well defended, but the kernel has a number of places where faster
+access is required for acceptable performance.  This can especially be a
+concern when multiple accesses to user space are required.  Code in such
+situations tends to use a pattern like <a
+href="https://elixir.bootlin.com/linux/v6.10.14/source/fs/select.c#L778">this
+one</a> from the 6.10 implementation of the <a
+href="https://man7.org/linux/man-pages/man2/select.2.html"><tt>select()</tt></a>
+system call, which only incurs the cost for the speculation defense once
+but performs two reads:
+<p>
+<pre>
+        if (from) {
+            if (!user_read_access_begin(from, sizeof(*from)))
+                return -EFAULT;
+            unsafe_get_user(to-&gt;p, &amp;from-&gt;p, Efault);
+            unsafe_get_user(to-&gt;size, &amp;from-&gt;size, Efault);
+            user_read_access_end();
+        }
+        return 0;
+    Efault:
+        user_access_end();
+        return -EFAULT;
+</pre>
+<p>
+The <tt>user_read_access_begin()</tt> call is implemented as a chain of
+macros before finally doing two things: enabling user-space access with a
+<tt>STAC</tt> instruction, and blocking speculation with an <tt>LFENCE</tt>
+instruction.  The <tt>unsafe_get_user()</tt> macros, which include a jump
+to <tt>Efault</tt> on error, can then be used to access the relevant data.
+Finally, <tt>user_read_access_end()</tt> and <tt>user_access_end()</tt>
+both boil down to a <tt>CLAC</tt> instruction to re-enable <a
+href="/Articles/517475/">supervisor mode access prevention</a>; an
+important step that, if forgotten, can leave the kernel open to other
+attacks.  The <tt>STAC</tt>/<tt>CLAC</tt> pair is unavoidable, but it would
+be nice to do away with the costly <tt>LFENCE</tt> if possible.
+<p>
+<h4>Defense without fences</h4>
+<p>
+The first commit in the 6.11 merge window was <a
+href="https://git.kernel.org/linus/2865baf54077">this change</a> from Linus
+Torvalds adding a new mechanism that he called "user address masking".  It
+uses a relatively simple trick to avoid the <tt>LFENCE</tt> instruction,
+ensuring that any attempt at kernel-space access with a supposedly
+user-space address will fail.  There were two new macros:
+<p>
+<pre>
+    #define mask_user_address(x) ((typeof(x))((long)(x)|((long)(x)&gt;&gt;63)))
+    #define masked_user_access_begin(x) ({ __uaccess_begin(); mask_user_address(x); })
+</pre>
+<p>
+Passing a pointer to <tt>mask_user_address()</tt> will perform a logical OR
+of the address with a version of itself right-shifted by 63&nbsp;bits.  The
+sign-extension performed by the x86 CPU means that, if the address is in
+kernel space (the topmost bit is one), the resulting address will be all
+ones, which is not valid.  Any speculation involving a kernel-space address
+will, as a result, fail on the invalid access.  Since exploitable
+speculation can no longer happen, there is no longer any need for the
+<tt>LFENCE</tt> instruction.
+<p>
+(For the curious, the implementation of these macros <a
+href="https://git.kernel.org/linus/91309a70829d">was changed</a> in 6.14,
+making them <a
+href="https://elixir.bootlin.com/linux/v6.17.3/source/arch/x86/include/asm/uaccess_64.h#L59">quite
+different</a> from the original in current kernels; amusingly, they no
+longer involve masking.  The end result is the same, though, and the
+"masked access" term is still used.)
+<p>
+Masked access can accelerate performance-sensitive operations, but it has a
+small disadvantage: it is not supported by all architectures.  So code that
+uses this feature must be prepared to fall back to the previous method on
+architectures where masked access is not available.  The <tt>select()</tt>
+code shown above is, as a result, <a
+href="https://elixir.bootlin.com/linux/v6.17.3/source/fs/select.c#L774">in
+6.17</a>, written as:
+<p>
+<pre>
+        if (from) {
+            if (can_do_masked_user_access())
+                from = masked_user_access_begin(from);
+            else if (!user_read_access_begin(from, sizeof(*from)))
+                return -EFAULT;
+            unsafe_get_user(to-&gt;p, &amp;from-&gt;p, Efault);
+            unsafe_get_user(to-&gt;size, &amp;from-&gt;size, Efault);
+            user_read_access_end();
+        }
+    Efault:
+        user_access_end();
+        return -EFAULT;
+</pre>
+<p>
+The code is faster, but has also become more complex.
+<p>
+<h4>Using scopes</h4>
+<p>
+As Thomas Gleixner pointed out in <a
+href="/ml/all/20250916163004.674341701@linutronix.de">this patch
+series</a>, all that code to read two user-space values is just the sort of
+"<q>tedious</q>" boilerplate that offers numerous opportunities for
+security-critical mistakes.  As the use of the masked-access primitives
+grows over time, the chances of introducing new bugs will grow as well.  He
+set out to improve this pattern using the kernel's <a
+href="934679.html">scoped primitives</a> to ensure that the proper
+cleanup is done once the access is complete.  The result in <a
+href="/ml/all/20251022102427.400699796@linutronix.de">the current
+version</a> of the series is three new macros:
+<p>
+<pre>
+    scoped_user_read_access(address, label)
+    scoped_user_write_access(address, label)
+    scoped_user_rw_access(address, label)
+</pre>
+<p>
+Each of these starts a new block and speculation-proofs the given
+<tt>address</tt>, inserting a jump to the specified <tt>label</tt> in the
+case of an access violation.  Using these macros, the <tt>select()</tt>
+code can now look like:
+<p>
+<pre>
+        if (from) {
+            scoped_user_read_access(from, Efault) {
+                unsafe_get_user(to-&gt;p, &amp;from-&gt;p, Efault);
+                unsafe_get_user(to-&gt;size, &amp;from-&gt;size, Efault);
+            }
+        }
+    Efault:
+        return -EFAULT;
+</pre>
+<p>
+The end result is clearly simpler and less prone to the sorts of mistakes
+that developers are likely to make.  The need for explicit cleanup code, in
+particular, has been completely removed.  
+<p>
+This work is in its third revision; aside from some relatively minor
+comments, it would appear to have reached general approval.  It seems
+to be a likely candidate for the 6.19 merge window.  This work may affect a
+relatively obscure corner of the kernel that few developers will see
+directly, but it is a good example of the ongoing effort to make kernel
+development a bit less error prone.  Moving away from C is not in the cards
+for a long time, so the next best thing is to make working in C safer.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.19</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scoped resource management</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Meltdown and Spectre</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1042711/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1043128"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Self-terminating nested for loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2025 22:30 UTC (Thu)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1043128/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/1042711/#CommAnchor1043128" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The "self-terminating nested for loop" trick used <a href="https://lwn.net/ml/all/20251022103112.294959046@linutronix.de/">to implement the guard syntax</a> is really interesting. The guard is implemented as:
+
+<pre>
+#define __scoped_user_access(mode, uptr, size, elbl)					\
+for (bool done = false; !done; done = true)						\
+	for (void __user *_tmpptr = __scoped_user_access_begin(mode, uptr, size, elbl); \
+	     !done; done = true)							\
+		for (CLASS(user_##mode##_access, scope)(_tmpptr); !done; done = true)	\
+			/* Force modified pointer usage within the scope */		\
+			for (const typeof(uptr) uptr = _tmpptr; !done; done = true)
+</pre>
+
+Basically, you start whatever you're doing with <code>for (bool done = false; !done; done = true)</code>, and then nest inside it any number of <code>for (some local variable; !done; done = true)</code> statements, and leave the body of the loop up to the user. Then the user's code, which can be a brace-delimited block (as in the example given above in this article) or even a single line (as in the example in the patch's commit message), runs with those local variables in scope, and they go out of scope at the end. Combined with the <code>cleanup</code> attribute this gets you something like a Python <code>with</code> block; you can run code on entry, provide variables to the body, and run code when it goes out of scope (including when you leave via return or goto).
+<p>
+This gives me ideas for all sorts of interesting tricks by using the for loop as a way to create scoped name bindings, e.g., here's a wrapper type around pointers that makes you check for NULLs and requires you type the letters "unsafe" if you don't want to do that:
+<pre>
+#include &lt;stdio.h&gt;
+
+#define Option(type) struct {type unsafe_ptr;}
+#define Some(value) {.unsafe_ptr = value}
+#define None {.unsafe_ptr = NULL}
+#define if_let_Some(name, option) for (typeof(option.unsafe_ptr) name = option.unsafe_ptr; name; name = NULL)
+
+int main(void) {
+        Option(char *) a = Some("Hello world!");
+        Option(char *) b = None;
+
+        if_let_Some(p, a)
+                printf("The string is %s\n", p);
+        if_let_Some(p, b)
+                printf("The string is %s\n", p);
+}
+</pre>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043128/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1043154"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Self-terminating nested for loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2025 7:15 UTC (Fri)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1043154/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1042711/#CommAnchor1043154" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's an interesting side-effect to that too, which is that suddenly 'break' and 'continue' become valid inside this block, but in particular 'continue' doesn't make sense. In some way, 'break' actually does make some sense, but might be very surprising.<br>
+<p>
+But yeah, tricks like that with for loop variables are in various places, though often partially as real iterators.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043154/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1043603"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Self-terminating nested for loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 27, 2025 19:01 UTC (Mon)
+                               by <b>tglx</b> (subscriber, #31301)
+                              [<a href="/Articles/1043603/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tglx" />
+                <input type="hidden" name="return" value="/Articles/1042711/#CommAnchor1043603" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+scoped_guard() is a self terminating for() loop too. Break and continue "work" there the same way.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043603/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1043158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Self-terminating nested for loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2025 7:30 UTC (Fri)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1043158/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1042711/#CommAnchor1043158" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I for one am glad I do not have to program in a language that has to resort to trickery like that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1045017"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Self-terminating nested for loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2025 4:56 UTC (Wed)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1045017/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1042711/#CommAnchor1045017" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm using a similar mechanism that allows me to place post-code to be run *after* the loop. I.e. <br>
+<p>
+ #define locked_loop \<br>
+     for (({ lock_something(); done=0; });!done; ({ unlock_something(); done=1; })) \<br>
+        for (... inner loop ...)<br>
+ <br>
+Then the user can use continue/break and still have the termination code executed. The only thing is that it's forbidden to use goto or return from the inner loop. Rarely a big deal when you think about the convenience of such a loop construct ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045017/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1043633"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">x86isms</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 27, 2025 20:08 UTC (Mon)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/1043633/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jcm" />
+                <input type="hidden" name="return" value="/Articles/1042711/#CommAnchor1043633" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Although Spectre is a generic issue, the specific instructions cited here are unique to x86 (both set/clear access and LFENCE). Arm (just an example), already has an optimized masking sequence and a dedicated barrier instruction for such.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043633/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1043817"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">x86isms - not really</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 28, 2025 14:56 UTC (Tue)
+                               by <b>tglx</b> (subscriber, #31301)
+                              [<a href="/Articles/1043817/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tglx" />
+                <input type="hidden" name="return" value="/Articles/1042711/#CommAnchor1043817" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While the mentioned instructions are x86 specific, the concept of "masking" by creating an address dependency is not x86 specific at all. It's already used architecture independent in array_index_nospec() to avoid a barrier instruction, which is more costly no matter how dedicated the barrier is. The "masked" user access mechanism is using exactly the same principle to avoid the barrier because it guarantees a safe pointer for the speculative access.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043817/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

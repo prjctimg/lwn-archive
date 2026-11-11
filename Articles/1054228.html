@@ -1,0 +1,371 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Cleanup on aisle fsconfig() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Cleanup on aisle fsconfig()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="As part of the process of writing man pages for the 'new' mount API, which has been available i [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1054412/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Cleanup on aisle fsconfig()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>January 21, 2026</br>
+           <hr>
+<a href="../Archives/ConferenceIndex/index.html">LPC</a>
+</div>
+<p>
+As part of the process of writing man pages for the <a
+href="759499.html">"new" mount API</a>, which has been available in the
+kernel since 2019, Aleksa Sarai encountered a number of places where the <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html"><tt>fsconfig()</tt></a>
+system call—for configuring filesystems before mounting—needs to be cleaned up.  In the 2025 Linux Plumbers Conference
+(LPC) <a href="https://lpc.events/event/19/contributions/2239/">session</a> 
+that he led, Sarai wanted to discuss some of the problems he found,
+including at least one with security implications.  The idea of the session
+was for him to describe the various bugs and ambiguities that he had found,
+but he also wanted attendees to raise other problems they had with the
+system call.
+</p>
+
+<p>
+Christian Brauner, who helped organize the <a
+href="https://lpc.events/event/19/sessions/217/#20251212">"Containers and
+checkpoint/restore" microconference</a> (and LPC as well), introduced the
+session by referring to the "<q>horrific design</q>" of
+<tt>fsconfig()</tt>—something that Sarai immediately disclaimed ("<q>I
+didn't say that</q>").  Sarai began by noting that there are now man pages
+for the mount API, which may help improve the <a
+href="979166.html">adoption of the API</a> by filesystems; his theory
+is that adoption lagged due to having to read the code in order to
+understand the system calls. "<q>Hopefully, this is at least a slight
+improvement.</q>"
+</p>
+
+<p>
+The new mount API, perhaps more properly "<q>the suite of
+file-descriptor-based mount facilities</q>" as the man page calls it,
+breaks up the <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/mount.2.en.html"><tt>mount()</tt></a>
+system call into multiple steps to provide a more granular approach to the
+myriad of ways that filesystems can be mounted in Linux.
+<tt>fsconfig()</tt> is used to set parameters and otherwise customize a
+filesystem context that has been created with <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsopen.2.en.html"><tt>fsopen()</tt></a>
+or obtained from an existing mounted filesystem using <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fspick.2.en.html"><tt>fspick()</tt></a>.
+The function prototype for <tt>fsconfig()</tt> is as follows, from the man page:
+<pre>
+    int fsconfig(int fd, unsigned int cmd,
+                 const char *_Nullable key,
+                 const void *_Nullable value, int aux);
+</pre>
+The <tt>fd</tt> parameter is for the filesystem context to operate on,
+while <tt>cmd</tt> is the operation requested; <tt>key</tt>,
+<tt>value</tt>, and <tt>aux</tt> provide additional information based on
+the operation chosen.
+</p>
+
+<h4><tt>FSCONFIG_SET_PATH</tt></h4>
+
+<a href="/Articles/1055221/">
+<img src="../_static/images/2026/lpc-sarai-sm.png" border=0 hspace=5 align="right"
+alt="[Aleksa Sarai]" title="Aleksa Sarai" width=280 height=219>
+</a>
+
+<p>
+Sarai said that the <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html#FSCONFIG_SET_PATH"><tt>FSCONFIG_SET_PATH</tt></a>
+and <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html#FSCONFIG_SET_PATH_EMPTY"><tt>FSCONFIG_SET_PATH_EMPTY</tt></a>
+commands are almost completely unused by filesystems; he thought they were
+not used at all but, right before the session, found out that the ext4
+<tt>journal_path</tt> parameter can be set that way.  It is unfortunate
+that no other filesystem parameters can be set using those commands,
+because they can take a directory file descriptor, thus providing more
+options for specifying the path, as with <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/openat.2.en.html"><tt>openat()</tt></a>.
+In part due to helpers that are "<q>a little bit janky</q>", filesystems
+require their paths to be set as strings using <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html#FSCONFIG_SET_STRING"><tt>FSCONFIG_SET_STRING</tt></a>,
+which is the same form as options to the <tt>mount()</tt> system call.  As <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html#Generic_filesystem_parameters">noted</a>
+in the <tt>fsconfig()</tt> man page, the <tt>source</tt> path parameter,
+normally used for the block device containing the filesystem, must be set
+using <tt>FSCONFIG_SET_STRING</tt>, but others ostensibly could use the
+set-path commands.
+</p>
+
+<p>
+Ideally, he thinks that most filesystems want to support all three commands
+for their file parameters, but none of the <a href="https://www.kernel.org/doc/html/latest/filesystems/mount_api.html#parameter-helper-functions">helpers</a> currently support that.
+A single helper that handles those three, plus the related <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html#FSCONFIG_SET_FD"><tt>FSCONFIG_SET_FD</tt></a> command
+would be useful.  He wondered, though, whether full <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/openat.2.en.html#O_PATH"><tt>O_PATH</tt></a>
+support was needed for the paths that are being set.
+</p>
+
+<p>
+A file descriptor opened using <tt>O_PATH</tt> behaves differently than one
+obtained from a regular file open—and it can be done without the
+permissions needed to actually open the file.  For that reason, Lennart
+Poettering thought that <tt>O_PATH</tt> support should not be added to the
+helper; files should be opened normally as that will be more secure, he
+said.  There was no opposition to adding helpers as Sarai described, so he
+turned to his next topic.
+</p>
+
+<h4>Singletons and exclusive create</h4>
+
+<p>
+Singleton filesystems, such as debugfs and others that have the same
+contents no matter how and where
+they are mounted, are a perennial problem,
+he said.  The <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html#FSCONFIG_CMD_CREATE_EXCL"><tt>FSCONFIG_CMD_CREATE_EXCL</tt></a>
+command was <a href="/Articles/939937/">developed</a> and merged by Brauner
+a few years ago, but it is a "<q>very big hammer</q>" that is largely
+unusable because it does not provide any extra information to the caller if
+it fails.  It is the counterpart to the <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsconfig.2.en.html#FSCONFIG_CMD_CREATE"><tt>FSCONFIG_CMD_CREATE</tt></a>
+command, which is used to turn a configured filesystem context into a
+filesystem instance that can be mounted using <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/fsmount.2.en.html"><tt>fsmount()</tt></a>.
+</p>
+
+<p>
+There is a hidden surprise when using the create command: almost all of the
+configuration (with the exception of the read-write and read-only flags) that
+has been done using <tt>fsconfig()</tt> is silently ignored if the
+filesystem instance is already present in the kernel. So
+<tt>FSCONFIG_CMD_CREATE_EXCL</tt> requests that the kernel create a context
+without reusing an existing filesystem configuration, thus ensuring that
+the configuration requested is used. But if it cannot, "<q>it just gives
+you an error and you can't do anything about it</q>"; it is simply an
+instance of "<q>computer says 'no' and that's basically all you can do about it</q>".
+</p>
+
+<p>
+The conversion to the new mount API has broken some singleton filesystems,
+because the semantics of <a
+href="https://elixir.bootlin.com/linux/v6.18.6/source/fs/super.c#L1318"><tt>vfs_get_super()</tt></a>
+have changed, but some developers were not aware of that.  The bug was <a
+href="/ml/all/20250816-debugfs-mount-opts-v3-1-d271dad57b5b@posteo.net/">fixed
+for debugfs</a> and <a
+href="/ml/all/20241030171928.4168869-2-kaleshsingh%40google.com/">for
+tracefs</a>.  In general, the semantics of superblock reuse are not clear,
+and the messages provided do not give enough information about what
+parameters were ignored.
+</p>
+
+<p>
+Brauner noted that <tt>FSCONFIG_CMD_CREATE_EXCL</tt> is meant for times
+when the user absolutely must have a particular filesystem-configuration
+option, otherwise <tt>FSCONFIG_CMD_CREATE</tt> should be used.  But Sarai
+pointed out that the existing filesystem configuration may be just fine,
+but in order to be sure the application uses
+<tt>FSCONFIG_CMD_CREATE_EXCL</tt>, which would fail even if the required
+parameter is already set in the existing configuration.  Part of the
+problem is that the actual set of configuration options is not completely
+resolved until the superblock is actually created, Brauner said; for
+example, filesystems are not required to resolve the path parameters
+supplied until superblock-creation time.  There is no "<q>generically
+elegant</q>" solution for finding out whether a filesystem context really
+contains a configuration value of interest.
+</p>
+
+<h4><tt>fc_log</tt></h4>
+
+<p>
+Information about conflicts between parameters and the like can be logged
+using <a
+href="https://elixir.bootlin.com/linux/v6.18.6/source/fs/fs_context.c#L433">logfc()</a>
+(which uses <a
+href="https://elixir.bootlin.com/linux/v6.18.6/source/include/linux/fs_context.h#L182"><tt>struct
+fc_log</tt></a>), but that interface suffers from some problems as well.
+The interface had been discussed at LSFMM+BPF 2024, as well, Sarai said,
+which is described in the article linked above.  For one thing,
+<tt>fc_log</tt> has a limit of eight entries before it overflows, "<q>and
+the fun part is that there's no priority</q>", so eight informational
+messages could delete an error or warning message.
+</p>
+
+<p>
+User space can read the messages logged via a file descriptor returned from
+<tt>fsopen()</tt>, but ideally it would need to do so after every mount-API
+call and Sarai said that the util-linux tools do not do that.  He wondered
+if increasing the size of <tt>fc_log</tt> made sense.  Brauner asked if
+there was a way to know if any messages were dropped; Sarai did not think
+so.  Overall, though, the <tt>fc_log</tt> interface is much better than
+trying to parse things out of the dmesg log, Sarai said.  Brauner agreed,
+noting that util-linux does print out those messages in versions where it
+is using the new mount API, which is a big improvement.
+</p>
+
+<p>
+Brauner thought that some levels of <tt>fc_log</tt> messages were also
+output to dmesg, though Sarai was not convinced that was true.  Sarai did
+think that unread <tt>fc_log</tt> messages should be written to dmesg so
+that they do not just disappear.  It might make sense to provide a way for
+user space to poll the <tt>fc_log</tt> messages, so that it can read them
+as soon as they are available, Brauner said.  There is a problem that the
+format and wording of those messages becomes part of the kernel ABI, which
+may be unavoidable, but is something to keep in mind.
+</p>
+
+<p>
+Sarai described an idea he had just come up with, which would allow
+<tt>fc_log</tt> messages to be extended with, say, some JSON that came
+after a NUL byte in the buffer; that would allow users to simply print the
+message (as they do now) or to parse it further if they need more information.
+Poettering suggested following the model of <a
+href="https://www.kernel.org/doc/Documentation/ABI/testing/dev-kmsg">kmsg</a>,
+which was long unstructured, but eventually added some structure, including
+a sequence number so that overwritten messages can be detected.  Brauner
+said there is some structure to the <tt>fc_log</tt> messages, with prefixes
+for different filesystems, for example, but it is still "<q>wildly
+inconsistent</q>" among them.  Even the VFS is inconsistent about what and
+where it logs information.  Switching to a structured format might be a
+good idea, but it would require a new flag for <tt>fsopen()</tt> to allow
+user space to request structured logs.
+</p>
+
+<p>
+The limit of eight messages is something that should probably be addressed,
+Sarai said.  Poettering agreed, noting that it was an "<q>irritatingly
+low</q>" number for something of that nature.  Jeff Layton speculated that
+David Howells (who designed the API but was not present) expected users to
+check for messages after each call, and that only a few messages would be
+generated for each.  That has not really been borne out, however, attendees
+seemed to agree.
+</p>
+
+<h4><tt>FS_CONTEXT_FAILED</tt></h4>
+
+<p>
+The final topic Sarai wanted to raise was the <tt>FS_CONTEXT_FAILED</tt>
+state that a filesystem context enters if there is any kind of error.  At
+that point, the context cannot be inspected or otherwise operated upon, so
+if user space wants to try again with different options, it has to start
+all over.  This comes up for the <a
+href="https://github.com/opencontainers/runc?tab=readme-ov-file#runc">runc</a>
+container tool, he said, because it has various fallbacks that it wants to
+try if a mount fails.  In order to do that, it has to keep all of the
+options around, remake the context, and try again (and again, if that
+fails).  That is not too bad, "<q>but it's just kind of awful that it goes
+into this fail state, where all you have are log messages</q>" to try to
+figure out what went wrong.
+</p>
+
+<p>
+Brauner speculated that it was that way because the VFS cannot really know
+what caused the failure, so it cannot know whether the context can be
+changed and retried.  There may be filesystems that enter into a
+non-recoverable state if the superblock creation fails, for example.  On
+the other hand, there are situations where a new mount option is introduced
+that a filesystem may or may not implement; it is unfortunate that the
+option cannot just be removed and the mount retried.
+</p>
+
+<p>
+It would make sense to have a way for a filesystem to decide whether it is
+a non-recoverable error or not, Brauner said.  Part of the problem is that
+the API is "<q>an unfinished project in a sense</q>"; Howells had also proposed
+the <a href="/Articles/829212/"><tt>fsinfo()</tt> system call</a> that
+would have allowed querying the filesystem context and more.  It was
+rejected and has never resurfaced, though <a
+href="https://manpages.opensuse.org/Tumbleweed/man-pages/statmount.2.en.html"><tt>statmount()</tt></a>
+was separated out as its own system call, Brauner said.  It might be
+interesting to consider resurrecting a "<q>very slimmed-down version</q>"
+of <tt>fsinfo()</tt>.
+</p>
+
+<p>
+Using a structured-message kmsg-like approach would allow filesystems or
+the VFS to put the required information into some newer <tt>fc_log</tt>,
+Poettering said.  Those applications that care can pull out the information
+about options that were rejected (or translated to a compatible option);
+that way they can programmatically determine what needs to change for a
+retry.  It is effectively the same as the JSON idea that Sarai had
+mentioned; there just needs to be agreement about the structure among the
+subsystems.  It would also make it easy to simply add the messages to kmsg
+if they are going to be overwritten or were not read.  Sarai seemed
+amenable to that approach.
+</p>
+
+<p>
+With that, the session ran out of time.  Interested readers can check out the
+<a href="https://www.youtube.com/watch?v=NX5IzF6JXp0">YouTube video</a> and
+<a
+href="https://lpc.events/event/19/contributions/2239/attachments/1789/3868/Clean%20Up%20on%20Aisle%20fsconfig(2)%20%5BLPC%202025%5D.pdf">slides</a>
+from the talk.
+</p>
+
+<p>
+[ I would like to thank our travel sponsor, the Linux Foundation, for
+assistance with my travel to Tokyo for Linux Plumbers Conference. ]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/Mounting</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Linux Plumbers Conference/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1054228/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,828 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Another runc container breakout [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Another runc container breakout">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Once again, runc&amp;mdash;a tool for spawning and running OCI containers&amp;mdash;is drawing attentio [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/961332/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Another runc container breakout</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Joe Brockmeier</b><br>February 12, 2024</br>
+           </div>
+<p>Once again, <a
+href="https://github.com/opencontainers/runc">runc</a>&mdash;a tool
+for spawning and running OCI containers&mdash;is drawing attention due to a <a
+href="https://lwn.net/ml/oss-security/20240131.201014-manual.rungs.vicious.preface-640Q4W5TLTW7@cyphar.com/">high
+severity container breakout attack</a>. This vulnerability is interesting for
+several reasons: its potential for widespread impact, the continued difficulty
+in actually <em>containing</em> containers, the dangers of running containers
+as a privileged user, and the fact that this vulnerability is made possible
+in part by a response to <a href="781013.html">a previous
+container breakout flaw in runc</a>.</p>
+
+<p>The runc utility is the most popular (<a
+href="https://github.com/opencontainers/runtime-spec/blob/main/implementations.md">but
+not only</a>) implementation of the <a
+href="https://opencontainers.org/about/overview/">Open
+Container Initiative</a> (OCI) <a
+href="https://github.com/opencontainers/runtime-spec/blob/main/spec.md">container
+runtime specification</a> and can be used to handle the low-level operations
+of running containers for container management and orchestration
+tools like <a href="https://www.docker.com/">Docker</a>,
+<a href="http://podman.io/">Podman</a>, <a
+href="https://www.rancher.com/">Rancher</a>,
+<a href="https://containerd.io/">containerd</a>, <a
+href="https://kubernetes.io/">Kubernetes</a>, and many others. Runc also
+has had its share of vulnerabilities, the most recent of which is <a
+href="https://www.cve.org/CVERecord?id=CVE-2024-21626">CVE-2024-21626</a>
+&mdash; a flaw that could allow the attacker to completely escape the container
+and take control of the host system. The fix is shipped with runc 1.1.12, with
+versions 1.0.0-rc93 through 1.1.11 affected by the vulnerability. Distributors
+are backporting the fix and shipping updates as necessary.</p>
+
+<h4>Anatomy</h4>
+
+<p>The initial vulnerability was reported by Rory McNamara to Docker, with
+further research done by runc maintainers Li Fu Bang and Aleksa Sarai,
+who discovered other potential attacks.  Since version 1.0.0-rc93, runc
+has left open ("leaked") a file descriptor to <tt>/sys/fs/cgroup</tt>
+in the host namespace that then shows up in <tt>/proc/self/fd</tt>
+within the container namespace. The reference can be kept alive, even
+after the host namespace file descriptors would usually be closed,
+by setting the container's working directory to the leaked file
+descriptor. This allows the container to have a working directory outside of 
+the container itself, and gives full access to the host filesystem. The runc <a
+href="https://github.com/opencontainers/runc/security/advisories/GHSA-xr7r-f8xq-vfvv">security
+advisory for the CVE</a> describes several types of attacks that could take
+advantage of the vulnerability, all of which could allow an attacker to gain
+full control of the host system.</p>
+
+<p>Mohit Gupta <a
+href="https://labs.withsecure.com/publications/runc-working-directory-breakout--cve-2024-21626">has
+an analysis of the flaw</a> and reported it took about four attempts
+to successfully start a container with its working directory set to
+"<tt>/proc/self/fd/7/</tt>" in a scenario using "<tt>docker&nbsp;run</tt>" with
+a malicious Dockerfile.  Because runc did not verify that the working directory
+is inside the container, processes inside the container can then access the host
+filesystem. For example, if an attacker is successful in guessing the right
+file descriptor and sets the working directory to "<tt>/proc/self/fd/7</tt>"
+they can run a command like "<tt>cat&nbsp;../../../../etc/passwd</tt>"
+and get a list of all users on the system&mdash;more damaging options are also possible.</p>
+
+<p>Sarai noted in the advisory that the exploit can be considered
+critical if using runtimes like Docker or Kubernetes "<q>as
+it can be done remotely by anyone with the rights to start a
+container image (and can be exploited from within Dockerfiles
+using ONBUILD in the case of Docker)</q>". On the Snyk blog, <a
+href="https://snyk.io/blog/cve-2024-21626-runc-process-cwd-container-breakout/">McNamara
+demonstrated how to exploit this</a> using "<tt>docker&nbsp;build</tt>" or
+"<tt>docker&nbsp;run</tt>", and Gupta's analysis demonstrated how one might
+deploy an image into a Kubernetes cluster or use a malicious Dockerfile to
+compromise a CI/CD system via "<tt>docker&nbsp;build</tt>" or similar tools
+that depend on runc. What's worse, as McNamara wrote, is that "<q>access privileges
+will be the same as that of the in-use containerization solution, such as
+Docker Engine or Kubernetes. Generally, this is the root user, and it is
+therefore, possible to escalate from disk access to achieve full host root
+command execution</q>."</p>
+
+<p>This isn't the first time runc has had this type
+of vulnerability, it also suffered a container breakout flaw (<a
+href="https://lwn.net/Articles/779542/">CVE-2019-5736</a>)
+in February 2019. That issue led Sarai to <a
+href="796868.html">work on <tt>openat2()</tt></a>, which was
+designed to place restrictions on the way that programs open a path that
+might be under the control of an attacker. It's somewhat amusing then,
+for some values of "amusing" anyway, that <a href="https://lwn.net/ml/oss-security/20240202.105927-fickle.ease.flashy.width-zrc3s3ca5573@cyphar.com/">Sarai mentioned</a> that "<q>the switch to openat2(2) in runc was the cause of one of the fd leaks that made this issue exploitable in runc</q>."</p>
+
+<p>While <em>this</em> vulnerability has been addressed, Sarai also wrote
+that there's more work to be done to <a href="934460.html">stop tactics related to keeping a handle
+to a magic link</a> (such as <tt>/proc/self/exe</tt>) on the host open and then
+writing to it after the container has started. He noted that he has reworked
+the design in runc, but is still "<q>playing around with prototypes at the
+moment</q>".</p>
+
+<h4>Other OCI runtimes</h4>
+
+<p>While the vulnerability is confirmed for runc, the advisory contains a
+warning for other runtimes as well. Sarai writes, "<q>several other container
+runtimes are either potentially vulnerable to similar attacks, or do not have
+sufficient protection against attacks of this nature</q>." Sarai specifically
+talks about <a href="https://github.com/containers/crun">crun</a> (a container
+runtime <a href="https://www.redhat.com/sysadmin/introduction-crun">implemented
+in C</a>, used by Podman by default), <a
+href="https://github.com/containers/youki">youki</a>
+(a container runtime implemented in Rust), and <a
+href="https://linuxcontainers.org/lxc/introduction/">LXC</a>.</p>
+
+<p>According to Sarai, none of the other runtimes leak useful file
+descriptors to their "<tt>runc&nbsp;init</tt>" counterparts&mdash;but
+he finds crun and youki wanting in terms of ensuring that all non-stdio
+files are closed and that the working directory for a container is
+inside the container. LXC also does not ensure that a working directory is
+inside the container. He suggests that maintainers of other runtimes peruse <a
+href="https://github.com/opencontainers/runc/commit/a9833ff391a71b30069a6c3f816db113379a4346">the
+patches for runc's leaked file descriptors</a>. While these implementations are <em>not</em> exploitable ("<q>as far as we can
+tell</q>"), they have issues that could be addressed to prevent similar
+attacks in the future.</p>
+
+<p>The good news is that, despite many container vulnerabilities over the
+years, so far we haven't seen reports of a widespread <em>exploit</em> of
+these flaws. Whether the credit belongs to the vigilance of container-runtime
+maintainers and security reporters, disciplined use of trusted container
+images, use of technologies like AppArmor and SELinux, the difficulty in
+using these flaws to conduct real-world attacks, or a combination of those
+is unclear. This shouldn't be taken to to suggest that those threats are
+not real, of course.</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Containers</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/961086/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor961860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 16:57 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/961860/">Link</a>] (17 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961860" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The good news is that, despite many container vulnerabilities over the years, so far we haven't seen reports of a widespread exploit of these flaws.</span><br>
+<p>
+I consulted at several companies, and none of them use containers as a means of privilege separation. It's commonly assumed that containers in Linux are not particularly secure. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961864"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 17:35 UTC (Mon)
+                               by <b>ms</b> (subscriber, #41272)
+                              [<a href="/Articles/961864/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ms" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961864" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For someone who's mildly interested and extremely ignorant of this area: what are the more secure solutions? Do you have to go full-hog virtualisation with qemu?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961864/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 17:50 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/961865/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961865" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you want true privilege separation where violations can cost you a lot of money (banking, HIPAA, etc.) then you go with dedicated hosts. So each workload gets its own physical host, possibly running multiple VMs/containers but at the same privilege level.<br>
+<p>
+If you're slightly less paranoid, then VMs that don't share resources (including CPUs in the same socket) are fine. One more step, and you can use VMs on oversubscribed hardware or VMs with dynamic resources. All these VMs can also run multiple containers, typically for the same application.<br>
+<p>
+I don't think containers are good enough for _any_ privilege separation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 18:49 UTC (Mon)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/961872/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="raven667" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961872" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; each workload gets its own physical host, possibly running multiple VMs/containers but at the same privilege level</span><br>
+<p>
+I would add that while this may sound expensive, if you have more than a very small workload, partitioning the VM clusters by security level doesn't really cost much more in hardware, it's the same amount of resources you would have needed to provision anyway, as long as you don't get crazy about defining fine-grained boundaries at the VM level and constrain yourself to broad security risk zones based on the sensitivity of data being processed or the auditability/control of the devices connecting to it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961883"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 20:30 UTC (Mon)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/961883/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961883" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>A lot of this stuff sounds expensive only because we tend to underestimate the cost of a security breach. If you properly account for that cost, making the system more secure by design starts to look more sensible. Until you get to the extreme, security is generally cheaper than insecurity. It's just the cost of insecurity is sporadic, so bad managers pretend it doesn't exist.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961883/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2024 4:51 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/961904/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961904" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It's just the cost of insecurity is sporadic, so bad managers pretend it doesn't exist.</span><br>
+<p>
+Same as planes crashing or plane doors blowing off and quality in general. It's very rare so surely you can cut corners here and there and save a fair amount of money.<br>
+<p>
+I don't agree that "a security bug is just another bug" in general but from that pure cost and management perspective a security bug is indeed just a quality defect like any other.<br>
+<p>
+That's why managers are paid so much: because _in theory_ they're able to find the best quality trade-offs - and it's hard. In practice however...<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2024 11:31 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/961914/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961914" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That's why managers are paid so much: because _in theory_ they're able to find the best quality trade-offs - and it's hard. In practice however...</span><br>
+<p>
+It also assumes the necessary data exists. My employer collects all the data imaginable, but as far as I can tell, the data I need to do my job doesn't exist ... namely "what are the discrepancies between what we've planned, and the resources we've got on the ground".<br>
+<p>
+HOPEFULLY I'm going to succeed in doing something about it, but one lone voice crying "help" while drowning in a data lake can't achieve much...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor962145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 14, 2024 20:22 UTC (Wed)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/962145/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ringerc" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor962145" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+They're good for casual isolation of cooperating services. They help manage failure domains.<br>
+<p>
+They also have benefits for deterring casual attackers. "To evade the bear you don't have to outrun the bear, just run faster than the next guy".<br>
+<p>
+When combined with strict seccomp rules, dropping all capabilities, nonzero uid and a restrictive apparmor config they can be quite strong for suitable workloads. But in reality it's rarely feasible to lock a workload down enough that an attacker couldn't potentially exploit their way out; most things need general purpose file I/O and/or network I/O after all, and that gives it the ability to touch system interfaces that could be exploitable. So they're not fit for purpose for isolating general purpose untrusted workloads where there are strong incentives to escape the container and high impacts if an attacker succeeds.<br>
+<p>
+I have significantly more confidence in lightweight VM/hypervisor models like Firecracker. My work is moving in that direction for some of our shared tenancy stuff.<br>
+<p>
+But I agree you can't beat physical node isolation for workloads where the bill for a breach is in the many many millions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/962145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor961866"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 18:17 UTC (Mon)
+                               by <b>atnot</b> (guest, #124910)
+                              [<a href="/Articles/961866/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="atnot" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961866" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In general, you still use containers, but use some layer in between to provide each customer with a separate kernel. There's a large variety of ways to do this. On the simpler end, you can just statically provision normal dedicated hardware or VMs per customer that you operate with a shared control plane. This is kind of wasteful because you need to run a whole intermediate OS and size it for worst case memory use. You can be a bit smarter than this though, so there's a number of microvm based solution like Kata Containers that run each container as a lightweight KVM-based virtual machine instead, with impressively small overhead. But if even that is too much for you, you can also use something like gVisor, which implements the kernel interface entirely in userspace. Kind of like wine, but for running Linux applications on Linux.<br>
+<p>
+There's a huge variety of solutions here, but what they have in common is that nobody trusts multiple customers with one Kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961866/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor961881"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 19:47 UTC (Mon)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/961881/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961881" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's a couple of options. At my day job we've been running a traditional UNIX environment for about 20 years for our HPC use case, and so we have relied on the normal UNIX privilege separation mechanism, namely UIDs. We mostly kept this when we started moving to containers: user-provided code only runs as their own user even inside the container. Users have historically had non-root shell access to our systems via plain SSH, and so as long as they remain non-root, a containerization breakout like this doesn't impact our security model. (Of course, keeping a Linux environment secure against local privilege escalation is challenging on its own, and if our untrusted users were anonymous people on the internet instead of employees who have gone through background checks, we would likely be more paranoid.)<br>
+<p>
+We benefited from the fact that our workloads were already designed for non-containerized environments (and so we already had non-root ways of installing software etc.) and we could just containerize that model. If you're running container-native workloads that expect to have root, or even multi-tenant workloads that all use the same non-root UID (e.g. everyone runs as UID 1000), user namespaces are a great option: the code in the container feels like it's running as whatever UID, and if it's root it can do things like mount a tmpfs or reconfigure its own networking. But from outside the container, these are separate, unprivileged UIDs. So the attack in the article about reading /etc/passwd is still possible, but a container running as "root" cannot write to it. Kubernetes has user namespace support in alpha.<br>
+<p>
+And then yes, you can use virtualization (of any level of hog). If you're on a public cloud platform and you're on VMs anyway, setting up your VMs to be per workload is pretty easy. There's also stuff like Kata Containers or gVisor (commercially offered by Google as GKE Sandbox) for having a "container" runtime that actually uses hardware virtualization.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961881/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor962617"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 17, 2024 15:12 UTC (Sat)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/962617/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="raven667" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor962617" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Of course, keeping a Linux environment secure against local privilege escalation is challenging on its own, and if our untrusted users were anonymous people on the internet instead of employees who have gone through background checks, we would likely be more paranoid</span><br>
+<p>
+This is something I bang on about all the time, one of the corollarys if risk is lack of accountability, in places where you have accountability you have a less likelihood for issues, and the driver of security process should be more driven by impact.  Making a reasonable and effective risk calculation for where to spend your limited time instituting security is hard to do, it's mostly vibes and tribal embarrassment which drives people to apply all the "best practices" they've heard of without regard to which ones actually help in their situation and which are wastes of time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/962617/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor962208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 15, 2024 9:14 UTC (Thu)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/962208/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cortana" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor962208" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think about it like this: containers are a technology for distributing software artefacts, packaged up and ready to run on a host. Think shipping containers. They aren't designed to confine an executing workload within its container's namespaces; you still need other technologies, which can be used in conjunction with containers, for that.<br>
+<p>
+So, for instance, looking at a platform like Red Hat OpenShift, which runs on top of RHEL CoreOS, a typical container:<br>
+<p>
+ * Must run with a UID, GID and supplemental groups from the range assigned to its project<br>
+ * Must run within a restrictive domain (container_t) and a unique MCS category (e.g., c5,c67)<br>
+ * Must run with the runtime/default seccomp profile applied<br>
+<p>
+So for one workload to read the files of another, it would have to:<br>
+<p>
+ * Use an exploit to escape out of its namespaces<br>
+ * Use an exploit to override DAC (i.e., read a file owned by another user; made more difficult by the seccomp profile which prevents the use of less common system calls)<br>
+ * Use an exploit to override the SELinux policy which prevents, for instance, a process running as container_t:c5,c67 from accessing objects labelled with container_file_t:c78,c200<br>
+<p>
+It's interesting you mention qemu, because the idea of using a restrictive label &amp; MCS category to protect container workloads from one another came from the very same setup that RHEL uses to protect VMs from one other: The container_t label is (or was at some point) an alias to svirt_lxc_net_t, the label that libvirt applies to all the qemu processes that it launches (again, with each one being given a unique pair of MCS categories so that VMs can't attack each other).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/962208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor962618"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 17, 2024 15:17 UTC (Sat)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/962618/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="raven667" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor962618" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the summary of how this works, those looks like all good things to do, however there are an awful lot of local kernel exploits in Linux that can make any permission system moot, so that's where having different hardware for different security/risk workloads can help, remote exploit is much harder todo/easier to defend/detect.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/962618/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor961882"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 19:45 UTC (Mon)
+                               by <b>carlosrodfern</b> (subscriber, #166486)
+                              [<a href="/Articles/961882/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="carlosrodfern" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961882" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the main concern is the other large amount of companies that could be affected by this that implement internet-based services with a system of micro-services, which are backed with containers on orchestration platforms like kubernetes (the only sane way to do microservices). The attack would look like breaking into a container with some remote code execution vulnerability, and then taking advantages of runc vulnerabilities like this one to expand the attack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961882/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961913"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2024 11:08 UTC (Tue)
+                               by <b>anguslees</b> (subscriber, #7131)
+                              [<a href="/Articles/961913/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anguslees" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961913" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I understand correctly, that's not how this attack works, however.  As I understand it, this attack requires an attacker to already have the ability to start new malicious containers (or container config).<br>
+<p>
+Getting control over an existing container, can not be escalated to a host exploit through this issue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961913/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor961954"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2024 16:15 UTC (Tue)
+                               by <b>carlosrodfern</b> (subscriber, #166486)
+                              [<a href="/Articles/961954/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="carlosrodfern" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961954" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, you are right. You'll need some extra privileges in k8s to start a malicious container in this case. The only way I can think of exploiting it thru the front door would be you break into a container, use some vuln to escape into another one that does have such privileges on the k8s cluster, and then use this vuln to get into the host fs. Complex attack to get there, indeed. This is where techs like SELinux and specifically MCS for containers, would really help, as an additional layer of security. Unfortunately, many Kubernetes clusters have their node OSs with SELinux in permissive mode, or enforcing but without leveraging MCS.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961954/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor962623"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 17, 2024 21:14 UTC (Sat)
+                               by <b>bsdnet</b> (guest, #169714)
+                              [<a href="/Articles/962623/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bsdnet" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor962623" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In my understanding, container is more for resource efficiency rather than security.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/962623/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor962640"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 18, 2024 15:08 UTC (Sun)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/962640/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="raven667" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor962640" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would say (as an exercise to think about this succinctly and write it out) that containers are more efficient than VMs because one kernel can optimize hardware access/sharing better than nested opaque kernels can, and both VMs/containers exist to solve a software packaging/dependency problem on how to get multiple applications to share the same hardware, for cost/power efficiency, without conflicting with one another due to shared library dependency conflicts.  VMs are sometimes used for sharing multiple incompatible OS on the hardware as well, but a huge number of Linux VM servers are running Linux guest VMs, that the kernel is perfectly comparable with, hence using containers instead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/962640/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor961870"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another runc container breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2024 18:43 UTC (Mon)
+                               by <b>champtar</b> (subscriber, #128673)
+                              [<a href="/Articles/961870/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="champtar" />
+                <input type="hidden" name="return" value="/Articles/961086/#CommAnchor961870" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+crun has already released a version with the recommended hardening <a href="https://github.com/containers/crun/releases/tag/1.14.1">https://github.com/containers/crun/releases/tag/1.14.1</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/961870/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

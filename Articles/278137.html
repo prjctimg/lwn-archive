@@ -1,0 +1,2585 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>GCC and pointer overflows [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="GCC and pointer overflows">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="On April 4, CERT put out a scary advisory about the GNU Compiler Collection (GCC).  This adviso [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/277496/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>GCC and pointer overflows</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 16, 2008</br>
+           </div>
+On April 4, CERT put out <a href="http://www.kb.cert.org/vuls/id/162289">a
+scary advisory</a> about the GNU Compiler Collection (GCC).  This advisory
+raises some interesting issues on when such advisories are appropriate,
+what programmers must do to write secure code, and whether compilers should
+perform optimizations which could open up security holes in poorly-written
+code. 
+<p>
+In summary, the advisory states:
+<p>
+<div class="BigQuote">
+	Some versions of gcc may silently discard certain checks for
+	overflow. Applications compiled with these versions of gcc may be
+	vulnerable to buffer overflows. [...]
+	<p>
+	Application developers and vendors of large codebases that cannot
+	be audited for use of the defective length checks are urged to
+	avoiding [sic] the use of gcc versions 4.2 and later.
+</div>
+<p>
+This advisory has disappointed a number of GCC developers, who feel that
+their project has been singled out in an unfair way.  But the core issue is
+one that C programmers should be aware of, so a closer look is called for.
+<p>
+To understand this issue, consider the following code fragment:
+<p>
+<pre>
+    char buffer[BUFLEN];
+    char *buffer_end = buffer + BUFLEN;
+
+    /* ... */
+    unsigned int len;
+
+    if (buffer + len &gt;= buffer_end)
+	die_a_gory_death("len is out of range\n");
+</pre>
+<p>
+
+Here, the programmer is trying to ensure that <tt>len</tt> (which might
+come from an untrusted source) fits within the range of <tt>buffer</tt>.
+There is a problem, though, in that if <tt>len</tt> is very large, the
+addition could cause an overflow, yielding a pointer value which is less
+than <tt>buffer</tt>.  So a more diligent programmer might check for that case
+by changing the code to read:
+<p>
+<pre>
+    if (buffer + len &gt;= buffer_end || buffer + len &lt; buffer)
+	loud_screaming_panic("len is out of range\n");
+</pre>
+<p>
+This code should catch all cases; ensuring that <tt>len</tt> is within
+range.  There is only one little problem: recent versions of GCC will
+optimize out the second test (returning the <tt>if</tt> statement to the
+first form shown above), making overflows possible again.  So any code
+which relies upon this kind of test may, in fact, become vulnerable to a
+buffer overflow attack.
+<p>
+This behavior is allowed by the C standard, which states that, in a correct
+program, pointer addition will not yield a pointer value outside of the
+same object.  So the compiler can assume that the test for
+overflow is always false and may thus be eliminated from the expression.  It
+turns out that GCC is not alone in taking advantage of this fact: some
+research by GCC developers turned up other compilers (including PathScale,
+xlC, LLVM, TI Code Composer Studio, and Microsoft Visual C++ 2005) which
+perform the same optimization.  So it seems that the GCC developers have a
+legitimate reason to be upset: CERT would appear to be telling people to
+avoid their compiler in favor of others - which do exactly the same thing.
+<p>
+The right solution to the problem, of course, is to write code which
+complies with the C standard.  In this case, rather than doing pointer
+comparisons, the programmer should simply write something like:
+<p>
+<pre>
+    if (len &gt;= BUFLEN)
+        launch_photon_torpedoes("buffer overflow attempt thwarted\n");
+</pre>
+<p>
+There can be no doubt, though, that incorrectly-written code exists.  So
+the addition of this optimization to GCC 4.2 may cause that bad code to
+open up a vulnerability which was not there before.  Given that, one might
+question whether the optimization is worth it.  In response to a statement
+(from CERT) that, in the interest of security, overflow tests should not be
+optimized away, Florian Weimer <a
+href="/Articles/278141/">said</a>:
+<p>
+<div class="BigQuote">
+	I don't think this is reasonable.  If you use GCC and its C
+	frontend, you want performance, not security.  After all, the real
+	issue is not the missing comparison instruction, but the fact that
+	this might lead to subsequent unwanted code execution.  There are C
+	implementations that run more or less unmodified C code in an
+	environment which can detect such misuse, but they come at a
+	performance cost few are willing to pay.
+</div>
+<p>
+Joe Buck <a href="/Articles/278142/">added</a>:
+<p>
+<div class="BigQuote">
+	Furthermore, there are a number of competitors to GCC.  These
+	competitors do not advertise better security than GCC.  Instead
+	they claim better performance (though such claims should be taken
+	with a grain of salt).  To achieve high performance, it is
+	necessary to take advantage of all of the opportunities for
+	optimization that the C language standard permits.
+</div>
+<p>
+
+It is clear that the GCC developers see their incentives as strongly
+pushing toward more aggressive optimization.  That kind of optimization
+often must assume that programs are written correctly; otherwise the
+compiler is unable to remove code which, in a correctly-written
+(standard-compliant) program, is unnecessary.  So the removal of pointer
+overflow checks seems unlikely to go away, though it appears that <a
+href="/Articles/278143/">some new warnings</a> will be added to alert
+programmers to potentially buggy code.  The compiler may not stop
+programmers from shooting themselves in the foot, but it can often warn
+them that it is about to happen.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">CERT</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">GCC</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/278137/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor278194"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:14 UTC (Wed)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/278194/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JoeBuck" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278194" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Certainly, though, we are interested in producing better warnings to detect bad code of this kind, and I would expect (though I can't promise) that future GCC versions will warn in cases like this.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278194/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">duh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:16 UTC (Wed)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/278196/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JoeBuck" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278196" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The last paragraph of the article already made my point.  Sorry.  Of course, there's the caveat that any new warnings have to be tested, can't produce excessive noise, etc.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor278569"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 5:48 UTC (Fri)
+                               by <b>jd</b> (guest, #26381)
+                              [<a href="/Articles/278569/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jd" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278569" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+In many cases with GCC, optimizations that are implied by something like -O2 or -O3 can be
+specifically disabled, or additional optimizations can be specifically enabled.
+
+If either case is true of the pointer arithmetic optimization in the newer GCCs, then this
+would seem to be a better case to put. The "insecurity" is optional and only there because the
+user has stipulated (implicitly or explicitly) that it should be.
+
+Alternatvely, it might be argued that this shouldn't be in GCC proper (it's not a compiler
+function, it's a validation function) but in a distinct module which scanned for likely range
+violations and other cadidates for problems - something akin to splint or the stanford checker
+but restricted to cases that can be reliably detected. You could then run it independently or
+as part of the toolchain.
+
+A third option would be to modify a source-to-source compiler like OpenIMPACT to alter tests
+that would be optimized this way into a more correct form that doesn't need optimizing by GCC.
+
+A fourth option is to have bounds-checking at runtime be implicit and require that it be
+explicitly excluded at compile-time. Alternatively, since runtime bounds-checking is already
+available, state that its exclusion is a voluntary statement on the part of a developer that
+the validation of pointers is not wanted.
+
+In other words, this seems a non-argument on any meaningful timescale. There are way too many
+ways for the GCC developers, other members of the open source community or the developers of
+potentially suspect code to eliminate the problem one way or another. If there is a potential
+problem, it is a potential problem by mutual agreement.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278569/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor279492"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2008 7:15 UTC (Thu)
+                               by <b>eliezert</b> (subscriber, #35757)
+                              [<a href="/Articles/279492/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="eliezert" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor279492" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Of course it's best if we all stick to the standard, but people do make mistakes.
+I think the simplest way to minimize this is to have an attribute marking the check as a
+safty/sanity check so the compiler knows that:
+1. It should not optimize this check out.
+2. If it knows that this check will allways fail it can emit a warning.
+3. If this check is assuming something improper it's better to fail the compilation and let
+the coder look up the error somewhere, than to silently drop the test.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/279492/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor279631"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2008 20:39 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/279631/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor279631" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+You can't (yet) attach attributes to arbitrary expressions, though.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/279631/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor278198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:23 UTC (Wed)
+                               by <b>roskegg</b> (guest, #105)
+                              [<a href="/Articles/278198/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roskegg" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278198" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+So if I cast the pointers to long unsigned ints, would the second test THEN be optimized away?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278201"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:31 UTC (Wed)
+                               by <b>zeekec</b> (subscriber, #2414)
+                              [<a href="/Articles/278201/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zeekec" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278201" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Some recommendations from CERT.
+
+<a href="https://www.securecoding.cert.org/confluence/display/seccode/ARR38-C.+Do+not+add+or+subtract+an+integer+to+a+pointer+if+the+resulting+value+does+not+refer+to+an+element+within+the+array">https://www.securecoding.cert.org/confluence/display/secc...</a>
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278201/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor278204"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:40 UTC (Wed)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/278204/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278204" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+<font class="QuotedText">&gt; So if I cast the pointers to long unsigned ints, would the second test THEN be optimized
+away?</font>
+
+Some german news site stated a few days ago that it would not optimize it away then. They
+proposed it as a possible workaround.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278204/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor278202"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:46 UTC (Wed)
+                               by <b>MathFox</b> (guest, #6104)
+                              [<a href="/Articles/278202/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MathFox" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278202" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I recall that one programmer asked me why
+<pre>
+int main() {
+   char a[10];
+   char *aend = a+10;
+
+   printf("%ld\n", (int)aend - (int)a);
+}
+</pre>
+did print something different from 10 on a Cray vector computer...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278202/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278206"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:50 UTC (Wed)
+                               by <b>MathFox</b> (guest, #6104)
+                              [<a href="/Articles/278206/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MathFox" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278206" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Make the printf line
+<tt>
+   printf("%lu\n", (unsigned long)aend - (unsigned long)a);
+</tt> 
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278206/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278210"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 20:27 UTC (Wed)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/278210/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278210" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Or better yet don't cast at all. <code>%td</code> for <code>printf</code> can take a <code>ptrdiff_t</code>, which is what such a subtraction should usually yield.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278210/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 21:29 UTC (Wed)
+                               by <b>MathFox</b> (guest, #6104)
+                              [<a href="/Articles/278218/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MathFox" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278218" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I guess that you missed the point completely. <tt>aend-a</tt> (no casts needed) should give 10 on any platform. The bit pattern in a pointer is implementation defined and that particular platform had (64-bits IIRC) word-based addresses in a 48 bit address space. The low 48 bits of a character pointer were the address of the word containing the character; the high bits addressed the byte in the word.
+<p>
+Standard conforming programs don't rely on pointer layout.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278457"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would using casts fix the problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 18:55 UTC (Thu)
+                               by <b>hummassa</b> (guest, #307)
+                              [<a href="/Articles/278457/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hummassa" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278457" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+yes,
+  aend - a
+(without cast) _is_ 10 in any platform, but
+  (int)aend - (int)a
+is _undefined_ behaviour, because the bit pattern when converting from 
+pointer to int is implementation-defined.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278457/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor278200"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:35 UTC (Wed)
+                               by <b>mgb</b> (guest, #3226)
+                              [<a href="/Articles/278200/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mgb" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278200" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Dear Sirt,
+
+If'n I runs me a shell scrip with one a them thar "rm -rf /usr" in it my sistem ups 'n dyes.
+This are a super-red top-level secretary alert bug in that so-called "free" soft stuff.  Please
+outlaw all pinko programmes and force everyone to use 'onest God-fearing 'merican for-profit
+soft-warez.
+
+A Well Wisher
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278200/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278203"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:40 UTC (Wed)
+                               by <b>darwish07</b> (guest, #49520)
+                              [<a href="/Articles/278203/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="darwish07" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278203" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+hehe, don't be so concipracy-theoritic ;). 
+
+Yes, the advisory is just mentioning GCC but it may just be lack of research from the
+researcher, nothing more.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278203/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 20:54 UTC (Wed)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/278215/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JoeBuck" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278215" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      No, a CERT representative has been on the GCC list offering an ever-changing rationale for not mentioning any other compilers.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278278"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CERT responds on the GCC mailing list</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 3:55 UTC (Thu)
+                               by <b>stuart_hc</b> (guest, #9737)
+                              [<a href="/Articles/278278/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="stuart_hc" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278278" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Here is one <a href ="http://gcc.gnu.org/ml/gcc/2008-04/msg00131.html">example</a> of CERT's rationale for singling out GCC, citing GCC's popularity.<br>
+In this <a href="http://gcc.gnu.org/ml/gcc/2008-04/msg00131.html">email</a> CERT concedes they should change the advisory to mention other compilers, but it doesn't appear that CERT have made that change yet.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278278/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor278197"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 19:50 UTC (Wed)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/278197/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278197" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Note that the wrap-around check isn't necessarily sufficient if sizeof(*buffer) &gt; 1, as in:
+
+<pre>
+    int buffer[BUFLEN];
+    int *buffer_end = buffer + BUFLEN;
+
+    /* ... */
+    unsigned int len;
+    if (buffer + len &gt;= buffer_end || buffer + len &lt; buffer)
+	loud_screaming_panic("len is out of range\n");
+</pre>
+
+At a bit more than 1/(sizeof int) of MAX_INT, the pointer sum will probably go back through the buffer. For ideal security on this sort of stuff, GCC would generate code where a pointer addition that overflows compares greater than any valid pointer value when compared in the same expression. It should be more efficient than the second check anyway, since it's only checking processor flags on calculations it's doing anyway in a correctly-predicted not-taken branch.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278197/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 20:58 UTC (Wed)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/278216/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JoeBuck" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278216" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The compiler then would have to insert such a check into every array reference in a loop, and your code would run about 3x slower.  After
+all, they could wrap around the end, right?
+<p>
+But in a properly structured program, such checks are not needed, as
+pointers are not random, but rather refer to objects that have definite sizes and that do not wrap around the end of memory.  If you think that you need such a check, there's something wrong with your program structure, some check that was omitted elsewhere.  What matters is the size of the buffer, and you can go beyond its end without wrapping around the end of the address space.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278354"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 14:06 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/278354/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278354" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+How so? I was only suggesting that the expression "pointer1 + offset &gt;= pointer2" be treated
+differently (that is, the magic does away if you store the LHS in a variable and use the
+variable). (And, of course, the change would only apply to cases where the LHS overflows the
+address space, which is clearly undefined, so having odd things matter isn't a problem.)
+
+If you do something with "pointer + offset" other than comparing it with something else, I
+wouldn't have anything change (what would it do, anyway, without a test and branch in the
+code?); and in the case where you're doing the comparison, processors generally have a status
+bit that gets updated in the multiply/shift and add and is pretty much free to have an
+unlikely jump based on. Except on architectures where the instruction decode significantly
+limits the pipeline, it should be at most one cycle to test so long as you do each test right
+after the ALU operation.
+
+C, in general, doesn't make good use of the fact that processors make it trivial to test for
+overflow, but that doesn't mean that C compilers can't do extra-clever things with this
+ability in cases where there's undefined behavior associated with it.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278354/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor278219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 21:22 UTC (Wed)
+                               by <b>zooko</b> (guest, #2589)
+                              [<a href="/Articles/278219/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zooko" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278219" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I painstakingly wrote a macro over a course of years that does this:
+
+
+Macro which evaluates true if the expression (x+y) will result in arithmetic 
+overflow.  It also evaluates true if one of the operands is negative and the 
+other is of a type that is too large to fit into a long long (because the 
+result of the addition is not guaranteed in the C89 standard).
+
+Treat it as though it were defined something like this:
+
+bool ADD_WOULD_OVERFLOW({anyinttype} x, {anyinttype} y);
+
+
+I'm not 100% certain that I got all the edge cases right, but at least it passes my own test
+suite.
+
+One of the key insights to write this macro is this:  while "x + y &lt; x" is not guaranteed to
+be valid (if one of them is signed), "MAX_INT - x &lt; y" is.
+
+
+#define ADD_WOULD_OVERFLOW_Styp(x, y, typ) ((((x) &gt; 0) &amp;&amp; ((y) &gt; 0) &amp;&amp; ((Z_MAX_typ(typ) - (x))
+&lt; (y))) || (((x) &lt; 0) &amp;&amp; ((y) &lt; 0) &amp;&amp; ((Z_MIN_typ(typ) - (x)) &gt; (y))))
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278232"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 22:33 UTC (Wed)
+                               by <b>gravious</b> (guest, #7662)
+                              [<a href="/Articles/278232/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gravious" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278232" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+How about?
+
+CLEAR_CARRY_FLAG // arch dep macro
+temp=x+y
+if (CARRY_FLAG_IS_SET) // arch dep macro
+    naughty_naughty();
+
+Surely an easy to find out if something WOULD_OVERFLOW is to perform the operation and check
+if it DID_OVERFLOW :)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278232/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor278230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 22:49 UTC (Wed)
+                               by <b>aegl</b> (subscriber, #37581)
+                              [<a href="/Articles/278230/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aegl" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278230" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I'm having some dificulty parsing the rationale by which this optimization is allowed.
+<p>
+"<i>in a correct program, pointer addition will not yield a pointer value outside of the same object</i>"
+<p>
+Is gcc deciding that "buffer + len < buffer" makes this an "incorrect" program, so it can generate any random code (in this case no code at all) because the program is "incorrect" and so deserves to die?
+<p>
+Could gcc get more radical and apply the same logic to the first clause of this test? The declaration of "buffer" is in scope and "buffer_end" is statically initialized and never changed (OK ... it would have to be declared "static" for gcc to be really sure about this, so lets pretend that it was). So a test for "buffer + len >= buffer_end" appears to be just as "incorrect" if you believe that pointer addition will not yield a pointer "outside of the same object".
+<p>
+I'm sure the intent of the "same object" rule is to stop programmers from making assumptions about the proximity of different objects. E.g.
+<p>
+int a[5], b[5], *p = a;
+<br>
+p += 5;
+<br>
+/* should not assume that p now points to "b" */
+<p>
+It seems a bit of a stretch to get from this to outlawing a test like "buffer + len < buffer".
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278241"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 23:20 UTC (Wed)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/278241/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278241" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+No, the intent [of the standard] is to support segmented memory architectures. The "one after"
+rule is a concession for prototypical looping patterns.
+
+When you loop in reverse you have to be careful, because there's no "one before" rule.
+Compilers like TinyCC, in debug mode, will insert instrumentation code which relies on these
+rules to check buffer under and overflows (not just accesses, but actual pointer
+arithmetic--it can detect invalid pointer values). So it's smart to stick to the ISO standard,
+because these rules can cut both ways; that is, they can help not only optimization, but
+debugging/security, too.
+
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278241/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278243"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 23:31 UTC (Wed)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/278243/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278243" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I should be more clear. Because there's no "one before" rule, then "buffer + len &lt; buffer"
+will always be false in a correct program. A correct program would not attempt to derive an
+invalid pointer (let alone access an object through such a pointer).
+
+It's worth noting that "buffer" is the actual object, not merely a pointer. This is an
+instance where we can't forget that arrays and pointers in C really are distinct, even though
+we can so often treat an array like a pointer. And the compiler in this instance has
+sufficient information about the object to make the optimization, whereas in many other
+instances it would not be able to do this (and so people get the wrong impression). This is a
+good thing.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278243/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor278322"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 9:39 UTC (Thu)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/278322/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278322" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+There's a terminology problem here: the program is not incorrect, the programmer has made an
+incorrect assumption. The assumption is that (buf + len &lt; buf) will be true if len is very
+large.
+
+Besides the fact that the assumption is false if sizeof(*buf) != 1, the GCC team (and other
+compilers) point out that this assumption is not warrented by the C spec. Stronger still, the
+C spec allows you to *assume* the test is false, no matter the value of len (assuming len is
+unsigned btw).
+
+That said, I'd love a way to say:
+
+if( __wraps( buf + len ) )
+  die();
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278322/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278386"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 16:01 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/278386/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278386" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+if (~sizeof buf &lt; len) {
+    die();
+}
+
+This only works with unsigned values, and there are probably some caveats with width and
+promotion rules (portable, nonetheless).
+
+Also, assuming your environment uses linear addressing, and there's no other funny stuff going
+on with pointer bits (like the effectively 16 free bits on AMD64--using 48-bit addressing).
+
+if (~(uintptr_t)buf &lt; len)  {
+    die();
+}
+
+I believe this should work on Windows and all Unix systems (guaranteed by additional SUSv3
+constraints), but I'm not positive.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278386/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278515"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 22:03 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/278515/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jzbiciak" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278515" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <P>
+Of course, it fails for dynamically allocated and grown buffers since<TT> sizeof() </TT>can't tell you the length.
+</P>
+<P>Also, you failed to account for element size.  The following should work, though, for arrays of static size:</P>
+<PRE>
+    if (len > (sizeof(buf) / sizeof(buf[0]))
+       die_in_a_fire();
+</PRE>
+<P>I don't understand why you have the bitwise negation operator in there.  Also,<TT> len </TT>is a length, not a pointer type, so pointer format doesn't matter.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278515/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2008 5:51 UTC (Sat)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/278698/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278698" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+The question was how to check if arithmetic overflowed/wrapped, not whether an index or length
+is valid.
+
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor278235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 22:58 UTC (Wed)
+                               by <b>neufeld</b> (guest, #9124)
+                              [<a href="/Articles/278235/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neufeld" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278235" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I once fixed a bug in a very popular application, it produced occasional bus errors on the
+S390 architecture.  It turned out to be due to a piece of code of the form "buffer + len".
+The C standard requires that you be able to create pointers in that form pointing to any
+element in the allocated length, plus a single entry past the end.  It does not guarantee that
+you can even compute the address of a pointer that lies outside this range.  "ptr + int"
+calculation itself caused the bus error when the pointer lay near the end of the segment.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor278240"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2008 23:28 UTC (Wed)
+                               by <b>mongenet</b> (guest, #43575)
+                              [<a href="/Articles/278240/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mongenet" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278240" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>The CERT advisory looks bogus.<br>
+First, the example uses an <code>int</code> instead of an <code>unsigned int</code> (note that our fine editor uses an <code>unsigned int</code> in his example):</p>
+<pre>
+  char *buf;
+  int len;
+</pre>
+<p>Then, it pretends that "gcc will assume that <code>buf+len >= buf</code>". If <code>len</code> is an <code>int</code>, it may be negative and gcc may obviously not (and does not) assume that <code>buf+len >= buf</code> (of course, <code>buf</code> must point to an object in an array for the pointer arithmetic to be valid).</p>
+<p>Then, the length check <code>if(buf+len < buf)</code> is completely bogus: <code>buf+len</code> may point out of the array (including just beyond the end of the array) and that is a bug even without an overflow.</p>
+<p>The "Solution" given by CERT has the same bug, but with two ugly cast operators added! A correct solution is of course given by our editor.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278240/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor278249"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 0:01 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/278249/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jzbiciak" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278249" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <BLOCKQUOTE><I>pointer addition will not yield a pointer value outside of the same object</I></BLOCKQUOTE>
+<P>
+Just some pedantry, but I believe you're allowed to point to the first element after the end of an array, as long as you don't dereference that element.  Pointer comparisons with such a pointer are supposed to work, too.
+</P><P>
+That said, the problem is very similar to time comparison, where you have a running time counter that could wrap around, but all measured intervals still fit within the total size of the time-counter type.  There, the safe way to do things is to keep the time as an unsigned value, and subtract off the base.
+</P><P>
+You can't really do that here, because <TT>ptrdiff_t</TT> really ought to be a signed type.  In this case, if you keep "len" in a signed variable, negative lengths are always an error and so you can check for them directly <I>before</I> adding to a pointer base.  Positive lengths can always be compared against the buffer size.  In either case, you're comparing indices against each other, not pointers.</P>
+<P>Comparing against a generated pointer is a premature optimization, and begs for the compiler to slap you.  This is especially true when the pointer is to a type for which sizeof(type) &gt; 1.  For a large structure, the address arithmetic could wrap around several times, even for relatively small indices.  Imagine a structure for which sizeof(type) == 65536.  Any length &gt; 32767 causes problems on a 32-bit system.  Granted, arrays of such large structures tend to be very rare.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278249/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278402"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 16:23 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/278402/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278402" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+<font class="QuotedText">&gt; Any length &gt; 32767 causes problems on a 32-bit system.</font>
+
+Care to explain why? Did you mean "16-bit system"?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278402/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC and pointer overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 17:14 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/278414/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jzbiciak" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278414" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <P>No, I meant 32 bit system.  If you do the pointer arithmetic first on an array of structs whose size is 65536, then any length &gt; 32767 will give a byte offset that's &gt;= 2<SUP>31</SUP> away.  A length of 65535 will give you a pointer that's one element before the base.</P>
+<P>I guess it's an oversimplification to say 32767 specifically.  Clearly, any len &gt; 65535 will wrap back around and start to look "legal" again if the element size is 65536.  Any len &lt;= 65535 but greater than some number determined by how far the base pointer is from the end of the 32-bit memory map will wrap to give you a pointer that is less than the base.  So, the threshold isn't really 32767, but something larger than the length of the array.</P>
+<P>That was my main point:  When you factor in the size of the indexed type, the threshold at which an index causes the pointer to wrap around the end of the address space and the potential number of wrapping scenarios gets you in trouble.  Thus, the only safe way is to compare indices, not pointers.</P>
+<P>
+For example, suppose the compiler didn't do this particular optimization, and you had written the following code on a machine for which <TT>sizeof(int)==4</TT>:
+</P>
+<PRE>
+extern void foo(int*);
+
+void b0rken(unsigned int len)
+{
+    int mybuf[BUFLEN];
+    int *mybuf_end = mybuf + BUFLEN;
+    int i;
+
+    if (mybuf + len < mybuf_end &amp;&amp; mybuf + len >= mybuf)
+    {
+        for (i = 0; i < len; i++)
+            mybuf[i] = 42;
+    }
+
+    foo(mybuf);  /* prevent dead code elimination */
+}
+</PRE>
+<P>What happens when you pass in<TT> 0x40000001 </TT>in for<TT> len</TT>?  The computed pointer for<TT> mybuf + len </TT> will be equal to<TT> &amp;mybuf[1]</TT>, because under the hood, the compiler multiplies<TT> len </TT>by<TT> sizeof(int)</TT>, giving<TT> 0x00000004 </TT>after truncating to 32 bits.  How many times does the loop iterate, though?</P>
+<P>This happens <I>regardless</I> of whether the compiler optimizes away the second test.</P>
+<P>Now, there <I>is</I> a chance a <I>different</I> optimization saves your butt here.  If the compiler does common subexpression elimination and some amount of forward substitution, it may rewrite that<TT> if </TT>statement's first test as follows.  (Oversimplified, but hopefully it gives you an idea of what the compiler can do to/for you.)</P>
+<P>Step 0:  Represent pointer arithmetic as bare arithmetic (internally)</P>
+<PRE>
+    mybuf + 4*len >= mybuf_end
+</PRE>
+<P>Step 1:  Forward substitution.</P>
+<PRE>
+    mybuf + 4*len >= mybuf + 4*BUFLEN
+</PRE>
+<P>Step 2:  Remove common terms from both sides.  (Assumes no integer overflow with pointer arithmetic--what started this conversation to begin with.)</P>
+<PRE>
+    4*len >= 4*BUFLEN
+</PRE>
+<P>Step 3:  Strength reduction.  (Again, assumes no integer overflow with pointer arithmetic.)</P>
+<PRE>
+    len >= BUFLEN
+</PRE>
+<P>That gets us back to what the test should have been to begin with.  There's no guarantee that the compiler will do all of this though.  For example, GCC 4.2.0 doesn't seem to optimize the test in this way.  I just tried the Code Composer Studio compiler for C64x (v6.0.18), and it seems to do up through step 2 if the array is on the local stack, thereby changing, but not eliminating the bug.</P>
+<P>It turns out GCC does yet a <I>different</I> optimization that changes the way in which the bug might manifest.  It eliminates the original loop counter entirely, and instead transforms the loop effectively into:</P>
+<PRE>
+    int *ptr;
+
+    for (ptr = mybuf; ptr != mybuf + len; ptr++)
+        *ptr++ = 42;
+</PRE>
+<P>This actually has even <I>different</I> safety characteristics.</P>
+<P>Moral of the story?  Compare indices, not computed pointers to avoid buffer overflows.</P>
+    
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor278253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 0:44 UTC (Thu)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/278253/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="clugstj" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278253" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+How about this obvious solution.  When compiling old crusty code, don't use the
+latest-and-greatest compiler optimizations?  (I'm assuming this one can be turned off.)
+
+The older, and less recently maintained, the code, the more conservative the optimization
+should be.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278375"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 15:27 UTC (Thu)
+                               by <b>proski</b> (guest, #104)
+                              [<a href="/Articles/278375/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="proski" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278375" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Bugs exist not only in old crusty code.  Just because the code was written recently, it doesn't make the code better or safer.  Even if the code was developed with the new compiler but was not specifically tested for overflows, it still can have that problem.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278375/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 17:24 UTC (Thu)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/278440/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="clugstj" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278440" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+OK, how about this: if you don't trust the code, don't use the latest whiz bang optimizations!
+
+The documentation for GCC should specifically warn about optimizations that can do bad things
+with questionable code.  As an example, here is a quote from the "Sun Workshop 6 update 2" man
+page:
+
+            -xO3 In addition to optimizations performed at the
+                    -xO2 level, also optimizes references and
+                    definitions for external variables.  This
+                    level does not trace the effects of pointer
+                    assignments.  When compiling either device
+                    drivers that are not properly protected by
+                    volatile, or programs that modify external
+                    variables from within signal handlers, use
+                    -xO2
+
+Let's not penalize GCC because of how some people will use/abuse it.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor278464"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 19:38 UTC (Thu)
+                               by <b>brouhaha</b> (guest, #1698)
+                              [<a href="/Articles/278464/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brouhaha" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278464" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+This behavior is allowed by the C standard, which states that, in a correct program, pointer addition will not yield a pointer value outside of the same object. So the compiler can assume that the test for overflow is always false and may thus be eliminated from the expression.
+</blockquote>
+
+GCC can only assume that the test for overflow is always false if it first assumes that the program is correct.  Since when does it assume that?  If GCC
+ assumes that the program is correct, why does it sometimes generate errors and/or warnings at compile time?  Correct programs won't require any error or warning messages at compile time, so there's no point in GCC having any code to check for the conditions that can cause those errors and warnings.  Clearly it would be more efficient for GCC to avoid those checks, so they should be eliminated.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278464/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278471"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 20:08 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/278471/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278471" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+GCC assumes that a program you feed its C compiler is written in C. If 
+what you feed it cannot be a valid program (e.g. it contains a syntax 
+error), it errors. If it's likely that it's invalid, it often warns. But 
+if what you feed it has one valid interpretation and one which must be 
+invalid, of course it must pick the valid interpretation. Anything else 
+would lead to its being unable to compile valid programs, which would be a 
+standards violation (and bloody annoying).
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278471/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278501"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 20:39 UTC (Thu)
+                               by <b>brouhaha</b> (guest, #1698)
+                              [<a href="/Articles/278501/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brouhaha" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278501" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      My point exactly.  If the assumption is only that the program is written in C, but NOT that it is a correct C program, then it isn't reasonable to assume that the program's use of pointers meets the constraint defined by the standard, in which a pointer will never be manipulated to point outside its object.
+<p>
+That would be a fine optimization to use when you choose some high level of optimization that includes unsafe optimizations, but it shouldn't happen at -O1.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278501/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278513"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 21:45 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/278513/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278513" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Something which invokes undefined behaviour according to the standard is, 
+in a sense, not written in C. Of course any useful program will do things 
+*beyond* the standard (e.g. relying on POSIX); but relying on things the 
+like pointer wraparound is a rather different matter. (Who the hell would 
+ever intentionally rely on such things anyway? It pretty much *has* to be 
+a bug to have such code.)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278513/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278526"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2008 22:58 UTC (Thu)
+                               by <b>brouhaha</b> (guest, #1698)
+                              [<a href="/Articles/278526/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brouhaha" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278526" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      There are three possibilities:
+<ol>
+<li>GCC does not make assumptions about the validity of the input
+<li>GCC assumes that the input is a C program, but not necessarily a valid one (according to the C standard)
+<li>GCC assumes that the input is a valid C program
+</ol>
+The GCC maintainers claim that the optimization is legitimate because GCC assumes that the input is a valid C program (choice 3).  If they are willing to make that assumption, then they shouldn't need any error checking whatsoever.
+<p>
+A compiler assuming that the input is a valid program is counter to my expectations as a user of the compiler.  Unless I explicitly turn on unsafe optimizations, I don't expect it to optimize away any comparisons that I've written, unless it can prove that the condition will always have the same result, based on my actual program code, not on what the C standard says a valid program may or may not do.
+<p>
+I have no problem at all with having such optimizations enabled as part of the unsafe optimizations at higher -O option levels.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278526/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278597"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 11:18 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/278597/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278597" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+The problem is that the boundary between 'a C program, but not necessarily 
+a valid one' and 'not a C program' is questionable.
+
+if (a + foo &lt; a) is testing something which, in any C program conforming 
+to the Standard without really weird extensions, must be false. This is 
+every bit as true as if (sizeof (a) &lt; 1) would be. If it decided that, oh, 
+that could be true after all, it's choosing an interpretation which the 
+Standard forbids.
+
+... and if the compiler starts accepting that, what other non-C programs 
+should it start accepting? Perhaps we should spell 'while' differently 
+when the locale is de_DE? Perhaps `mary had a little lamb' is now defined 
+as a valid C program?
+
+(Sure, compilers can *do* all this, and GCC does have some extensions 
+chosen explicitly because their syntax is invalid Standard C --- the 
+statement-expression extension springs to mind --- but the barrier to new 
+extensions is very high these days, and in any case that doesn't mean that 
+*anything* people do wrong should be defined as a language extension, 
+especially not when it's as weird and devoid of practical utility as this. 
+Portability to other compilers is important.)
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278597/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278654"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 19:15 UTC (Fri)
+                               by <b>brouhaha</b> (guest, #1698)
+                              [<a href="/Articles/278654/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brouhaha" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278654" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      There's a big difference between the (a + foo < a) and (sizeof (a) < 1) cases, which is that the former is something that a programmer is likely to code specifically because he or she knows that the program might (unintentionally) be buggy, in an attempt to catch a bug, while the latter is  unlikely to occur at all, and certainly not as something a programmer is likely to deliberately test for.
+<blockquote>
+If it decided that, oh, 
+that could be true after all, it's choosing an interpretation which the 
+Standard forbids.
+</blockquote>
+Yet which can actually quite easily happen in real programs.  NOWHERE does the standard say that a compiler has to optimize away tests that might always have a fixed value for valid programs, but might easily have differing values for buggy programs.
+<blockquote>
+Perhaps we should spell 'while' differently 
+when the locale is de_DE?
+</blockquote>
+You've lost me here.  I don't see any way that a purely semantic error in a program could result in "while" being misspelled, even if the locale is de_DE.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278654/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor278625"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 16:19 UTC (Fri)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/278625/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="viro" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278625" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Standard is a contract between authors of program and authors of
+C implementation; if program invokes undefined behaviour, all bets
+are off.  It is allowed to compile the check in question into "check
+if addition had triggered an overflow; if it had, before bothering
+with any comparisons do unto luser what Simon would have done
+on a particulary bad day".
+
+It can also turn that into "if addition overflows, take the value of
+first argument".  And optimize according to that.
+
+It's not a matter of optimizing your comparisons away; it's a matter
+of addition having no prescribed semantics in case of overflows,
+regardless of optimizations.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278625/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278669"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Since when does GCC *assume* the program to be correct?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 21:00 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/278669/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278669" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Well said. Also, while in some cases it is a QoI issue which high-quality 
+implementations will in some cases prescribe useful semantics for, this 
+isn't such a case. I can't think of any particularly useful semantics for 
+pointer wraparound, especially given that distinct objects have no defined 
+nor stable relationships with each other anyway. Operating under the rules 
+of modular arithmetic might have been nice, and perhaps a more recent 
+language would define that...
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278669/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor278626"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 16:42 UTC (Fri)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/278626/">Link</a>] (14 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mikov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278626" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+So, this is similar to this issue:
+
+  int x = ...;
+  if (x + CONSTANT &lt; x)
+     overflow();
+
+GCC will optimize out the check completely because the standard says so. There is no arguing
+that GCC is in its right to do the optimization.
+
+However there are plenty of circumstances where this code is in fact valid (when the values of
+x and CONSTANT are controlled and the code is running on two's complement machine, etc).
+
+So, I am concerned about two things:
+
+* Are these optimizations really beneficial ? Do situations like the above occur in _correct_
+code ?
+
+* Don't they make C a less useful language ? C is often regarded as high level assembler. When
+I write something, it should not be up to the compiler to second guess me.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278626/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278667"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 20:59 UTC (Fri)
+                               by <b>ibukanov</b> (subscriber, #3942)
+                              [<a href="/Articles/278667/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ibukanov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278667" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+<font class="QuotedText">&gt; * Are these optimizations really beneficial ? Do situations like the above occur in
+_correct_ code ?</font>
+
+Stuff like x + CONSTANT &lt; x can trivially happen as a result of a complex macro expansion
+especially after changes done by different people.
+
+But when this happens, I prefer the compiler to warn about it, not to silently optimize the
+code.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278667/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 21:22 UTC (Fri)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/278672/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mikov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278672" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Exactly my point. It is not easy to imagine a case where this is a _desirable_ optimization.
+It is either a bug, which should be warned, or it is deliberate. Either way the compiler
+should not remove the code!
+
+I imagine however that the general assumption "int + positive_value is always greater than
+int" may be useful for complex loop optimizations and the like. It probably allows to
+completely ignore integer overflow in cases like this "for (int i = 0; i &lt; x; ++i ) {...}". 
+
+
+
+
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278677"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 22:29 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/278677/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278677" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+That's equally useful for pointer arithmetic. Think arrays, strings, 
+pointer walks, even things like Floyd's algorithm (smart optimizers can 
+even spot the relationship between the tortoise and the hare: allowing for 
+the hare to wrap around would ruin that).
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278677/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor278674"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2008 22:03 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/278674/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278674" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+I would prefer a warning only if there's an easy way to disable the warning.  And Gcc almost never provides a way to say, "don't warn me about this particular piece of code; I've already verified it's supposed to be that way."  The things I have to do to stop warning messages often make the code harder to read or slower to execute.  But because the warnings are so often valid, I won't accept any code that generates any warnings.
+<p>
+I've used other compilers that at least have the ability to turn off warnings for a certain stretch of source code.  And others have fine-grained selection of types of warnings.
+
+<blockquote>
+I prefer the compiler to warn about it, not to silently optimize the
+code.
+</blockquote>
+<p>
+I really don't think of what the compiler is doing as "optimizing away" my code.  It's not throwing away code I wrote, it's simply implementing it with zero instructions, because that's an efficient way to implement what I wrote.  The warning isn't, "I didn't generate any instructions for this."  It's, "you wrote something that a programmer normally wouldn't write intentionally, so maybe you meant to write something else."
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278674/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278743"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2008 18:16 UTC (Sat)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/278743/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mikov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278743" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>I really don't think of what the compiler is doing as "optimizing away" my code. It's not throwing away code I wrote, it's simply implementing it with zero instructions, because that's an efficient way to implement what I wrote. The warning isn't, "I didn't generate any instructions for this." It's, "you wrote something that a programmer normally wouldn't write intentionally, so maybe you meant to write something else."</blockquote>
+
+<p>I think your are missing the point that this code is often both valid and intentional. After all this is C, not Lisp, so a programmer is supposed to be aware that integer types wrap around, etc. 
+
+<p>I think that it happens to be one of the most efficient ways to check for overflow in some cases. So, it is a trade off - the standard has chosen to declare <i>perfectly valid code</i> as invalid in order to make other optimizations easier.
+
+<p>For example, a similar trade off would be to declare that all aliasing is invalid. Imagine the wild optimizations that would be made possible by that !
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278743/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2008 19:19 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/278748/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278748" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+I think you are missing the point that this code is often both valid and intentional.
+</blockquote>
+<p>
+No, I did get that point, and it's orthogonal to my point, which was that the compiler is not optimizing away my code, so need not warn me that it has optimized away my code.
+<p>
+The first point I made in the same post is that I prefer no warning unless there is a way for me to disable it, which is directly derived from your point that the code is often both valid and intentional.
+<p>
+<strong>However:</strong> I can see your real point is that the code is not only <em>intentional</em>, but is intended to mean something different from what the standard says it means.  That, I suppose, means the warning says, "you wrote something that often is intended to say something other than what it really says."  I agree that's a valid warning.  It's like the
+warning for "<tt>if (a = b)</tt>".  It's still not a case of the user's code being "optimized away."
+
+<blockquote>
+After all this is C, not Lisp, so a programmer is supposed to be aware that integer types wrap around, etc.
+</blockquote>
+<p>
+While quite low level, C is not so low level that integer types wrap around.  You're just talking about particular implementations of C.  The warning we're talking about warns the programmer that something <em>didn't</em> wrap around as expected.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor278801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2008 19:44 UTC (Sun)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/278801/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="viro" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278801" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+a) *unsigned* integers wrap around; it hadn't been promised for signed
+ones and as the matter of fact it hadn't been true for a bunch of
+implementations, all way back to late 70s.
+
+b) pointer + integer wraparounds are even worse - all sorts of fun
+things happened in a lot of implementations; e.g. there's nothing to
+stop the hardware from using upper bits to store extra information of
+any kind (e.g. ASN) and using an instruction for pointer + int that
+mangles them instead of a wraparound.  With instruction for comparison
+that would trap on ASN mismatch.  And that doesn't take anything too
+exotic - e.g. 56bit address space, 8bit ASN in upper bits, 32bit int.
+Get a carry into bit 56, have both &gt; and &lt; trigger a trap.
+
+The point is, you are not relying on low-level details - you are assuming
+that all world is a VAX (OK, x86 these days).  And insisting that all
+implementations reproduce exact details of (undefined) behaviour, no
+matter how much PITA it would be.  BTW, that addition itself can trap
+on wraparound - and does on real-world architectures.
+
+So you can do that validation in a sane way (compare untrusted index
+with maximal valid value) or, if you want to rely on details on pointer
+implementation *and* be perverse, play with casting to uintptr_t and
+using the fact that operations on _that_ are well-defined.  Will still
+break on architectures that do not match your idea of how the pointers
+are represented, but at least you won't be feeding the data to be
+validated into operations that might do all sorts of interesting things
+and trying to guess if those things had happened by the outcome.
+
+There's implementation-defined and there's undefined.  That kind of
+wraparounds is firmly in the latter class, regardless of any optimizations.
+C doesn't try to codify _how_ any particular construct with undefined
+behaviour will screw you - it doesn't even promise to try and have it
+act consistently on given target.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2008 22:39 UTC (Sun)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/278819/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mikov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278819" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+As you noted yourself, there is a subtle difference between undefined and implementation
+defined behavior. This particular case is clearly an example of *implementation defined*. It
+behaves in the same way on 99% of all CPUs today and there is nothing undefined about it. Not
+only that, but it is not an uncommon idiom and can be useful in a number of situations. How
+can you call it undefined ???
+
+You speak about architectures with different pointer representations, etc. I have heard that
+argument before and I do not buy it. Such implementations 
+mostly do not exist, or if they do, are not an important target for Standard C today, let
+alone GCC. (Emphasis on the word "standard"). 
+
+Considering the direction where hardware is going, such architectures are even less likely to
+appear in the future. Instructions that trap for any reason are terribly inconvenient for
+superscalar or OoO execution.
+
+Anyway, I think I may not have been completely clear about my point. I am *not* advocating
+that the standard should require some particular behavior on integer and pointer overflows. I
+am however not convinced that it is a good idea to explicitly *prohibit* the behavior which is
+natural to most computers in existence.
+
+As it is now, Standard C is (ahem) somewhat less than useful for writing portable programs (to
+put it extremely mildly). It is somewhat surprising that the Standard and (apparently) most
+compiler implementors are also making less useful for *non-portable* applications :-)
+
+
+(I have to admit that years ago I was fascinated with the aesthetic "beauty" of portable C
+code, or may be I liked the challenge. Then I came to realize what a horrible waste of time it
+was. Take Java for example - for all its horrible suckiness, it does a few things right - it
+defines *precisely* the size of the integer types, the behavior on overflow and integer
+remainder of negative numbers.
+
+There is a lot of good in x86 being the universal CPU winner - we can finally forget the
+idiosyncrasies of the seventies ...)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278821"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2008 0:32 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/278821/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278821" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Pointer overflow is undefined because the Standard does not define it. 
+That's what undefined *means*. The semantics of some construct are 
+undefined both when the Standard says they are, and when it simply doesn't 
+say anything one way or the other. The semantics of a construct are 
+implementation-defined *only* when the Standard says they are. You can't 
+say `oh, it doesn't say anything about $FOO, therefore it's 
+implementation-defined'.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278821/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278822"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2008 1:30 UTC (Mon)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/278822/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mikov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278822" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I understand that. (In fact I used to be intimately familiar with the C99 Standard several
+years back, before I got disillusioned with it - how can you have any respect for a standard
+containing "atoi()" ? :-) ). 
+
+I am not discussing the "meaning" of the Standard. The meaning is more than clear, at least in
+this case, and if you look at my first post in this thread, you will see me explicitly noting
+that this is a completely valid transformation according to the Standard. 
+
+However it is also completely valid *not* to to perform this transformation. So, this is
+clearly a QOI issue and I am discussing it as such. I am not convinced that optimizing away
+operations which are otherwise completely valid and useful, only because the standard says
+that it is allowed (but not required!), is a good idea.
+
+The Standard is just a document. Fortunately it is not an absolute truth and it does not
+prevent us from thinking on our own. Plus, it is not particularly inspiring or useful.
+
+As you probably know very well, it is impossible to write an useful C application using only
+the C standard. *Any* C application is non-portable and non-standard compliant.  The C
+Standard is so weak, that it is practically useless, except as mental self pleasuring, much as
+we are doing now.
+
+(BTW, people often delude themselves that they are writing compliant C, when their
+applications happen to run on a couple of conventional 32-bit architectures, using the same
+compiler, in a POSIX environment. Ha! Then they get ported to Windows (or the other way
+around) and it is taken as an absolute proof of compliance. In fact the applications are a
+mess of special cases, ifdef-s and non-standard assumptions.)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278822/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278834"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2008 6:50 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/278834/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278834" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Ah, right. Well, QoI is in the eye of the beholder: I happen to think that 
+the semantics of pointer overflow are semantics that only a maniac would 
+rely upon intentionally, so the *most* we need is an extension of the 
+existing compiler warning that `comparison is always true' or something 
+along those lines.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278834/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278886"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2008 17:32 UTC (Mon)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/278886/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mikov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278886" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I was thinking mostly of integers, not pointers. However I am hard pressed to think of an
+example where a pointer overflow would not safely wrap around _in practice_. Even with x86 FAR
+pointers, the offset will safely wrap around. There will be no trap and the comparison will
+still work.
+
+Are there many architectures, in use today, where pointers are not integers and do not wrap
+around on overflow ? Secondly, do these architecture run Linux and are they supported by GCC ?
+
+Regardless of the answer to these questions, why would people writing  code with zero chance
+for running on those architectures, be maniacs ?
+
+The C Standard is not a measurement for good programming. It simply has a set of restrictions
+to ensure portability between all kinds of weird architectures (I should say it fails in this
+miserably, but that is beside the point). However portability is not the only, and by far not
+the most important measurement of code.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278886/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor278843"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2008 11:09 UTC (Mon)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/278843/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278843" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Instructions that trap are not going away, if only because they're useful in virtual
+machines--or the like--to which C can be targeted.
+
+Relying too heavily on pointer arithmetic in algorithms is not the smartest thing to do. The
+largest integral type supported on the computer I'm typing on is 64-bit (GCC, long long), but
+pointers are only 32-bits. Parsing a 5GB ISO Base Media file (aka QuickTime Mov), I can keep
+track of various information using the unsigned 64-bit integral; if I had written all my
+algorithms to rely on pointer arithmetic to store or compute offsets, I'd be screwed.
+
+C precisely defines the behavior of overflow for unsigned types. Java's primitives suck
+because they're all signed; the fact that it wraps (because Java effectively stipulates a
+two's-complement implementation) is useless. In fact, I can't even remember the last time I
+used (or at least wanted) a signed type, in any language. Having to deal with that extra
+dimension is a gigantic headache, and it's worth noting that Java is just as susceptible to
+arithmetic bugs as C. I'd argue more so, because unwarranted reliance on such behavior invites
+error, and such reliance is easier to justify/excuse in Java because it so narrowly stipulates
+such things.
+
+C's integral types are in some ways superior to many other languages' specifically because
+they're so loosely defined by the spec. Short of transparently supporting big integers, it
+forces you to focus more on values than representations. That Java and C# stipulate a fixed
+size is useless in practice; it doesn't help in the slightest the task of constraining range,
+which is almost always defined by the data, and similar external context. Any code which
+silently relies on a Java primitive type wrapping is poor code. Using comments is always
+second to using masks, and other techniques, where the code speaks for itself more clearly
+than a comment ever could.
+
+A better system, of course, would utilize type ranges a la Ada.
+
+Anyhow, I know the parent's point had more to do with pointers, but this just all goes to show
+that good code doesn't rely on underlying representations, but only the explicit logic of the
+programmer, and the semantics of the language.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278843/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor278863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an useful optimization ??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2008 16:00 UTC (Mon)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/278863/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mikov" />
+                <input type="hidden" name="return" value="/Articles/278137/#CommAnchor278863" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>Instructions that trap are not going away, if only because they're useful in virtual machines--or the like--to which C can be targeted.</blockquote>
+
+<p>I disagree. A predictable conditional jump is better, simpler and more efficient than a completely unpredictable trap. Even if the trap doesn't have to go through the OS signal handler (which it probably does on most OS-es), it has to save context, etc. 
+
+<p>One could argue for adding more convenient instructions for detecting an overflow and making a conditional jump on it. I strongly suspect that instructions that trap are currently a dead end.
+
+<p>Anyway, we know x86 doesn't have instructions that trap on overflow. (Well, except "into", but no C compiler will generate that). Do PPC and ARM have them and are they used often?
+
+<blockquote>That Java and C# stipulate a fixed
+size is useless in practice; it doesn't help in the slightest the task of constraining range,
+which is almost always defined by the data, and similar external context. Any code which
+silently relies on a Java primitive type wrapping is poor code.</blockquote>
+
+<p>That is not my experience at all. C99 defines "int_least32_t" and the like exactly to address that problem. Many C programmers like to believe that their code doesn't rely on the size of "int", but they are usually wrong. Most pre-C99 code would break horribly if compiled in a 16-bit environment, or where integer widths are not powers of 2, or are not two's complement.
+
+<p>Honestly, I find the notion that one can write code without knowing how wide the integer types are, in a language which doesn't implicitly handle the overflow (unlike Python, Lisp, etc), to be absurd.
+
+<p>I am 100% with you on the unsigned types, though. 
+
+<p>I also agree that in practice Java is as susceptible to arithmetic bugs as C. However it is for a different reason than the one you are implying. It is simply because in practice Java and C have _exactly_ the same integer semantics.
+
+<p>Java simply specifies things which 90% of the C programmers mistakenly take for granted. Wrap-around on overflow, truncating integer division, etc.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/278863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

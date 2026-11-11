@@ -1,0 +1,758 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>On pages and folios [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="On pages and folios">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel coverage here at LWN often touches on memory-management topics and, as a result, ten [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1069207/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>On pages and folios</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 24, 2026</br>
+           </div>
+The kernel coverage here at LWN often touches on memory-management topics
+and, as a result, tends to talk a lot about both pages and folios.  As the
+folio transition in the kernel has moved forward, it has often become
+difficult to decide which term to use in writing that is meant to be both
+approachable and technically correct.  As this work continues, it will be
+increasingly common to use "folio" rather than page.  This article is
+intended to be a convenient reference for readers wanting to differentiate
+the two terms or understand the state of this transition.
+<p>
+<!-- middle-ad -->
+<h4>Pages</h4>
+<p>
+Memory in all but the smallest of computing systems is divided into
+regularly-sized units called "pages"; the most common page size
+is&nbsp;4KB, but there are systems that run with larger page sizes.  A page
+is the smallest unit that the system's hardware units, including the
+memory-management unit and translation lookaside buffer (TLB) work with.
+When memory is swapped in or out, or when it is moved between NUMA nodes in
+a larger system, it is moved in chunks that are an integral number of
+pages.  Pages are thus fundamental to the management of memory in Linux
+systems.
+<p>
+This structure is reflected in the way virtual addresses work.  On a 64-bit
+x86 system with a 4KB page size, the upper 52&nbsp;bits (the "page-frame
+number" or "PFN") identify the page referred to by the address, while the
+bottom 12&nbsp;bits give the offset within the page:
+<p>
+<blockquote>
+<img src="../_static/images/2026/address-structure1.svg" alt="[Simple address
+structure]" class="forcewhite" width=600>
+</blockquote>
+<p>
+Naturally, the full story is a bit more complex than that, starting with
+the fact that the PFN is really a physical concept, not a virtual one, so
+the usage here is a bit sloppy — the <i>real</i> page-frame number is only
+found as part of the address-translation process.  Also, the PFN does not
+usually occupy the full upper 52&nbsp;bits.  Logically, the PFN can be
+looked at as an index into a large table that stores information about each
+page, most importantly whether it is resident in RAM and, if so, what its
+physical address is.  In practice, the PFN is split into a maximum of five
+(as of this writing) nine-bit (on x86-64 systems) indices, each of which is
+an index into a different table; those tables are then organized into a
+hierarchy:
+<p>
+<blockquote>
+<img src="../_static/images/2026/address-structure2.svg" alt="[More complete address
+structure]" class="forcewhite" width=600>
+</blockquote>
+<p>
+This structure enables a far more efficient representation of the page
+tables, and it also, as we will see, comes into play in how huge pages are
+implemented.  On the other hand, it makes for expensive memory access.
+Every time the CPU encounters a virtual address, it must translate it into
+a physical address; that means iterating through that series of five levels
+of page tables, which is going to be slow.  To minimize that expense, CPUs
+maintain a translation lookaside buffer to cache the result of address
+translations.  If a given PFN is in the TLB, the translation will happen
+quickly; otherwise it will be slow.  The TLB is not huge, so a lot of
+attention goes into ensuring that code uses the TLB efficiently.
+<p>
+<h4>The system memory map and <tt>struct page</tt></h4>
+<p>
+The kernel needs to keep track of how every page of memory is being used —
+that is what "memory management" is all about, after all.  To that end, it
+maintains a large array of <a
+href="https://elixir.bootlin.com/linux/v6.19.9/source/include/linux/mm_types.h#L42"><tt>page</tt>
+structures</a>, one for each page of physical memory in the system.  This
+structure has been made as small as kernel developers can get it, but it
+still (typically) requires 64&nbsp;bytes.  As a result, on a system with
+4KB pages, the associated <tt>page</tt> structures occupy 1.6%&nbsp;of
+physical memory.  That is a cost that the kernel community has long wanted
+to reduce.
+<p>
+The <tt>page</tt> structure has been used throughout the kernel for many
+years to refer to specific pages of physical memory.  At times this
+ubiquity has proved to be problematic; <tt>struct page</tt> is a core
+memory-management data structure, but code in other parts of the system
+often make surprising use of its fields.  Current work in the
+memory-management subsystem is reducing the importance of <tt>struct
+page</tt>, which may, someday, wither away altogether.
+<p>
+
+<h4>Huge pages</h4>
+<p>
+One way to get better use out of the TLB is to have each TLB entry cover a
+larger area of memory — to make the page size larger, in other words.  Most
+contemporary CPUs implement a huge-page mechanism that does exactly that.
+In essence, the CPU implements the smallest huge-page size by taking the
+PTE portion of the page-frame number and turning it into the offset within
+a larger page instead:
+<p>
+<blockquote>
+<img src="../_static/images/2026/address-structure3.svg" alt="[Huge-page address
+structure]" class="forcewhite" width=600>
+</blockquote>
+<p>
+The entry at the PMD level of the page tables is specially marked to
+indicate that the PFN stops there and points to a 2MB huge page (again, on
+x86; other architectures can vary somewhat but the idea remains the same).
+For this reason, this type of huge page is often referred to as a
+"PMD-level" (or just "PMD") huge page.  By extending the range of a TLB
+entry from 4KB to 2MB, huge pages can significantly increase the amount of
+memory that can be addressed without having to go through the whole
+translation routine.
+<p>
+Traditionally, applications had to explicitly request huge pages to be able
+to make use of them.
+The <a href="423584.html">transparent huge page (THP)</a> feature
+makes it possible for the kernel to provide PMD-level huge pages to user
+space automatically in situations where it appears that they will help
+performance.  THPs are not always a performance win; they can cause a lot
+of memory waste if the pages are only sparsely used and they stress the
+memory-management system more, so they can slow some workloads down.  For
+this reason, the feature ends up being disabled on some systems.
+<p>
+Larger huge pages exist as well; a PUD-level huge page removes the PMD
+layer of the page-table hierarchy, yielding a 1GB page size.  Such pages
+can be somewhat unwieldy to work with and can be difficult for the
+memory-management subsystem to reliably supply, but one common use case is
+to allocate them for use by virtual machines, which manage them internally,
+in smaller chunks, as the virtual machine's "physical" memory.
+<p>
+More recent processors have gained a separate, not-so-huge-page concept.
+Some x86 processors can mark a TLB entry as covering eight pages, and some
+Arm processors can perform a similar trick with 16-page chunks.  That,
+again, allows the TLB to cover more of working memory, but without
+requiring the use of 2MB (or larger) huge pages.  The result of these
+changes is that the sizing of huge pages is becoming more flexible; the
+term "mTHP" (multi-size transparent huge page) is often used for these
+smaller page clusters.
+<p>
+<h4>Folios</h4>
+<p>
+Even in the absence of huge pages, the kernel has long needed to work with
+larger chunks of physically contiguous memory.  The concept of <a
+href="619514.html">compound pages</a> was added to the 2.6.6 kernel
+release in 2004 as one way of organizing such a chunk; a compound page is a
+power-of-two-sized group of pages managed, for a period of time, as a
+single unit.  Since a compound page consists of at least two physically
+contiguous pages, it is represented by an equal number of adjacent
+<tt>page</tt> structures.  The kernel takes advantage of this fact by
+treating the <tt>page</tt> structure for the first ("head") page as
+representing the whole set, and storing related information in the
+<tt>page</tt> structures for the following ("tail") pages.
+<p>
+Back in 2021, Matthew Wilcox <a href="849538.html">noticed</a> that
+there was a lot of kernel code that could be handed either a compound page
+or a single ("base") page, with the base page being perhaps located
+<i>within</i> a compound page.  A surprising amount of overhead went into
+ensuring, in many places in the kernel, that any passed-in <tt>struct
+page</tt> pointer referred to the head page of a compound page,
+or to a solitary base page.  He decided to improve the kernel's internal
+APIs to reduce that overhead.  The result was the "folio", which was
+defined as a <tt>struct page</tt> that is known not to represent a tail of
+a compound page.  After some <a href="868598.html">significant
+discussion</a>, the initial folio patches were merged for the 5.16 release
+at the beginning of 2022.
+<p>
+It became evident fairly quickly, though, that the folio concept has uses
+far beyond reducing the overhead of supporting compound pages.  For
+decades, kernel developers have contemplated managing memory in larger
+chunks; the 4KB page size is unchanged from the 1990s, even though
+the amount of installed memory has grown by several orders of magnitude
+since then.  Contemporary systems have to manage vast numbers of pages, and
+the associated overhead, in terms of both CPU and memory use, hurts.  But
+attempts to move to larger pages have generally been thwarted by other
+costs, primarily the lost memory due to internal fragmentation.
+<p>
+What was needed was a way to deal with memory in variably sized chunks,
+rather than working with one fixed size (and, perhaps, the vastly larger
+huge-page sizes).  Folios have, since their introduction, been evolving
+into that way.  Over time, areas of the kernel that dealt with pages have
+been modified to work with variably sized folios instead.
+<p>
+For example, consider the page cache, which caches portions of files in
+memory to speed access.  The page cache once, true to its name, cached data
+one page at a time.  Now, though, it would be more properly called the
+"folio cache", with the ability to cache file contents in appropriately
+sized folios.  A small file might well fit within a single-page folio in
+the page cache, while a much larger file could be cached in a relatively
+small number of large folios.  Making this work required a lot of changes
+to the memory-management subsystem, the readahead code, and the individual
+filesystems as well.
+<p>
+To see how far this transformation has progressed, compare the definitions
+of <tt>struct address_space_operations</tt>, which (to simplify) describes
+the functions that move data between the page cache and the underlying
+persistent storage, from <a
+href="https://elixir.bootlin.com/linux/v5.16.20/source/include/linux/fs.h#L369">the
+5.16 kernel</a> (when folios were introduced but not yet widely used) and
+<a
+href="https://elixir.bootlin.com/linux/v7.0-rc5/source/include/linux/fs.h#L403">7.0-rc5</a>.
+The <tt>readpage()</tt> method is now <tt>read_folio()</tt>, many other
+methods have been changed similarly, and none of them take <tt>struct
+page</tt> arguments in the current version.  These changes were not easy,
+but they allow the management of the page cache at varying levels of
+granularity, enable the support of filesystems with block sizes larger than
+the system page size, and ease the creation of larger (more efficient) I/O
+operations. 
+<p>
+Anonymous memory for user-space processes has also traditionally been
+allocated and managed one page at a time.  The addition of transparent huge
+pages helped in some situations, but THPs are too large to be a net
+performance improvement for many workloads.  Instead, mTHPs are easier to
+work with, waste less memory through internal fragmentation, and can boost
+performance significantly;  folios can represent them nicely within the
+kernel.  The work to make full use of mTHPs is <a
+href="/Articles/1009039/">still ongoing</a>, and may take a while yet to
+settle, but mTHPs may prove to be a more generally applicable performance
+enhancement than PMD-level huge pages for many workloads.
+<p>
+One significant advantage of moving to folios for both the page cache and
+anonymous memory is the effect on the kernel's least-recently-used (LRU)
+lists, which are used to identify which pages (now folios) have
+not been accessed for a while and should be considered for reclamation.
+Large numbers of pages lead to extremely long LRU lists, which are more
+expensive for the kernel to manipulate.  Managing folios in those lists
+makes them shorter, again improving performance.
+<p>
+Within the kernel, folios are represented by <a
+href="https://elixir.bootlin.com/linux/v7.0-rc5/source/include/linux/mm_types.h#L357"><tt>struct
+folio</tt></a>.  Since the introduction of folios, this structure has been
+carefully designed to overlay <tt>struct page</tt> (more correctly, it
+overlays the first four <tt>page</tt> structures representing a large
+folio).  That work has been done to ensure that the <tt>folio</tt>
+structures are made up of valid <tt>page</tt> structures, allowing the
+transition to folios to be implemented incrementally.  There will come a
+time, though, when <tt>struct folio</tt> will become entirely separate from
+<tt>struct page</tt>, but that will require some fundamental changes to the
+system's memory map.
+
+
+<h4>Shrinking the memory map</h4>
+<p>
+As mentioned above, the kernel's memory map itself takes up a significant
+amount of memory, which developers would like to see put to better uses.
+The static nature of the map means that there must be a <tt>page</tt>
+structure for each physical page, and that said structure must be large
+enough to handle all of the possible uses to which a page might be put.
+Making the map more dynamic offers the hope of reducing its memory
+footprint considerably.
+<p>
+The eventual plan is to replace <tt>struct page</tt> with an eight-byte
+memory descriptor; it can be thought of as a pointer to a type-specific
+structure describing the memory in question, though the real story is a bit
+more complex.  For memory that is organized into folios, the <tt>folio</tt>
+structure will be the descriptor.  Unlike <tt>page</tt> structures, though,
+there would only need to be a single <tt>folio</tt> structure regardless of
+how many pages the folio holds.  There would still need to be a descriptor
+entry for each PFN, but the entries in the memory map for the base pages
+that make up a single folio would all point to a single <tt>folio</tt>
+structure.  There will be other descriptor types for other memory uses,
+including <a href="/Articles/871982/">slab pages</a>, <a
+href="/Articles/937839/">page tables</a>, and so on.  See <a
+href="https://kernelnewbies.org/MatthewWilcox/Memdescs">this page</a> for a
+description of the descriptor types and how they are expected to work.
+<p>
+The memory-descriptor work is underway, and may take years yet to complete.
+This sort of transition in a production kernel can be compared to replacing
+the foundation of building that is in heavy use; it is not a small task.
+But the fundamental rethinking of the memory-management subsystem that was
+kicked off by the introduction of folios is moving quickly and has already
+shown some significant results.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Folios</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/struct page</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1064861/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1069575"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Good article</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2026 18:08 UTC (Fri)
+                               by <b>q3cpma</b> (subscriber, #120859)
+                              [<a href="/Articles/1069575/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="q3cpma" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069575" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for this clearly written recap, I think it's even simple enough to try to get my colleagues to read it!<br>
+<p>
+A relevant question just popped into my mind: do you (or anyone) know how other OSes with a modicum of focus on performance (e.g. Windows, macOS, FreeBSD) approach the problem?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069575/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069578"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Good article</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2026 18:39 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1069578/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069578" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Windows NT has always used a flexible directory of pages, with page frame numbers providing a level of indirection in this directory. So it could manage pages of different size from the very beginning. <br>
+<p>
+Filesystems and apps could use large pages to save on mapping costs, but they were not swappable. Which is a bigger deal in Windows, because it doesn't really support overcommit. If you allocate something, it must be backed by a (theoretically accessible) pagefile. I stopped doing Windows NT kernel work in 2000-s, but I think they have since fixed that.<br>
+<p>
+<a href="https://github.com/ayoubfaouzi/windows-internals/blob/main/windows-internals-6th-ed/chapter-10-memory-management.md">https://github.com/ayoubfaouzi/windows-internals/blob/mai...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069578/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069589"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Good article</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2026 20:52 UTC (Fri)
+                               by <b>q3cpma</b> (subscriber, #120859)
+                              [<a href="/Articles/1069589/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="q3cpma" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069589" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the info. Knowing NT was designed and partly made by VMS people certainly makes sense sometimes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069589/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1069692"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Good article</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2026 12:27 UTC (Sun)
+                               by <b>micka</b> (subscriber, #38720)
+                              [<a href="/Articles/1069692/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="micka" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069692" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Having to use it daily at work, I object to the notion that macos has any kind of focus on performance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069692/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069695"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Good article</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2026 13:29 UTC (Sun)
+                               by <b>q3cpma</b> (subscriber, #120859)
+                              [<a href="/Articles/1069695/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="q3cpma" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069695" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, you and me both, man. I have a M2 Pro at work and that's because it was that or Windows 11. Coming from Gentoo, I learned to tolerate MacPorts and XQuartz enough, haha.<br>
+<p>
+But well, I meant compared to stuff like OpenBSD or Plan 9 that don't have the resources to _try_ to focus on performance. And macOS did manage to switch to APFS where MS fumbled with ReFS...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069695/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1069588"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">History is a little backwards ...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2026 20:57 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1069588/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069588" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The original motivation for all of this work was the effort to support THPs in the page cache (other than shmem).  Kiryl did that work, and I referred to it extensively at the beginning.<br>
+<p>
+<a href="https://lore.kernel.org/linux-fsdevel/20170126115819.58875-1-kirill.shutemov@linux.intel.com/">https://lore.kernel.org/linux-fsdevel/20170126115819.5887...</a><br>
+<p>
+I had argued with Kiryl (as early as 2015, I think) that to be successful, we needed to support arbitrary order pages, not just THP sizes.  When he stopped working on his patches, I took the opportunity to do things the way I thought they should be done.<br>
+<p>
+As I worked on it, I realised that I didn't understand what it meant to pass a struct page pointer to, eg, readpage().  Was it legitimate to pass any page, even a tail page to readpage()?  Or did it have to be a head page?  And what, exactly, did that mean if we did pass a tail page?  Should we fill in the entire compound page, or just the precise page that was requested?  We have only one PageUptodate bit, and it's stored on the head page, so that pointed towards an answer of sorts.<br>
+<p>
+Eventually I couldn't handle the ambiguity any more and decided we needed a new type.  It's every bit as painful as everybody said it would be, but it's offered the opportunity to clean up a lot of code.<br>
+<p>
+For the hyper-interested, you can see my earliest presentation on this (before the name folio had been coined) at Linux Conf AU 2020 here: <a href="https://youtu.be/p5u-vbwu3Fs">https://youtu.be/p5u-vbwu3Fs</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069588/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069750"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PMD? PUD?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2026 9:31 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1069750/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069750" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Pretty clearly written article, it just could use a paragraph introducing the terms PMD and PUD before you use them. I know they are just names for different levels of that 5 level hierarchy you do introduce but it might be good to mention which ones.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069750/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069751"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PMD? PUD?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2026 9:38 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1069751/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069751" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I deliberately left that out because the article was already getting long and, as you say, they are just names for the various levels of the page-table hierarchy.  Adding that PMD = "page middle directory" and PUD = "page upper directory" didn't seem worth the clutter.  And how does one define P4D?
+<p>
+Apologies, though, if that decision reduced the clarity of the article, that certainly wasn't the effect I was after.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069751/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069758"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PMD? PUD?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2026 11:08 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1069758/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069758" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was thinking more along the lines of a sentence that says "The levels of this hierarchy are called..." I agree that the actual abbreviations don't really matter to the context here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069758/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PMD? PUD?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2026 11:20 UTC (Mon)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1069760/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joib" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1069760" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would perhaps, at this point, be clearer to just rename them to P1D, P2D, etc.<br>
+<p>
+That's of course not the fault of the article, whose job is to report on things as they are, not as I might wish them to be.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PMD? PUD?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 28, 2026 18:58 UTC (Tue)
+                               by <b>songmaster</b> (subscriber, #1748)
+                              [<a href="/Articles/1070214/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="songmaster" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1070214" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All my browsers are configured for dark-mode (white text on black) and while reading this I wondered if the address-bit diagrams might have included some black text on a transparent background explaining what the different colored parts were.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1070236"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PMD? PUD?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 29, 2026 2:18 UTC (Wed)
+                               by <b>linusw</b> (subscriber, #40300)
+                              [<a href="/Articles/1070236/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linusw" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1070236" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are detailed explanations in the kernel page table documentation:<br>
+<a href="https://docs.kernel.org/mm/page_tables.html">https://docs.kernel.org/mm/page_tables.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070236/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1073611"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some performance numbers?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2026 7:37 UTC (Wed)
+                               by <b>valloric</b> (subscriber, #125535)
+                              [<a href="/Articles/1073611/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="valloric" />
+                <input type="hidden" name="return" value="/Articles/1064861/#CommAnchor1073611" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a very good article that could have been even better had it included any specifics at all about current or projected performance or memory savings. <br>
+<p>
+At multiple points in the article we are teased with phrases like "has already shown some significant results", but we never see an actual number. I found this very frustrating because I don't see any point to it; show us the numbers! :)<br>
+<p>
+Shame, really.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073611/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

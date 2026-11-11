@@ -1,0 +1,148 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>nopage() and nopfn() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="nopage() and nopfn()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The nopage() address space operation is charged with handling a major page fault within an addr [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/199430/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>nopage() and nopfn()</h1>
+<div class="Byline">[Posted September 20, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+The <tt>nopage()</tt> address space operation is charged with handling a
+major page fault within an address range.  For address spaces backed by
+files, there is a generic <tt>nopage()</tt> method which causes the needed
+page to be read into memory.  Device drivers also occasionally provide
+<tt>nopage()</tt> as part of their implementation of <tt>mmap()</tt>.  In
+the driver case, a page fault is usually handled by finding the <tt>struct
+page</tt> corresponding to a memory-mapped buffer and passing that back to
+the kernel.
+<p>
+There are a couple of errors which can be signaled by <tt>nopage()</tt>:
+<tt>NOPAGE_SIGBUS</tt> for truly bad addresses and 
+<tt>NOPAGE_OOM</tt> for situations where an out-of-memory situation caused
+the attempt to handle the fault to fail.  What is missing is the ability to
+indicate that <tt>nopage()</tt> was interrupted by a signal and the
+operation should be retried.  That is not a situation which normally comes
+up in <tt>nopage()</tt> handlers which, if they must wait, usually do so in
+a non-interruptible manner.  Benjamin Herrenschmidt has run into this
+issue, however, and has <a
+href="http://lwn.net/Articles/199642/">proposed</a> a small change allowing
+a new <tt>NOPAGE_RETRY</tt> value.  The response would be just as one would
+expect - the operation is retried later on, after the signal is handled.
+<p>
+It turns out that Google <a href="/Articles/200215/">has a similar
+patch</a> which it applies internally, though the motivations are
+different.  In Google's case, the patch exists to work around a performance
+problem that has been experienced there.  This patch has not been submitted
+for merging because of <a href="/Articles/200216/">potential denial of
+service problems</a> and the fact that its author considers it to be a bit
+of a hack.
+<p>
+Some form of this patch may well be merged eventually, but some more work
+seems called for first.  The two patches make it clear that there are
+multiple reasons for returning <tt>NOPAGE_RETRY</tt>, so it might make
+sense to make that reason available to the higher levels of the page fault
+handler.  That would allow some potential efficiency problems to be
+addressed, though the DOS scenario still presents potential problems.
+<p>
+
+Meanwhile, one of the longstanding limitations of <tt>nopage()</tt> is that
+it can only handle situations where the relevant physical memory has a
+corresponding <tt>struct page</tt>.  Those structures exist for main
+memory, but they do not exist when the memory is, for example, on a
+peripheral device and mapped into a PCI I/O memory region.  Some
+architectures also do very strange things with special memory and multiple
+views of the same memory.  In such cases, drivers must explicitly map the
+memory into user space with <tt>remap_pfn_range()</tt> instead of using
+<tt>nopage()</tt>.
+
+<p>
+Jes Sorensen has, for some time, been carrying <a
+href="http://lwn.net/Articles/200156/">a patch</a> which adds another
+address space operation called <tt>nopfn()</tt>.  It is called in response
+to page faults only if there is no <tt>nopage()</tt> operation available;
+its job is to return a physical address (in the form of a page frame
+number) for the page which will satisfy the fault.  That address will be
+stored directly into the process's page table, with no <tt>struct page</tt>
+required, and no reference counting performed.  Jes has <a
+href="http://lwn.net/Articles/200199/">an IA-64 special memory driver</a>
+which shows how this operation would be used.
+<p>
+
+The idea has not been universally popular in the past - <a
+href="http://www.gelato.unsw.edu.au/archives/linux-ia64/0603/17557.html">Linus
+has opposed it</a>, as have others.  To some it looks like a needless
+complication of the virtual memory subsystem; these people would rather see
+code use <tt>remap_pfn_range()</tt> or create special <tt>page</tt>
+structures as needed.  There are a number of situations where the
+<tt>nopfn()</tt> is said to work better, however, and the pressures for its
+inclusion do not appear to be going away.  So it will be interesting to see
+whether this one makes it into 2.6.19 or not.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Internal API</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">nopfn()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/200213/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

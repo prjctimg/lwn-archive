@@ -1,0 +1,148 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Network transmit batching [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Network transmit batching">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="At the core of most network drivers is the hard_start_xmit() method, which is called once for e [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/245783/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Network transmit batching</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 22, 2007</br>
+           </div>
+At the core of most network drivers is the <tt>hard_start_xmit()</tt>
+method, which is called once for every packet which is to be transmitted.
+This method will normally acquire locks and insert the packet into the
+adapter's transmit queue.  As a rule, outgoing packets do not accumulate in
+the kernel; they are handed to the driver, one at a time, when they are
+ready to go.  There are times, though, when packets cannot be handed off
+immediately.  If, for example, the hardware transmit queue is currently
+full, the networking subsystem will have to hold on to the packet until
+things clear out.  Once the driver is able to accept packets for the device
+again, the one-at-a-time behavior will resume.
+<p>
+
+The networking developers are always looking for ways to squeeze a little
+more performance from their code.  Krishna Kumar took a look at the
+behavior described above and wondered: why not pass the list of accumulated
+packets to the driver in a single call?  Batching of transmission operations in
+this way has the potential to minimize the cost of locking and device
+preparation overhead, making packet transmission as a whole more
+efficient.  To explore this idea, Krishna has posted a few versions of the
+<a href="http://lwn.net/Articles/246333/">SKB batching patch set</a>.
+<p>
+
+Implementing SKB batching requires a couple of driver API changes - but
+they are small and only required for batching-aware drivers.  The first
+step is to set the <tt>NETIF_F_BATCH_SKBS</tt> bit in the <tt>features</tt>
+field of the <tt>net_device</tt> structure.  That flag tells the network
+stack that the driver can handle batched transmissions.
+<p>
+
+The prototype for <tt>hard_start_xmit()</tt> is:
+<p>
+<pre>
+    int (*hard_start_xmit)(struct sk_buff *skb, struct net_device *dev);
+</pre>
+<p>
+That prototype does not change, but a driver which has indicated that
+batching is acceptable for <tt>dev</tt> may find its
+<tt>hard_start_xmit()</tt> method called with <tt>skb</tt> set to
+<tt>NULL</tt>.  The <tt>NULL</tt> value is an indication that there is a
+batch of packets to transmit; that batch will be found enqueued on the
+(new) list found at <tt>dev-&gt;skb_blist</tt>.  So the (much simplified)
+form of a batching-aware driver's <tt>hard_start_xmit()</tt> function will
+look something like:
+<p>
+<pre>
+    driver_specific_locking_and_setup();
+    if (skb)
+	ret = send_a_packet(internal_dev, skb);
+    else {
+	while ((skb = __skb_dequeue(dev-&gt;skb_blist)) != NULL) {
+	    ret = send_a_packet(internal_dev, skb);
+	    if (ret)
+	        break;
+        }
+    }
+    driver_specific_cleanup();
+</pre>
+<p>
+
+The reality of the situation can be a bit more complicated, especially if
+the driver implements optimizations like suppressing completion interrupts
+until the last packet of the batch has been sent.  But the core of the
+change is as described here - not a whole lot to it.
+<p>
+As of this writing, the networking developers are still trying to determine
+what the performance effects of this patch are.  There is particular
+interest in seeing how batching compares with TCP segmentation offloading,
+which is also, at its core, a transmission batching mechanism.  The proof
+is very much in the benchmarks for a patch like this; if the results are
+good enough, the patch will likely be merged.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Device drivers/Network drivers</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Networking</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/246337/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

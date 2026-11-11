@@ -1,0 +1,542 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Revocable references for transient devices [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Revocable references for transient devices">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Computers were once relatively static devices; if a peripheral was present at boot, it was unli [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1038644/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Revocable references for transient devices</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 22, 2025</br>
+           </div>
+Computers were once relatively static devices; if a peripheral was present
+at boot, it was unlikely to disappear while the system was operating.
+Those days are far behind us, though; devices can come and go at any time,
+often with no notice.  That impermanence can create challenges for kernel
+code, which may not be expecting resources it is managing to make an abrupt
+exit.  The <a
+href="/ml/all/20250912081718.3827390-1-tzungbi@kernel.org">revocable
+resource management patch set</a> from Tzung-Bi Shih is meant to help with
+the creation of more robust — and more secure — kernel subsystems in a
+dynamic world.
+<p>
+Low-level drivers that manage transient devices must be prepared for those
+devices to vanish; there is no way around that.  But those drivers often
+create data structures that are associated with the devices they manage,
+and export those structures to higher-level software.  That creates a
+different sort of problem: the low-level driver knows when it can no longer
+communicate with a departed device, but it can be harder to know when it
+can safely free those data structures.  Higher-level code may hold
+references to those structures for some time after the device disappears;
+freeing them prematurely would expose the kernel to use-after-free bugs and
+the exploits that are likely to follow.
+<p>
+Shih's patch set addresses this problem by turning those problematic
+references into a form of weak reference.  The holder of such a reference
+must validate it prior to each use, and access to the resource can be
+revoked at (almost) any time.  When used correctly, this API is meant to
+ensure that resources stay around as long as users exist, and to let the
+provider of those resources know when they can be safely freed.
+<!-- middle-ad -->
+<p>
+Consider an entirely made-up example of a serial-port device that can come
+and go at the user's whim.  When one of these devices is discovered, the
+driver will create a structure describing it that can be used by higher
+levels of software.  An example user of this structure could be the <a
+href="https://en.wikipedia.org/wiki/Serial_Line_Internet_Protocol">SLIP</a>
+network-interface driver, which many Linux users happily forgot about
+decades ago, but which still exists and is useful to, for example,
+communicate with your <a
+href="https://bogdanthegeek.github.io/blog/projects/vapeserver/">vape-powered
+web server</a>.  The serial and SLIP drivers must have some sort of
+agreement regarding when the low-level structures can be accessed, or
+the state of the system will take a turn for the worse.
+<p>
+The resource provider (the low-level driver) starts by creating a
+<tt>revocable_provider</tt> structure for the structure that it will make
+available to higher levels:
+<p>
+<pre>
+    struct revocable_provider *stuff = revocable_provider_alloc(void *res);
+</pre>
+<p>
+The <tt>res</tt> parameter should point to the resource that is being
+managed.  The user of this resource (the higher-level driver), instead,
+should obtain a <tt>revocable</tt> structure with call to:
+<p>
+<pre>
+    struct revocable *revocable_alloc(struct revocable_provider *prov);
+</pre>
+<p>
+In the <a
+href="/ml/all/20250912081718.3827390-6-tzungbi@kernel.org">example code</a>
+provided with the patch set, the resource consumer has direct access to the
+<tt>revocable_provider</tt> structure and makes the call itself.  One could
+also imagine an API where the provider hides that structure and allocates
+the <tt>revocable</tt> structure for the user.
+<p>
+Sooner or later, the user will need access to the underlying resource.  It
+does not have a pointer to that resource, though; it only has the
+<tt>revocable</tt> structure.  To get that pointer, it must make a call to:
+<p>
+<pre>
+    void *revocable_try_access(struct revocable *resource);
+</pre>
+<p>
+In normal operation, where the device still exists, this call will do two
+things: it enters a <a href="/Articles/202847/">sleepable RCU (SRCU)</a>
+read-side critical section, and it returns the pointer that the caller
+needs.  The caller can then use that pointer to access the resource, secure
+in the knowledge that the pointer is valid and will continue to be for the
+duration of the access.  Once the task at hand is complete, the user calls:
+<p>
+<pre>
+    void revocable_release(struct revocable *resource);
+</pre>
+<p>
+That exits the SRCU critical section, and releases the reference to the
+resource; the caller should not retain the pointer to that resource past
+this call.  There is also a convenience macro provided for this pair of
+calls:
+<p>
+<pre>
+    REVOCABLE(struct revocable *resource, void *ptr) {
+    	/*
+	 * "ptr" will point to the resource here.  It may be NULL,
+	 * though, so code must always check.
+	 */
+    }
+</pre>
+<p>
+As the comment above suggests, a call to <tt>revocable_try_access()</tt>
+might return <tt>NULL</tt>, which is an indication that access to the
+resource has been revoked.  Needless to say, the caller must always check
+for that case and respond accordingly.
+<p>
+Revocation happens on the provider side, for example, if the owner of the
+vape unplugs it to put it to its more traditional use.  Once the low-level
+driver becomes aware that the device has evaporated, it revokes access to
+the resource it exported with:
+<p>
+<pre>
+    void revocable_provider_free(struct revocable_provider *stuff);
+</pre>
+<p>
+This call may, of course, race with the activity of users that have
+legitimately obtained a pointer to the resource with
+<tt>revocable_try_access()</tt>; as long as those users are out there, the
+provider cannot free that resource.  To handle this situation,
+<tt>revocable_provider_free()</tt> makes a call to <a
+href="https://docs.kernel.org/core-api/kernel-api.html#c.synchronize_srcu"><tt>synchronize_srcu()</tt></a>,
+which will block for as long as any read-side SRCU critical sections for
+that resource remain active.  Once <tt>revocable_provider_free()</tt>
+returns, the provider knows that no users of the resource remain, so it can
+be safely freed.
+<p>
+This whole interface may seem familiar to those who have been watching the
+effort to enable kernel development in Rust: it is patterned after the <a
+href="https://rust.docs.kernel.org/kernel/revocable/struct.Revocable.html"><tt>Revocable</tt>
+type</a> used there.
+<p>
+The initial response to this work has been mostly positive; Greg
+Kroah-Hartman, for example, <a
+href="/ml/all/2025091224-blaming-untapped-6883@gregkh">said:</a>
+<p>
+<blockquote class="bq">
+	This is, frankly, wonderful work.  Thanks so much for doing this,
+	it's what many of us have been wanting to see for a very long time
+	but none of us got around to actually doing it.
+</blockquote>
+<p>
+Danilo Krummrich, who wrote the Rust <tt>Revocable</tt> implementation, had <a
+href="/ml/all/DCQP9ZJ0DFBO.3O3W57IDYN08I@kernel.org">some more specific
+comments</a>, suggesting changes to the naming and the API.  Shih,
+meanwhile, has <a href="/ml/all/aMWEhqia_jpl12uI@tzungbi-laptop">requested
+a discussion</a> of the work at the Kernel Summit, which will be held this
+December in Tokyo.  This is relatively new work, and it seems likely to
+evolve considerably before it is ready for use in the mainline
+kernel.  Given the potential it has to address the sorts of life-cycle bugs
+that have plagued kernel developers for years, though, it seems almost
+certain that some future form of this API will be adopted.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Device drivers/Support APIs</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Race conditions</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1038523/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1039076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I thought that had a familiar ring to it</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2025 20:57 UTC (Mon)
+                               by <b>fman</b> (subscriber, #121579)
+                              [<a href="/Articles/1039076/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fman" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039076" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Reminds me of the Macintosh toolbox Handle's..<br>
+HLock(h) &amp; HUnlock(h) anyone ..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1039090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cancellations in debugfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 23, 2025 7:23 UTC (Tue)
+                               by <b>benzea</b> (subscriber, #96937)
+                              [<a href="/Articles/1039090/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="benzea" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039090" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That reminds me of the debugfs file removal race conditions we had in cfg80211. To solve those, we added the debugfs_enter_cancellation()/debugfs_leave_cancellation() API. The idea there is to have a callback that permits notifying the user asynchronously that the resource (the debugfs file in this case) is being removed and any outstanding file operation need to be cancelled ASAP.<br>
+<p>
+In the cfg80211 case, the user file operations are handled by queuing a work item that will then hold the wiphy mutex. However, if the debugfs file is removed before it runs, then the work item is simply cancelled so that the file removal can go ahead immediately.<br>
+<p>
+It does not look to me like this API can easily be used for this debugfs use in cfg80211. That is probably fine, but it could still be an interesting usage scenario to look at.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1039608"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2025 18:18 UTC (Thu)
+                               by <b>Alan.Stern</b> (subscriber, #12437)
+                              [<a href="/Articles/1039608/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Alan.Stern" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039608" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In what way are revocable references better than the existing practice of reference-counting using krefs?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039608/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1039665"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2025 11:13 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1039665/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039665" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The difference to krefs is in intention. With krefs, you've got a data structure, and you are expected to keep it alive for as long as you want it, releasing it when you're finally finished with it. Revocable references work slightly differently; you're being given the right to claim a reference to a data structure for a short period of time (one RCU critical section), as long as you release it quickly. Outside the RCU critical section, the data structure can be destroyed, and you will not be able to claim it again.
+<p>So the advantage over krefs is simply that it's clear with a revocable reference that you have to check that the referent still exists every time you enter a critical section that needs access; you can, of course, implement this in an ad-hoc way for every piece of hardware that benefits from this, but it's clearer for reviewers if you implement it once and have a common pattern to reuse.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039665/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1039752"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2025 14:54 UTC (Fri)
+                               by <b>Alan.Stern</b> (subscriber, #12437)
+                              [<a href="/Articles/1039752/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Alan.Stern" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039752" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This sounds more like a disadvantage.  With krefs you _don't_ have to check every time you want to access the data structure, which certainly is easier.  Instead, the owner of the data structure has to tell you (usually by making some sort of unregistration function call, which has to be made anyway) when the hardware is gone.<br>
+<p>
+From your description, it seems like the other main difference is that with revocable references the data structure can usually be deallocated quite soon after the hardware goes away (delayed only by the length of an SRCU read-side critical section), whereas with krefs the data structure has to hang around for as long as anybody keeps a reference to it.  This doesn't sound like a big deal, since the amount of memory used by these data structures tends not to be very large.<br>
+<p>
+Overall my impression is that revocable references are somewhat harder to use than krefs with no compensating advantages.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039752/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1039753"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 27, 2025 7:53 UTC (Sat)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1039753/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039753" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I can't see anything in krefs that requires someone who's done a <tt>kref_get</tt> to register for notification that the underlying hardware is actually gone, nor is there anything that bounds the time between the hardware going away and the <tt>kref_put</tt>. With revocable references, that's implicit in the fact that, once the reference is revoked, you can't get access ever again.
+<p>That, in turn, makes a huge difference at code review time; you literally cannot forget to register with the device driver for notification that the hardware's gone away, because it's implicit in the design of revocable references.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039753/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1039829"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 27, 2025 15:47 UTC (Sat)
+                               by <b>Alan.Stern</b> (subscriber, #12437)
+                              [<a href="/Articles/1039829/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Alan.Stern" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039829" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You are correct that nothing bounds the time interval between device removal and the final kref_put().  As I mentioned above, this should not be considered a problem because the data structures being pinned by the kref generally don't occupy a lot of memory.  (Although I admit there is always the possibility of missing puts causing a memory leak.)<br>
+<p>
+Nevertheless, what you say leaves a strong impression that revocable references are best suited for scenarios other than registration of hot-removable devices.  With removable devices, the subsystem to which the device is registered will keep its reference until the device is unregistered, and it will expect to be able to use the device whenever it wants, up until that time.  It's not that the subsystem registers with the device driver for notifications; it's the other way around: The driver registers and unregisters the device with the subsystem.  This does not pose any problems for code review, because reviewers always expect to see drivers both registering and unregistering their devices -- that is the accepted pattern and a reviewer would definitely notice if it weren't being followed.<br>
+<p>
+All right, given that revocable references aren't well suited for registering removable devices with subsystems, then what are the intended use cases for revocable references?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039829/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1039903"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 29, 2025 9:10 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1039903/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039903" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The use case is where you have something claiming a removable device, like a PPP driver (for example); in other words, where the subsystem registers with the removable device, rather than the normal way round.
+<p>You want the subsystem to stop doing work that depends on the removable device being present as quickly as possible - there is no point spending lots of compute on building a new PPP frame to send, or a new work item to pass across to the GPU, if the underlying hardware is gone. Instead, you want it to error out early and stop wasting time doing things that it's going to submit to a driver that's already deregistered from the subsystem.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039903/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1039948"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 29, 2025 13:55 UTC (Mon)
+                               by <b>Alan.Stern</b> (subscriber, #12437)
+                              [<a href="/Articles/1039948/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Alan.Stern" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1039948" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Okay, that makes sense.  Jon's original article did not draw any distinction between a subsystem claiming a removable device and the device's driver registering with a subsystem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1039948/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1040107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revocable references vs. krefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2025 0:50 UTC (Tue)
+                               by <b>riking</b> (subscriber, #95706)
+                              [<a href="/Articles/1040107/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="riking" />
+                <input type="hidden" name="return" value="/Articles/1038523/#CommAnchor1040107" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of course, for the subsystems that the removable device's driver does register with, it *cannot* process those unregistrations until it is satisfied that its consumers have stopped trying to use the device (now, via struct revokable). Once the SRCU critical section has passed, the subsystem deregistrations can happen.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1040107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

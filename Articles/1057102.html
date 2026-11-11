@@ -1,0 +1,364 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Modernizing swapping: the end of the swap map [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Modernizing swapping: the end of the swap map">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The first installment in this series introduced several data structures in the kernel's swap su [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1057383/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Modernizing swapping: the end of the swap map</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 5, 2026</br>
+           </div>
+<a href="1056405.html">The first installment in this series</a>
+introduced several data structures in the kernel's swap subsystem and
+described work to replace some of those with a new "swap table" structure.
+The work did not stop there, though; there is more modernization of the
+swap subsystem queued for an upcoming development cycle, and even more for
+multiple kernel releases after that.  Once that work is done, the swap
+subsystem will be both simpler and faster than it is now.
+<p>
+The data structures introduced thus far include the swap cluster, which
+represents a 2MB set of swap slots within a swap file, and the new swap
+table, stored within the swap cluster, that tracks the state of each swap
+slot.  The introduction of the swap table allowed the removal of entire
+arrays of <a href="https://docs.kernel.org/core-api/xarray.html">XArray</a>
+structures that were, prior to the 6.18 kernel release, used to track the
+status of individual swap slots within a swap file.  That was not a
+complete list of swap-related data structures, though.  The first article,
+as a way of minimizing the complexity of the picture as much as possible,
+skipped over an important swap-subsystem component: the swap map.
+<p>
+<h4>The swap map</h4>
+<p>
+The time has come to fill in that gap, as the swap map is the core target
+of the ongoing swap-improvement effort.  At first glance, the swap map, as
+found in current kernels, is as simple as data structures get.  There is
+one for each swap device, stored in <a
+href="https://elixir.bootlin.com/linux/v6.19-rc5/source/include/linux/swap.h#L260"><tt>struct
+swap_info_struct</tt></a>, and declared as:
+<p>
+<pre>
+    unsigned char *swap_map;  /* vmalloc'ed array of usage counts */
+</pre>
+<p>
+This field points to an array with one byte for every slot in the swap
+device; the value stored in each byte is the number of references that
+exist to that swap slot.  There will be one reference for every page-table
+entry pointing to that slot, regardless of whether the page assigned to
+that slot is resident in RAM.
+<p>
+Of course, this is the swap code that is being discussed, so there are
+complications, and that some of the bits in the swap-map entries have
+special meaning.  The most significant of those, for the purposes of this
+article, is bit six (<tt>0x40</tt>) of the reference count; it is called
+<tt>SWAP_HAS_CACHE</tt>, and it is used to indicate that a swap slot has a
+page assigned to it.  There can be various windows of time where a swap
+slot is assigned, but no page-table references to that slot yet exist,
+leading to a reference count of zero.  The <tt>SWAP_HAS_CACHE</tt> bit
+distinguishes that state from a slot being unassigned.
+<p>
+This flag is also used as a sort of bit lock; there are numerous race
+conditions that might cause the kernel to try to swap in a page (or make
+other changes) multiple times in parallel.  In such cases, the thread that
+succeeds in setting the <tt>SWAP_HAS_CACHE</tt> bit in the entry is the one
+that proceeds to do the work.  This use of <tt>SWAP_HAS_CACHE</tt> as a
+synchronization mechanism has led to a number of problems over the years;
+the swap code has a number of delay-and-retry loops (<a
+href="https://elixir.bootlin.com/linux/v6.19-rc5/source/mm/swap_state.c#L465">example</a>)
+waiting for this bit to clear.
+
+<p>
+There are some other special values in the swap map; a value of
+<tt>0x3f</tt> (<tt>SWAP_MAP_BAD</tt>) means, for example, that the
+underlying storage is bad and should not be used.  As a result, the maximum
+reference count that can be stored in the swap map (<tt>SWAP_MAP_MAX</tt> —
+<tt>0x3e</tt>) is&nbsp;62.  That presents a problem; in cases where a large
+number of tasks are sharing an anonymous page, the number of references
+could easily exceed that value.  The way this situation is handled is, to
+put it mildly, interesting.
+<p>
+Every time that the reference count for a swap slot is incremented, a check
+must be made for overflow.  Should the count already be at the maximum, the
+topmost bit (<tt>0x80</tt> — <tt>COUNT_CONTINUED</tt>) will be set, the
+count in the swap map will be set to zero, and a new page will be allocated
+to provide eight more-significant bits for the reference count (and for all
+the others on the same original swap-map page).  That page
+will be linked to the swap-map page using the LRU list head in the
+associated <a
+href="https://elixir.bootlin.com/linux/v6.19-rc5/source/include/linux/mm_types.h#L42"><tt>page</tt>
+structures</a>.  If an entry has a lot of references and the count in the
+overflow page also overflows, yet another page will be allocated and added
+to the list.
+<p>
+The overflow pages only need to be accessed when the principal swap-map
+entry overflows or underflows, which is good considering that these
+operations are supposed to be fast.  While the motivation behind this
+somewhat baroque design isn't documented anywhere, one can assume that,
+while the overflow case must be handled correctly, it is also relatively
+rare.  Massive sharing of anonymous pages is not the common case.  When
+reference counts are lower, this structure offers quick access and minimal
+memory overhead.
+<p>
+<h4>Swap-cache bypass and <tt>SWAP_HAS_CACHE</tt></h4>
+<p>
+One of the purposes of the swap cache is to hold (and track) folios that
+are under I/O to or from the swap device.  If, for example, a page fault
+occurs on a swapped-out folio, a new folio will have to be allocated and
+its contents read from the swap file.  That read operation can take some
+time, though.  So the folio is added to the swap cache, the read operation
+is initiated, and the faulting process made to wait until the read is
+complete.  Often, the swap subsystem will also attempt to read ahead of the
+current fault location, making a bet that the process will soon fault in
+subsequent pages as well.
+<p>
+The situation changed a bit in the 2018 4.15 release, though.  Once upon a
+time, swapping was mostly done to rotating storage devices, which are slow.
+Increasingly, though, swapping looks a lot like just copying data from one
+part of memory to another.  The "swap device" may be a bank of slower
+memory, or it may be an in-memory compression scheme like <a
+href="https://docs.kernel.org/admin-guide/blockdev/zram.html">zram</a>.  On
+such devices, swap I/O is no longer slow, and behavior like readahead may
+harm performance rather than helping it.
+<p>
+In 4.15, Minchan Kim added the "swap bypass" feature.  Specifically, if a
+swap device has the <tt>SWP_SYNCHRONOUS_IO</tt> flag (indicating that the
+device is so fast that I/O should be done synchronously) set, and if a
+specific slot in the swap map has a reference count of one, then a request
+to swap in the page stored in that slot will happen synchronously,
+readahead will not be performed, and the newly read page will not be added
+to the swap cache.  This optimization added a fair amount of complexity to
+the swap subsystem, resulting in various bugs over time, but it also
+resulted in significantly better performance for swap-heavy workloads.
+That improvement was due to two factors: avoiding the relatively expensive
+swap-cache maintenance and preventing the use of readahead.
+<p>
+Fast-forwarding now to 2026, first part of the <a
+href="/ml/all/20251220-swap-table-p2-v5-0-8862a265a033@tencent.com">phase-two
+patch series</a> from Kairui Song is dedicated to removing the bypass
+feature.  The work done in the first phase — specifically the introduction
+of the swap table — made swap-cache operations much faster, to the point
+that there is no real value to bypassing the swap-cache even when fast swap
+devices are in use.  Additional work in this series separates out the
+control of readahead and essentially disables its use entirely
+for fast devices.  Having all swap I/O go through the swap cache simplifies
+the code and reduces the number of troublesome race conditions.  The new
+code will immediately remove swapped-in folios from the swap cache for
+<tt>SWP_SYNCHRONOUS_IO</tt> devices as a way of freeing the memory used for
+the swapped data.
+<p>
+There is one interesting side effect of removing the swap-bypass code.  In
+current kernels, large (multi-page) folios can only be swapped in intact if
+their reference count is one — only in the bypass case, in other words.
+Removal of the bypass feature makes it possible to swap in large folios
+from fast devices regardless of the reference count.
+<p>
+Removal of swap bypass simplifies the swap-map management and makes it
+easier for the rest of the series to <a
+href="/ml/all/20251220-swap-table-p2-v5-14-8862a265a033@tencent.com">coalesce
+swap-slot management</a> into a small set of well-defined functions.  Among
+other things, these functions are all folio-based, reducing the historical
+page orientation of the swap subsystem.  All of those functions use a
+combination of the cluster lock and the folio lock to manage the swap
+cache.  From there, it is just one more step to use those locks to control
+access to the swap map as well.
+<p>
+Once the swap cache takes on the role of managing concurrency, there is
+only one last need for the <tt>SWAP_HAS_CACHE</tt> bit: marking swap slots
+that are allocated, but which have a reference count of zero.  On the
+swap-out side, this situation is eliminated by immediately adding a folio
+to the swap cache once its slot has been assigned.  At the other end, when
+pages are removed from the swap cache, swap slots with zero references are 
+freed immediately.  At that point, <tt>SWAP_HAS_CACHE</tt> is no longer
+needed; <a
+href="/ml/all/20251220-swap-table-p2-v5-18-8862a265a033@tencent.com">this
+patch</a> near the end of the series removes it.
+<p>
+<h4>Removing the swap map</h4>
+<P>
+The work described above is, as of this writing, in the mm-unstable
+repository (and thus linux-next) and could be merged into the mainline as
+soon as the 7.0 release.  But there is more to come.  The <a
+href="/ml/all/20260128-swap-table-p3-v2-0-fe0b67ef0215@tencent.com">third
+phase of this</a> work is currently under review; this relatively short
+series eliminates the swap map entirely.
+<p>
+Recall, from the previous installment, that the entries in the new swap
+table, which are simple <tt>unsigned long</tt> values, were the same as
+those stored in the XArray data structures in previous kernels.  A value of
+zero indicates an empty slot.  For a resident folio, the entry contains the
+folio address; for swapped folios, the entry contains the shadow
+information used to track which pages are quickly faulted back in from
+swap.  The third phase changes the format of this table to support five
+different types of entries:
+<p>
+<ul class="spacylist">
+<li> A value of zero still indicates an empty slot.
+<li> If bit zero is set, then this is a shadow entry for a swapped-out
+     folio, but the upper part of the entry holds the reference count for
+     this entry.  The specific number of bits available for this count will
+     vary depending on the architecture.
+<li> If the bottom two bits are <tt>10</tt>, then the entry is for a folio
+     that is resident in memory.  As with shadow entries, the uppermost
+     bits hold the reference count.  To make room for that count, the
+     page-frame number of the underlying page is stored rather than its
+     address.
+<li> A "pointer" entry is marked by setting the bottom three bits to
+     <tt>100</tt>; pointers are not used in the current series.
+<li> Setting the bottom four bits to <tt>1000</tt> marks a bad slot that
+     should not be used.
+</ul>
+<p>
+This organization takes the final remaining purpose for the swap map —
+tracking the reference counts — and shoehorns it into the swap table; that
+allows the swap map to be removed altogether.  The result is a more compact
+memory representation and some significant memory savings; Song estimates
+that about 30% of the swap subsystem's metadata overhead is gone, saving
+256MB of memory for a 1TB swap file.  Until now, the kernel has maintained
+the swap map (tracking the status of slots in a swap file) and the swap
+cache (which tracks the pages that have been placed into swap) separately.
+The unification of those two data structures, Song says, reduces the amount
+of record-keeping overhead significantly, speeding the swap system overall.
+<p>
+The new format can keep a larger reference count than the swap map can.
+For example, x86_64 systems will need 40&nbsp;bits to hold the page-frame
+number, plus two for the resident-folio marker; that leaves 22&nbsp;bits
+for the reference count.  That size will be smaller on some other
+architectures (especially 32-bit systems) and, in any case, the possibility
+of overflow still exists.  The complex system used to handle
+reference-count overflow in current kernels has been removed, though.
+Instead, if a reference count overflows, an array of <tt>unsigned long</tt>
+counts will be allocated for the entire cluster.
+<p>
+The third phase is in its second revision.  Thus far, neither version has
+received much in the way of review comments; that suggests that the removal
+of the swap map is not yet imminent.  Even once this happens, though, the
+work is not done; Song has alluded to a later phase that will integrate the
+swapping limits from the memory controller into the swap table as well.  So,
+just like the rest of the kernel, the swap subsystem is unlikely to be
+considered complete anytime soon.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Swapping</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1057102/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1057446"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Very good series</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2026 22:55 UTC (Thu)
+                               by <b>Poliorcetics</b> (subscriber, #165001)
+                              [<a href="/Articles/1057446/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Poliorcetics" />
+                <input type="hidden" name="return" value="/Articles/1057102/#CommAnchor1057446" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I’m impressed by the work done in the patch series but also in the LWN articles explaining them, it really made a very complex refactor easier to understand, thanks a lot for it<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057446/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1058569"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Very good series</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2026 3:14 UTC (Fri)
+                               by <b>thomasjkenney</b> (guest, #182325)
+                              [<a href="/Articles/1058569/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="thomasjkenney" />
+                <input type="hidden" name="return" value="/Articles/1057102/#CommAnchor1058569" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I second!  This is my first day of subscription, and I already feel like I've got the better deal.  In another universe, I did some device driver work for VMS, and this stuff is bringing back fond memories.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1058569/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

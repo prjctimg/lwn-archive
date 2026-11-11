@@ -1,0 +1,173 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Task watchers [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Task watchers">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the more complicated core kernel functions is copy_process(), in kernel/fork.c.  This ro [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/207112/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Task watchers</h1>
+<div class="Byline">[Posted November 7, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+One of the more complicated core kernel functions is
+<tt>copy_process()</tt>, in <tt>kernel/fork.c</tt>.  This routine
+is the heart of the <tt>fork()</tt> and <tt>clone()</tt> system calls; it
+must create a 
+coherent copy of a running process, bearing in mind the various clone flags
+which are present.  There are sixteen different <tt>goto</tt> labels for
+error exits.  This is clearly a place where a lot of things can go wrong.
+<p>
+It is also an operation of interest to many other kernel subsystems.  A look
+at <tt>copy_process()</tt> reveals hooks for task delay accounting, auditing,
+the process fork connector, SYSV semaphore undo information management,
+NUMA memory policy enforcement, cpuset maintenance, keyring management, and
+more.  Many of these subsystems want to know about other events in the
+process lifecycle as well, with the result that hooks are placed all over
+the process code.  It might just be nice to have a cleaner solution to the
+problem of learning about process-related events.
+<p>
+
+That cleaner solution would appear to be present in the form of Matt
+Helsley's <a href="http://lwn.net/Articles/207873/">task watchers patch
+set</a>, currently in its second major iteration.  This patch takes an
+interesting approach to providing what is essentially just another notifier
+interface in order to minimize overhead in a performance-critical part of
+the kernel.
+<p>
+
+In this patch, a "task watcher" is a function which is notified whenever an
+interesting process event takes place.  Watchers have this prototype:
+<p>
+<pre>
+    int my_watcher(unsigned long info, struct task_struct *tsk);
+</pre>
+<p>
+When the watcher function is called, <tt>info</tt> will have additional
+information for the specific event, and <tt>tsk</tt> points to the
+process generating the event.  Arranging for a task watcher to be called is
+a simple matter of adding a declaration like the following:
+<p>
+<pre>
+    task_watcher_func(event, function);
+</pre>
+<p>
+Where <tt>event</tt> is the event of interest, and <tt>function</tt> is the
+task watcher function to be called in response to that event.  The possible
+events are:
+<p>
+<ul>
+<li> <tt>init</tt>: a process is first created; <tt>info</tt> is the set of
+flags passed to <tt>clone()</tt>.
+<p>
+<li> <tt>clone</tt>: a process forks; <tt>info</tt> is the set of
+<tt>clone()</tt> flags.  Note that this watcher appears to be called with
+the child process; it differs from <tt>init</tt> in that it is called
+toward the end of <tt>copy_process()</tt>, when creation of the new process
+is complete.
+<p>
+<li> <tt>exec</tt>: a process executes a new program; <tt>info</tt> is
+zero. 
+<p>
+<li> <tt>uid</tt>: a process changes its real or effective UID;
+<tt>info</tt> is zero.
+<p>
+<li> <tt>gid</tt>: a process changes its real or effective GID;
+<tt>info</tt> is zero.
+<p>
+<li> <tt>exit</tt>: a process dies; <tt>info</tt> is the exit code.
+<p>
+<li> <tt>free</tt>: a process's task structure is being freed;
+<tt>info</tt> is the exit code.
+</ul>
+<p>
+The <tt>task_watcher_func()</tt> macro creates a pointer to the watcher
+function in a special ELF section.  There is a separate section for each
+watched-for event; when such an event is signaled, the watcher code simply
+iterates through each function found in the relevant executable section.
+There are a couple of implications resulting from this mechanism: task
+watchers exist for the life of the system (they cannot be registered and
+unregistered), and they cannot be located in loadable modules (though this
+restriction will eventually go away).
+<p>
+One might well wonder why things were done this way, rather than using a
+simple notifier list.  Your editor wondered, and asked Mr. Helsley about
+it.  The problem is that process creation is a performance-critical part of
+the kernel, and any change which increases process fork time tends to get a
+lot of scrutiny.  Fork times are measured by a number of benchmarks; quick
+process creation is also important in fork-heavy loads.  Since kernel
+compilation can require a lot of forks, there is an especially strong
+incentive to keep it fast.
+<p>
+If a notifier list is used with watchers, some sort of locking is required
+to keep that list from being corrupted when watchers come and go.  The
+separate ELF sections, instead, are read-only structures created at kernel
+build time.  So they impose less overhead on the process lifecycle and,
+thus, are less likely to bother kernel developers who, perhaps, are not
+really interested in the watcher functionality.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Notifiers</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Task watchers</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/208117/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

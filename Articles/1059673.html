@@ -1,0 +1,472 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>As ye clone(), so shall ye AUTOREAP [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="As ye clone(), so shall ye AUTOREAP">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The facilities provided by the kernel for the management of processes have evolved considerably [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1059502/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>As ye clone(), so shall ye AUTOREAP</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 24, 2026</br>
+           </div>
+The facilities provided by the kernel for the management of processes have
+evolved considerably in the last few years, driven mostly by the advent of
+the <a href="../Kernel/Index/index.html">pidfd API</a>.  A pidfd is a file
+descriptor that refers to a process; unlike a process ID, a pidfd is an
+unambiguous handle for a process; that makes it a safer, more deterministic
+way of operating on processes.  Christian Brauner, who has driven much of
+the pidfd-related work, is <a
+href="/ml/all/20260223-work-pidfs-autoreap-v4-0-e393c08c09d1@kernel.org">proposing
+two new flags</a> for the <a
+href="https://man7.org/linux/man-pages/man2/clone.2.html"><tt>clone3()</tt></a>
+system call, one of which changes the kernel's security model in a
+somewhat controversial way.
+<p>
+The existing <tt>CLONE_PIDFD</tt> flag was added (by Brauner) for the 5.2
+kernel release; it causes <tt>clone3()</tt> to create and return a pidfd
+for the newly created process (or thread).  That gives the parent process a
+handle on its child from the outset.  This pidfd can be used to, among
+other things, detect when the child has exited and obtain its exit status.
+<p>
+The classic Unix way of obtaining exit-status information, though, is with
+one of the <a
+href="https://www.man7.org/linux/man-pages/man2/waitpid.2.html"><tt>wait()</tt></a>
+family of system calls.  When a process exits, it will go into the "zombie"
+state until its parent calls a form of <tt>wait()</tt> to reap the zombie's
+exit information and clean up the process entry itself.  If a parent
+creates a lot of children and fails to reap them, it will fill the system
+with zombie processes — a classic beginner's process-management mistake.
+Even if the parent does not care about what happens to its children after
+they are created, it normally needs to carefully clean up
+after those children when they exit.
+<p>
+There are ways of getting out of that duty.  The kernel will send a
+<tt>SIGCHLD</tt> signal to the parent of an exited process, but that signal
+is normally ignored.  If the parent <i>explicitly</i> sets that signal to
+<tt>SIG_IGN</tt>, though, its children will be automatically cleaned up
+without bothering the parent.  This setting applies to all children,
+though; if a parent does care about some of them, it cannot use this
+approach.  Among other things, that means that library code that creates
+child processes cannot make the cleanup problem go away by setting
+<tt>SIGCHLD</tt> to <tt>SIG_IGN</tt> without creating problems for the rest
+of the program.
+<p>
+One of the new flags that Brauner is proposing is <tt>CLONE_AUTOREAP</tt>,
+which would cause the newly created process to be automatically cleaned up
+once it exits.  There would be no need (or ability) to do so with
+<tt>wait()</tt>, and no <tt>SIGCHLD</tt> signal sent.  The flag applies
+only to the just-created process, so it does not affect process management
+elsewhere in the program.  It also is not inherited by grandchild
+processes.  If the child is created with <tt>CLONE_PIDFD</tt> as well, the
+resulting pidfd <i>can</i> be used to obtain the exit status without the
+need to explicitly reap the child.  Otherwise, that status will be
+unavailable; as Brauner noted, this mode "<q>provides a fire-and-forget
+pattern</q>".
+<p>
+The <tt>CLONE_AUTOREAP</tt> flag seems useful and uncontroversial.  The
+other proposed flag, <tt>CLONE_PIDFD_AUTOKILL</tt>, may also be useful, but
+it has raised some eyebrows.  This flag ties the life of the new process to
+the pidfd that represents it; if that pidfd is closed, the child will be
+immediately and unceremoniously killed with a <tt>SIGKILL</tt> signal.  The
+use of <tt>CLONE_PIDFD</tt> is required with <tt>CLONE_PIDFD_AUTOKILL</tt>;
+otherwise, the pidfd that keeps the child alive would never exist in the
+first place.  <tt>CLONE_PIDFD_AUTOKILL</tt> also requires
+<tt>CLONE_AUTOREAP</tt>, since it is likely to be enforced when the
+parent process exits and can no longer clean up after its children.
+<p>
+The intended use case for this feature is "<q>container runtimes, service
+managers, and sandboxed subprocess execution - any scenario where the child
+must die if the parent crashes or abandons the pidfd</q>".  In other words,
+this flag is meant to be used in cases where processes are created under
+the supervision of other processes, and they should not be allowed to keep
+on running if the supervisor goes away.
+<p>
+Linus Torvalds quickly <a
+href="/ml/all/CAHk-=wj80zwxy=5jp5SAi64cqCZgRjY1cRokVuDPd9_t3XMvUw@mail.gmail.com">pointed
+out</a> a potential problem after seeing <a
+href="/ml/all/20260217-work-pidfs-autoreap-v3-0-33a403c20111@kernel.org">version&nbsp;3
+of the patch series</a>: this feature would allow the killing of setuid
+processes that the creator would otherwise not have the ability to affect.
+A suitably timed kill might interrupt a privileged program in the middle of
+a sensitive operation, leaving the system in an inconsistent (and perhaps
+exploitable) state.  "<q>If I'm right</q>", Torvalds said, "<q>this is
+completely broken. Please explain.</q>".  Brauner <a
+href="/ml/all/20260218-wonach-kampieren-adfca0940b45@brauner">responded</a>
+that he was aware that he was proposing a significant change to how the
+kernel's security model works, but was insistent that this capability is
+needed; he wanted a discussion on how it could be safely implemented:
+<p>
+<blockquote class="bq">
+	My ideal model for kill-on-close is to just ruthlessly enforce that
+	the kernel murders anything once the file is released. I would
+	value input under what circumstances we could make this work
+	without having the kernel magically unset it under magical
+	circumstances that are completely opaque to userspace.
+</blockquote>
+<p>
+Jann Horn <a
+href="/ml/all/CAG48ez2YiL7RZ1fm9vwOCDGr9OsDrCHrCmkyRRoGRMWUZjyyBg@mail.gmail.com">questioned</a>
+whether this change was actually problematic.  There are various ways to
+kill setuid processes now, he said, including the use of <tt>SIGHUP</tt>
+signals or certain systemd configurations.  "<q>I agree that this would be
+a change to the security model, but I'm not sure if it would be that big a
+change.</q>" He suggested that, if this change <i>is</i> worrisome, it
+could be restricted to situations where <a
+href="https://docs.kernel.org/userspace-api/no_new_privs.html">the "no new
+privileges" flag</a> has been set; that is how access to <a
+href="https://man7.org/linux/man-pages/man2/seccomp.2.html"><tt>seccomp()</tt></a>
+is regulated now.  Brauner <a
+href="/ml/all/20260218-festhalle-rohstoff-8b1a92750c1c@brauner">indicated</a>
+that this option might be workable, and the current version of the series
+(version&nbsp;4 as of this writing) automatically sets "no new privileges"
+in the newly created child when <tt>CLONE_PIDFD_AUTOKILL</tt> is used.
+<p>
+Meanwhile, Ted Ts'o <a
+href="/ml/all/20260218132954.GA45984@macsyma-wired.lan">suggested</a> that,
+rather than killing the child with <tt>SIGKILL</tt>, the kernel could
+instead send a sequence of signals, starting with <tt>SIGHUP</tt>, then
+going to <tt>SIGTERM</tt>, with a delay between them.  That would give a
+setuid program the ability to catch the signal and clean up properly before
+exiting.  Only if the target process doesn't take the hint would
+<tt>SIGKILL</tt> be sent.  Even then, he was not convinced that this
+feature could be made secure: "<q>I bet we'll still see some zero days coming
+out of this, but we can at least mitigate likelihood of security
+breach.</q>"
+<p>
+Brauner did not respond to that last suggestion, and the conversation wound
+down, relatively quickly, without any definitive conclusions having been
+reached.  There is clearly a bit of tension between the need for
+supervisors to have complete control over the applications they manage and
+the need to keep existing security boundaries intact.  Whether that tension
+is enough to keep relatively new process-management approaches from being
+implemented remains to be seen.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">pidfd</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.1</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">System calls/clone()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1059673/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1060055"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Similar to PR_SET_PDEATHSIG</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2026 16:59 UTC (Tue)
+                               by <b>ayosec</b> (subscriber, #111918)
+                              [<a href="/Articles/1060055/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ayosec" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1060055" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      This seems to be very similar to <code>prctl(PR_SET_PDEATHSIG, ...)</code>. I was
+curious about the differences, and I found this in one of the messages:
+
+<pre>This is a deliberate departure from the pdeath_signal model which is
+reset during secureexec and commit_creds() rendering it useless for
+container runtimes that need to deprivilege themselves. Setting
+no_new_privs on the child avoids the need for any such magical resets:
+the kill-on-close contract is absolute.</pre>
+
+Wouldn't it be easier to extend the functionality that is already present in
+<code>prctl</code>? Like <code>PR_SET_NONRESETTABLE_PDEATHSIG</code> (or something like that).
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060055/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Similar to PR_SET_PDEATHSIG</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2026 17:02 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1060059/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1060059" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I made the choice to leave the death-signal details out to keep the article focused, perhaps that was a mistake.
+<p>
+I think part of the desire is to have the flag set from the beginning of the process's life, rather than being something that the child has to enable once it's running.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1060099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">setuid which relies on cleanup broken anyway?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 5:27 UTC (Wed)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1060099/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1060099" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      A setuid programs which leaves the system in a bad state when killed is broken anyway. It might be killed from a oom-killer, from an actual oom during stack expansion, from the service manager when the user session terminates and under several other conditions.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060116"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">setuid which relies on cleanup broken anyway?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 9:45 UTC (Wed)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1060116/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1060116" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;A setuid programs which leaves the system in a bad state when killed is broken anyway.</span><br>
+<p>
+I totally agree but I also agree with the kernel devs that don't want to expose an issue that was not easy to trigger.<br>
+<p>
+<span class="QuotedText">&gt;It might be killed from a oom-killer</span><br>
+<p>
+The chances that it kill the setuid process before the parent and the parent can use this situation seems very low.<br>
+<p>
+<span class="QuotedText">&gt;from the service manager when the user session terminates</span><br>
+<p>
+This will first send a sigterm before a sigkill so not exactly the same condition. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060116/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060193"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">setuid which relies on cleanup broken anyway?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 15:00 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1060193/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1060193" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can definitely understand the potential security implications, but also, as awesome as no-new-privs is, you have to design a container to work with it, and whole-OS containers won't necessarily work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060193/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1060510"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">setuid which relies on cleanup broken anyway?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2026 6:40 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1060510/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1060510" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah. Banning a useful feature over a hypothetical security vulnerability involving a scenario possible to achieve through other means is the wrong call, and the attitude driving this call is a big part of why the Linux API is so fragmented and irregular.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060510/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1060446"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CLONE_NNP in the latest version</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2026 15:40 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1060446/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1060446" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      For those who are following this work: there is <a href="https://lwn.net/ml/all/20260226-work-pidfs-autoreap-v5-0-d148b984a989@kernel.org">a new version of the series</a> that separates the "no new privileges" setting into a separate <tt>CLONE_NNP</tt> flag.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060446/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1061078"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AUTOREAP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 3, 2026 16:16 UTC (Tue)
+                               by <b>MrWim</b> (subscriber, #47432)
+                              [<a href="/Articles/1061078/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MrWim" />
+                <input type="hidden" name="return" value="/Articles/1059673/#CommAnchor1061078" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Very excited by this. We're getting to the point where libraries can manage the lifecycle of their subprocesses much like they can with memory. I find dealing with subprocesses with the current APIs such a pain in the arse as it requires process-global coordination.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061078/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

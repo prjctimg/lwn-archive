@@ -1,0 +1,146 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improving (or removing) the kthread freezer [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Improving (or removing) the kthread freezer">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The process freezer (or just 'freezer') holds processes in a suspended state; it is used, for e [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/662628/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improving (or removing) the kthread freezer</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 2, 2015</br>
+           <hr>
+<a href="/Articles/KernelSummit2015/">2015 Kernel Summit</a>
+</div>
+The process freezer (or just "freezer") holds processes in a suspended
+state; it is used, for example, when suspending or hibernating the system.
+Jiri Kosina started his 2015 Kernel Summit session by noting that he had
+thought he could use the freezer for live patching as well.  But, in the
+process of making that work, he found out that the semantics of the freezer
+are not particularly well defined; there is no definition of what it means
+for a process to be "frozen."  As a result, the implementation of frozen
+behavior varies and, in the case of a number of kernel threads
+("kthreads"), things are broken entirely.
+<p>
+The original purpose of the freezer was to get processes out of the way so
+that the system could be suspended and to ensure that no unwanted I/O
+activity causes filesystem corruption.  The freezer also prevents user
+space from taking kernel locks.  Kernel threads, being processes, also are
+
+<a href="/Articles/662704/"><img
+src="../_static/images/conf/2015/klf-ks/JiriKosina-sm.jpg" width=250 height=312
+alt="[Jiri Kosina]" title="Jiri Kosina" border=0 hspace=3 vspace=3
+align="right"></a> 
+
+subject to freezing unless they have the special <tt>PF_NOFREEZE</tt> flag
+set.  A freezable kthread that fails to freeze when requested can block the
+system from suspending or hibernating.
+<p>
+One of the first things Jiri noticed was that kthreads will call
+<tt>try_to_freeze()</tt> (an indication that this would be a good time to
+freeze the thread if needed) without having first called
+<tt>set_freezable()</tt> (which clears the <tt>PF_NOFREEZE</tt> flag).
+Such threads can never be frozen, so the <tt>try_to_freeze()</tt> call will
+always fail.  That suggested to him that the freezer for kthreads is
+overused and unneeded.  Some kthreads (those that participate in the I/O
+needed to suspend or hibernate the system) cannot be frozen anyway.  For
+the rest, the important part is to get them to the point where they
+schedule, and that is happening anyway without <tt>try_to_freeze()</tt>.
+<p>
+Jiri said that the arguments for freezing kernel threads do not hold much
+water when examined.  There are some fears that a kthread could hold a lock
+and deadlock the hibernation process; if that were true, he said, it would
+deadlock the system anyway.  The other reason to freeze kthreads is to
+prevent them from initiating I/O, but it is, in fact, important for kthread
+I/O to succeed while the system is changing state.  So, rather than
+worrying about freezing kthreads, Jiri suggested, why not just
+restrict the freezer to user-space processes?  It is unclear why the
+freezer even exists for kthreads; it appears to serve no purpose and is
+easy to get wrong.
+<p>
+An alternative idea, Jiri said, would be to annotate I/O that is needed for
+the suspend or hibernate process to complete.  Only specially marked
+requests would be allowed through; the rest would be blocked until the
+system is resumed.  But, he said, this approach seems complex, fragile, and
+just as error-prone as what's there now.
+<p>
+The best solution, he said, might be to get rid of the kthread freezer entirely.
+Its main reason for existing is to ensure that filesystems do not get
+corrupted when the system suspends and resumes (or fails to resume).  That
+could be just as easily accomplished by freezing the filesystems
+instead.  The virtual filesystem layer already has support for freezing
+filesystems, and the freeze operation ensures that the filesystems are
+consistent on disk.  Freezing filesystems would also have the advantage of
+preventing bootloaders from trying to replay the journal — something that
+overly clever bootloaders evidently do — because there would be no journal
+to replay.
+<p>
+There was a quick consensus in the room that abolishing the freezer looked
+like the right way to go.  Thus, chances are, we'll see patches toward that
+goal in a future development cycle.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Kernel threads</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Kernel Summit/2015</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/662703/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

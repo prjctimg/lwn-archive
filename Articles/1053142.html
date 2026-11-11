@@ -1,0 +1,1027 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>READ_ONCE(), WRITE_ONCE(), but not for Rust [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="READ_ONCE(), WRITE_ONCE(), but not for Rust">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The READ_ONCE() and WRITE_ONCE() macros are heavily used within the kernel; there are nearly 8, [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1053202/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>READ_ONCE(), WRITE_ONCE(), but not for Rust</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 9, 2026</br>
+           </div>
+The <tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt> macros are heavily used
+within the kernel; there are nearly 8,000 call sites for
+<tt>READ_ONCE()</tt>.  They are key to the implementation of many <a
+href="/Articles/844224/">lockless algorithms</a> and can be necessary for some
+types of device-memory access.  So one might think that, as the
+amount of Rust code in the kernel increases, there would be a place for
+Rust versions of these macros as well.  The truth of the matter, though, is
+that the Rust community seems to want to take a different approach to
+concurrent data access.
+<p>
+An understanding of <tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt> is
+important for kernel developers who will be dealing with any sort of
+concurrent access to data.  So, naturally, they are almost entirely absent
+from the kernel's documentation.  A description of sorts can be found at
+the top of <a
+href="https://elixir.bootlin.com/linux/v6.18.3/source/include/asm-generic/rwonce.h"><tt>include/asm-generic/rwonce.h</tt></a>:
+<p>
+<blockquote class="bq">
+	Prevent the compiler from merging or refetching reads or
+ 	writes. The compiler is also forbidden from reordering successive
+ 	instances of READ_ONCE and WRITE_ONCE, but only when the compiler
+ 	is aware of some particular ordering. One way to make the compiler
+ 	aware of ordering is to put the two invocations of READ_ONCE or
+ 	WRITE_ONCE in different C statements.
+</blockquote>
+<p>
+In other words, a <tt>READ_ONCE()</tt> call will force the compiler to read
+from the indicated location exactly one time, with no optimization tricks
+that would cause the read to be either elided or repeated;
+<tt>WRITE_ONCE()</tt> will force a write under those terms.  They will also
+ensure that the access is atomic; if one task reads a location with
+<tt>READ_ONCE()</tt> while another is writing that location, the read will
+return the value as it existed either before or after the write, but not
+some random combination of the two.  These macros, other than as described
+above, impose no ordering constraints on the compiler or the CPU, making
+them different from macros like <tt>smp_load_acquire()</tt>, which have
+stronger ordering requirements.
+<p>
+The <tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt> macros were <a
+href="https://git.kernel.org/linus/230fa253df635">added for the 3.18
+release</a> in 2014.  <tt>WRITE_ONCE()</tt> was initially called
+<tt>ASSIGN_ONCE()</tt>, but that name was <a
+href="https://git.kernel.org/linus/43239cbe79fc3">changed</a> during the
+3.19 development cycle.
+<p>
+On the last day of 2025, Alice Ryhl posted <a
+href="/ml/all/20251231-rwonce-v1-0-702a10b85278@google.com">a patch
+series</a> adding implementations of <tt>READ_ONCE()</tt> and
+<tt>WRITE_ONCE()</tt> for Rust.  There are places in the code, she said,
+where volatile reads could be replaced with these calls, once they were
+available; among other changes, the series <a
+href="/ml/all/20251231-rwonce-v1-5-702a10b85278@google.com">changed access
+to the <tt>struct file</tt> <tt>f_flags</tt> field</a> to use
+<tt>READ_ONCE()</tt>.  The <a
+href="/ml/all/20251231-rwonce-v1-2-702a10b85278@google.com">implementation</a>
+of these macros involves a bunch of Rust macro magic, but in the end they come
+down to calls to the Rust <a
+href="https://doc.rust-lang.org/std/ptr/fn.read_volatile.html"><tt>read_volatile()</tt></a>
+and <a
+href="https://doc.rust-lang.org/stable/std/ptr/fn.write_volatile.html"><tt>write_volatile()</tt></a> functions.
+<p>
+Some of the other kernel Rust developers objected to this change, though.
+Gary Guo <a
+href="/ml/all/20251231151216.23446b64.gary@garyguo.net">said</a> that he
+would rather not expose <tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt> and
+suggested using relaxed operations from <strike><a
+href="https://doc.rust-lang.org/std/sync/atomic/">the Rust <tt>Atomic</tt>
+crate</a></strike> the kernel's <a
+href="https://rust.docs.kernel.org/next/kernel/sync/atomic/struct.Atomic.html"><tt>Atomic</tt></a>
+module</a> instead.  Boqun Feng <a
+href="/ml/all/aVXKP8vQ6uAxtazT@tardis-2.local">expanded on</a> the
+objection:
+<p>
+<blockquote class="bq">
+	The problem of READ_ONCE() and WRITE_ONCE() is that the semantics
+	is complicated. Sometimes they are used for atomicity, sometimes
+	they are used for preventing data race. So yes, we are using LKMM
+	[the Linux kernel memory model] in Rust as well, but whenever
+	possible, we need to clarify the intention of the API, using
+	Atomic::from_ptr().load(Relaxed) helps on that front.
+<p>
+	IMO, READ_ONCE()/WRITE_ONCE() is like a "band aid" solution to a
+	few problems, having it would prevent us from developing a more
+	clear view for concurrent programming.
+</blockquote>
+<p>
+In other words, using the <tt>Atomic</tt> crate allows developers to
+specify more precisely which guarantees an operation needs, making the
+expectations (and requirements) of the code more clear.
+This point of view would appear to have won out, and Ryhl has stopped
+pushing for this addition to the kernel's Rust code — for now, at least.
+<p>
+There are a couple of interesting implications from this outcome, should it
+hold.  The first of those is that, as Rust code reaches more deeply into the
+core kernel, its code for concurrent access to shared data will look
+significantly different from the equivalent C code, even though the code on
+both sides may be working with the same data.  Understanding lockless data
+access is challenging enough when dealing with one API; developers may now
+have to understand two APIs, which will not make the task easier.
+<p>
+Meanwhile, this discussion is drawing some attention to code on the C side
+as well.  As Feng <a href="/ml/all/aV0JkZdrZn97-d7d@tardis-2.local">pointed
+out</a>, there is still C code in the kernel that assumes a plain write
+will be atomic in many situations, even though the C standard explicitly
+says otherwise.  Peter Zijlstra <a
+href="/ml/all/20260106145622.GB3707837@noisy.programming.kicks-ass.net">answered</a>
+that all such code should be updated to use <tt>WRITE_ONCE()</tt> properly.
+Simply finding that code may be a challenge (though <a
+href="https://docs.kernel.org/dev-tools/kcsan.html">KCSAN</a> can help);
+updating it all may take a while.  The conversation also <a
+href="/ml/all/87ikdej4s1.fsf@t14s.mail-host-address-is-not-set">identified</a>
+a place in the (C) high-resolution-timer code that is missing a needed
+<tt>READ_ONCE()</tt> call.  This is another example of the Rust work
+leading to improvements in the C code.
+<p>
+In past discussions on the design of Rust abstractions, there has been
+resistance to the creation of Rust interfaces that look substantially
+different from their C counterparts; see <a href="958072.html">this
+2024 article</a>, for example.  If the Rust developers come up with a
+better design for an interface, the thinking went, the C side should be
+improved to match this new design.  If one accepts the idea that the Rust
+approach to <tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt> is better than
+the original, then one might conclude that  a similar process should be
+followed here.  Changing thousands of low-level concurrency primitives to
+specify more precise semantics would not be a task for the faint of heart,
+though.  This may end up being a case where code in the two languages just
+does things differently.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/Rust</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Lockless algorithms</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1053142/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1053551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2026 17:19 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1053551/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053551" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; in end they come down to calls to the Rust read_volatile() and write_volatile() functions. </span><br>
+<p>
+I experimented with read/write volatile on AVR, where it would be greatly beneficial to use them for certain inter-thread (interrupt) communication.<br>
+Just in the same way every AVR C program uses volatile "atomic" variables to do this.<br>
+<a href="https://github.com/mbuesch/avr-atomic">https://github.com/mbuesch/avr-atomic</a><br>
+<p>
+However, I came to the conclusion that using read/write volatile for inter-thread (interrupt) communication is unsound in Rust.<br>
+<p>
+AVR hardware is not capable of doing a non-atomic read/write for byte sized objects. So the hardware is fine for all of the relevant cases.<br>
+But the read/write volatile documentation was pretty clear to me that the Rust virtual machine considers concurrent volatile accesses unsound and is free to optimize it to bits.<br>
+<p>
+<a href="https://doc.rust-lang.org/std/ptr/fn.read_volatile.html">https://doc.rust-lang.org/std/ptr/fn.read_volatile.html</a><br>
+<p>
+<span class="QuotedText">&gt; an operation is volatile has no bearing whatsoever on questions involving concurrent accesses from multiple threads</span><br>
+<span class="QuotedText">&gt; Volatile accesses behave exactly like non-atomic accesses in that regard.</span><br>
+<p>
+<span class="QuotedText">&gt; This access is still not considered atomic, and as such it cannot be used for inter-thread synchronization.</span><br>
+<p>
+My implementation worked fine and the generated assembly code was perfect.<br>
+However, I changed it to a less optimal inline asm implementation just because I think the Rust documentation considers concurrent read/write volatile without additional synchronization to be unsound.<br>
+<p>
+(Yes, I know there is AtomicXX and no it's not efficient for reasons... And yes, I should fix the compiler's atomic intrinsics instead of working around the problem... I know :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053567"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2026 19:20 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1053567/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053567" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Yes, I know there is AtomicXX and no it's not efficient for reasons</span><br>
+<p>
+Relaxed atomics are effectively compiler-barrier atomics, and *shouldn't* have any runtime overhead. Are you encountering cases where there's more inefficiency than that?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053567/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053570"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2026 19:54 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1053570/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053570" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes. Should not.<br>
+As I said, it's an LLVM problem on AVR. Which is not a stable tier.<br>
+Atomic always use heavy syncing on AVR in the current compiler.<br>
+<p>
+But that was not my point.<br>
+<p>
+My point was that I think volatile accesses are not sound in Rust for inter thread communication.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053570/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053586"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2026 22:10 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1053586/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053586" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; As I said, it's an LLVM problem on AVR. Which is not a stable tier.</span><br>
+<span class="QuotedText">&gt; Atomic always use heavy syncing on AVR in the current compiler.</span><br>
+<p>
+Ah, got it, thank you. Hopefully that can be fixed.<br>
+<p>
+<span class="QuotedText">&gt; My point was that I think volatile accesses are not sound in Rust for inter thread communication.</span><br>
+<p>
+Right, I believe that's correct.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053586/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1053600"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 9:33 UTC (Sat)
+                               by <b>plugwash</b> (subscriber, #29694)
+                              [<a href="/Articles/1053600/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="plugwash" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053600" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Relaxed atomics are effectively compiler-barrier atomics, and *shouldn't* have any runtime overhead.</span><br>
+<p>
+The situation is a little more subtle than that.<br>
+<p>
+Relaxed atomics on a given memory location, must behave as-if they had a well-defined order (though this order may differ from operations on other memory locations, unless fences are used), and this must apply to the whole set of atomic operations. You may only be using load and store on a particular location, but the compiler doesn't know that. Other code might be performing other atomic operations on that location.<br>
+<p>
+My understanding is that this effectively means that if you implement read-modify-write operations by using a global lock, you must also implement plain write operations using that same global lock.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053600/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053636"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 20:13 UTC (Sat)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/1053636/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="comex" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053636" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That’s correct, but not actually applicable to Rust, because Rust doesn’t allow atomics to be implemented with a global lock, unlike C++ and C.  Instead, on targets that don’t natively support atomics, Rust just makes the atomic APIs unavailable.  It’s one of those tradeoffs where Rust is willing to accept slightly less portability in exchange for a nicer programming model.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053636/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053674"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2026 17:49 UTC (Sun)
+                               by <b>garyguo</b> (subscriber, #173367)
+                              [<a href="/Articles/1053674/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="garyguo" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053674" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that the kernel unconditionally provide 64-bit atomic operation to all archs, and in archs that doesn't support native atomics on 64-bit integers, they are implemented using locks. This means that using `READ_ONCE()` on u64 for atomic ops is incorrect (it needs to be a `atomic64_read()`).<br>
+<p>
+`READ_ONCE` on u64 might still be useful is you just want to read the value in a data-race-free way and you don't care about atomicity (i.e. allow the read to tear). However this is yet another reason I don't want people to just use `READ_ONCE()` for atomic ops on Rust side -- it's just not intuitive which semantics is desired.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053674/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1053637"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 20:44 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1053637/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053637" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Relaxed atomics on a given memory location, must behave as-if they had a well-defined order (though this order may differ from operations on other memory locations, unless fences are used), and this must apply to the whole set of atomic operations. You may only be using load and store on a particular location, but the compiler doesn't know that. Other code might be performing other atomic operations on that location.</span><br>
+<p>
+That is true but misleading. Your parenthetical negates all of the guarantees that are actually expensive to implement, at least on x86.<br>
+<p>
+Noting for the record: A fence must be on the same thread as the relaxed atomic in order to restrict it, and there are several other requirements as well. I refer the curious reader to <a href="https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence.html">https://en.cppreference.com/w/cpp/atomic/atomic_thread_fe...</a> and related documentation for more information.<br>
+<p>
+<span class="QuotedText">&gt; My understanding is that this effectively means that if you implement read-modify-write operations by using a global lock, you must also implement plain write operations using that same global lock.</span><br>
+<p>
+If you take a global lock, then there are two different memory locations in play (lock and payload), so your parenthetical above already tells us that the lock is ineffective (at protecting against against un-fenced relaxed atomics on either the lock or the payload).<br>
+<p>
+Or perhaps I have misunderstood what you mean by "implement read-modify-write operations by using a global lock." I would normally understand a "read-modify-write operation" to be a hardware instruction (or sequence of instructions), which is not our problem to "implement" in the first place. If you mean "emulate," then the problem we run into is that emulators do not emulate the C abstract machine. They emulate some real hardware like x86, or virtual hardware like the JVM. Those platforms have their own, more specific memory models than the C abstract machine, and the compiler backend must necessarily take advantage of those memory models to emit correct assembly/machine code. So our emulator is not permitted to stop at just taking locks for relaxed atomics - it doesn't necessarily know which stores or loads originated as relaxed atomics in the first place, and therefore may have to take locks for all loads and stores whatsoever. Of course, it would be preferable to implement these operations lock-free if it is possible to do so.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053637/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053641"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 21:12 UTC (Sat)
+                               by <b>willmo</b> (subscriber, #82093)
+                              [<a href="/Articles/1053641/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willmo" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053641" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it’s a third meaning of “implement”, as implied by comex’s adjacent comment: when the target hardware doesn’t natively support the desired C/C++ atomic operation (e.g. it lacks even an appropriate CAS to implement a RMW), the compiler must compile it to use a global lock. This is certainly not applicable to common data types on modern x86, ARM, etc.<br>
+<p>
+<span class="QuotedText">&gt; If you take a global lock, then there are two different memory locations in play (lock and payload), so your parenthetical above already tells us that the lock is ineffective (at protecting against against un-fenced relaxed atomics on either the lock or the payload).</span><br>
+<p>
+In this case, the compiler would need to compile un-fenced relaxed atomics so that they take the global lock. That’s what plugwash meant.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053641/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2026 16:36 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1053858/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053858" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, sure, if the platform leaves you up the river with no atomics, then there's only so much you can do. You're effectively in the business of emulating a (virtual) platform with atomics (the C abstract machine) on a (physical) platform that doesn't provide them. And as I said, emulation is slow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1062947"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2026 17:53 UTC (Sun)
+                               by <b>ralfj</b> (subscriber, #172874)
+                              [<a href="/Articles/1062947/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ralfj" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1062947" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+(I know I am way too late to the party, but...)<br>
+<p>
+<span class="QuotedText">&gt; However, I came to the conclusion that using read/write volatile for inter-thread (interrupt) communication is unsound in Rust.</span><br>
+<p>
+This is correct, and it is also true in C and C++. Neither language considers volatile operations to be "atomic" in the sense of the memory model, and inter-thread/interrupt communication is only permitted via such atomic operations (with a special exception for "volatile sig_atomic_t" specifically for signals/interrupts; Rust has no equivalent of this at the moment).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062947/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062948"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">read/write volatile</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2026 18:32 UTC (Sun)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1062948/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1062948" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is not atomic vs. non-atomic. It is UB vs. not UB.<br>
+Is it UB in C to access the same volatile variable from different threads without further locking?<br>
+<p>
+It would break the world, if C compilers started to make volatile accesses from multiple threads UB. Including Linux READ_ONCE and every other program on the planet that accesses hardware or does other low level stuff.<br>
+<p>
+In Rust this kind of thing is quite clearly documented as UB.<br>
+I wish there was an Implementation Defined variant of volatile read/write in Rust w.r.t. threading.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062948/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1053554"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2026 17:42 UTC (Fri)
+                               by <b>bertschingert</b> (subscriber, #160729)
+                              [<a href="/Articles/1053554/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bertschingert" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053554" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does anyone have a sense of how frequently READ/WRITE_ONCE() are used as a needlessly strict substitute for relaxed atomic reads/writes, versus situations where the additional strictness is actually required?<br>
+<p>
+I wasn't around when they were implemented, so I'm speculating here, but I get the sense that READ/WRITE_ONCE() were implemented as a volatile cast not because volatility gives the optimal or desired semantics in most situations, but because that was the best tool available prior to the C11 atomics model.<br>
+<p>
+While it may be prohibitively difficult, it does seem like changing the C side to use relaxed atomics (when correct) would be the right thing to do. But I don't really know how many uses actually require the additional "volatility" guarantee provided by READ/WRITE_ONCE().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053554/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053596"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 1:39 UTC (Sat)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1053596/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053596" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IIUC the issue is that at least on some architectures atomic interfaces provided by both the compiler and ISA are unnecessarily costly in some situations, at least in the estimation of those who wrote and use rwonce.h. The comments in rwonce.h suggest that they're not guaranteeing cross-CPU atomicity, and relying on real-world behavior wrt asynchronous operations (e.g. across interrupts) on the same CPU that no compiler or memory model provides explicit support for today.<br>
+<p>
+Also, C11 atomics is not the origin point for atomic intrinsics[1] or a meaningful memory model in either GCC or Linux. It's not the final or even 100% comprehensive model, either. I think the push for a more formal memory model in C, C++, and the compilers gives a false impression such a thing was completely non-existent beforehand and that things are satisfactory today.<br>
+<p>
+[1] GCC had at least two sets of intrinsics before supporting C11 atomics, and of course projects like the kernel had their own set that work just as well today as they did before the latest set of builtins.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053596/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053599"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 8:54 UTC (Sat)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1053599/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053599" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hang on, at the ISA level there is no notion of an "atomic" load or store, there's just loads and stores. Atomic - like the lock prefix on x86 - only makes sense for operations that are doing multiple things within the same instruction: load, increment, add - atomic increment.<br>
+<p>
+The "atomicity" guarantees that READ_ONCE() and WRITE_ONCE() provide only come in at the compiler level. The compiler will coalesce loads and stores or emit multiple loads as a substitute for spilling registers without some notion of atomicity at the language level.<br>
+<p>
+The "unnecessarily costly" part of READ_ONCE() and WRITE_ONCE() is that they don't distinguish between atomicity and ordering - they also specify strict ordering, but only to the compiler, not the hardware (they don't emit memory barriers).<br>
+<p>
+Rust's atomic load/store really are just better, because they separate out ordering from atomicity and make ordering explicit. And instead of sprinkling around separate memory barrier calls, which may or may not be commented, they're attached to the operation that needs them - which is good for readability.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053599/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053627"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 17:45 UTC (Sat)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/1053627/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="excors" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053627" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; at the ISA level there is no notion of an "atomic" load or store, there's just loads and stores.</span><br>
+<p>
+I'm not certain what you mean by that. E.g. the ARM ARM defines "single-copy atomicity" which is important even in single-processor code: if an interrupt occurs during a STP (Store Pair) instruction, whose operation is defined as a single assignment to memory, the interrupt handler may observe the first half of memory was updated and the second half wasn't, because STP is treated as two separate atomic writes. (The STP instruction will be restarted after the interrupt returns, so it'll complete eventually). So I think the ISA does define the notion of atomic loads and stores, even before getting to the more complex operations.<br>
+<p>
+(GCC will happily use STP for an int64_t assignment, making it non-atomic, unless you add 'volatile' and then it'll use a single 64-bit STR (which is single-copy atomic).)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053627/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1053638"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 20:18 UTC (Sat)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/1053638/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="comex" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053638" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Strictly speaking, misaligned loads are not atomic on x86, and SIMD loads may or may not be.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053638/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1053625"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 16:55 UTC (Sat)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1053625/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joib" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053625" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Also, C11 atomics is not the origin point for atomic intrinsics[1] or a meaningful memory model in either GCC or Linux. It's not the final or even 100% comprehensive model, either. I think the push for a more formal memory model in C, C++, and the compilers gives a false impression such a thing was completely non-existent beforehand and that things are satisfactory today.</span><br>
+<p>
+I wonder, if the C++/C11 memory models and atomics were to be developed today, how different would they look, considering the amount of knowledge the world has gained since then and now?<br>
+<p>
+Certainly there were parts of the C/C++11 models that were, ahem, less than successful, like the consume memory ordering, but otherwise, would there be a place for doing it substantially better and different in general?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053625/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053681"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2026 20:33 UTC (Sun)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/1053681/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbonzini" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053681" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One change I would remove is seq_cst stores and memory operations; and in their place I would rather have operations that behave as if they were enclosed by seq_cst fences on both sides, like for example Linux's atomic_add_return. The difference is that a RMW seq_cst operation can be reordered after a subsequent relaxed load, but that's not the case for LKMM and atomic_add_return. So this would actually make semantics *stricter*, not looser.<br>
+<p>
+I don't have high hopes that this would be accepted now, but maybe it would be since "almost nobody will need anything but sequential consistent variables" has been shown wrong.<br>
+<p>
+The other thing that still hasn't been fully formalized is out-of-thin-air values. Everybody agrees that they won't happen but strictly speaking they aren't prohibited, or weren't last time I checked.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053681/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053739"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2026 6:06 UTC (Mon)
+                               by <b>riking</b> (subscriber, #95706)
+                              [<a href="/Articles/1053739/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="riking" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053739" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The special snowflake global ordering of only seqcst operations (but not seqcst fences) has got to go for sure, and I agree that "operations fused with seqcst fences" would be better.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053739/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1054261"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 15, 2026 0:18 UTC (Thu)
+                               by <b>milesrout</b> (guest, #126894)
+                              [<a href="/Articles/1054261/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="milesrout" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1054261" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The worst part of the design is _Atomic/std::atomic. Atomic operations are atomic *operations, the operations are atomic. There is nothing inherently atomic or non-atomic about the operands themselves. The operator overloading is also a plain bad idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054261/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1054473"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 15, 2026 15:40 UTC (Thu)
+                               by <b>bertschingert</b> (subscriber, #160729)
+                              [<a href="/Articles/1054473/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bertschingert" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1054473" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The GCC atomic intrinsics seem to get this right. I'm not sure if there's a portable way to do atomic operations on regular int types, though.<br>
+<p>
+OTOH, what I like about the Rust (and C/C++11?) atomics is that the type system prevents accidentally introducing data races because you can't do a non-atomic load/store to an atomic type -- at least without unsafe code. Given that the article mentions there are cases in C where READ_ONCE() and WRITE_ONCE() should have been used, but weren't, this seems to be a real risk.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054473/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1053618"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2026 15:42 UTC (Sat)
+                               by <b>bjackman</b> (subscriber, #109548)
+                              [<a href="/Articles/1053618/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bjackman" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053618" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think one of the most common usecases for {READ,WRITE}_ONCE is where you have concurrency without parallelism. E.g. when sharing CPU-local data between a task and an IRQ.<br>
+<p>
+IIUC C11's relaxed ordering is too weak for that, but any of the other C11 orderings are likely to be unnecessarily strict, i.e. they might force the use of special (costly) CPU instructions where normal reads and writes are already safe enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053618/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053675"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">overly strict semantics</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2026 17:57 UTC (Sun)
+                               by <b>garyguo</b> (subscriber, #173367)
+                              [<a href="/Articles/1053675/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="garyguo" />
+                <input type="hidden" name="return" value="/Articles/1053142/#CommAnchor1053675" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think in C11 ordering, a relaxed op is too weak, but a relaxed op + an atomic signal fence (which is usually just a compiler barrier) is sufficient. Alternatively, a volatile relaxed op should also be sufficient.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053675/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1053 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Modernizing swapping: virtual swap spaces [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Modernizing swapping: virtual swap spaces">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's unloved but performance-critical swapping subsystem has been undergoing multiple r [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1059502/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Modernizing swapping: virtual swap spaces</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 19, 2026</br>
+           </div>
+The kernel's unloved but performance-critical swapping subsystem has been
+undergoing multiple rounds of improvement in recent times.  Recent articles
+have described <a href="1056405.html">the addition of the swap
+table</a> as a new way of representing the state of the swap cache, and <a
+href="1057102.html">the removal of the swap map</a> as the way of
+tracking swap space.  Work in this area is not done, though; <a
+href="/ml/all/20260208215839.87595-1-nphamcs@gmail.com">this series from
+Nhat Pham</a> addresses a number of swap-related problems by replacing the
+new swap table structures with a single, virtual swap space.
+<p>
+<h4>The problem with swap entries</h4>
+<p>
+As a reminder, a "swap entry" identifies a slot on a swap device that can
+be used to hold a page of data.  It is a 64-bit value split into two
+fields: the device index (called the "type" within the code), and an offset
+within the device.  When an anonymous page is pushed out to a swap device,
+the associated swap entry is stored into all page-table entries referring
+to that page.  Using that entry, the kernel can quickly locate a
+swapped-out page when that page needs to be faulted back into RAM.
+<p>
+The "swap table" is, in truth, a set of tables, one for each swap device in
+the system.  The transition to swap tables has simplified the kernel
+considerably, but the current design of swap entries and swap tables ties
+swapped-out pages firmly to a specific device.  That creates some pain for
+system administrators and designers.
+<p>
+As a simple example, consider the removal of a swap device.  Clearly,
+before the device can be removed, all pages of data stored on that device
+must be faulted back into RAM; there is no getting around that.  But there
+is the additional problem of the page-table entries pointing to a swap slot
+that no longer exists once the device is gone.  To resolve that problem,
+the kernel must, at removal time, scan through all of the anonymous
+page-table entries in the system and update them to the page's new
+location.  That is not a fast process.
+<p>
+This design also, as Pham describes, creates trouble for users of the <a
+href="https://docs.kernel.org/admin-guide/mm/zswap.html">zswap
+subsystem</a>.  Zswap works by intercepting pages during the swap-out
+process and, rather than writing them to disk, compresses them and stores
+the result back into memory.  It is well integrated with the rest of the
+swapping subsystem, and can be an effective way of extending memory
+capacity on a system.  When the in-memory space fills, zswap is able to
+push pages out to the backing device.
+<p>
+The problem is that the kernel must be able to swap those pages back in
+quickly, regardless of whether they are still in zswap or have been pushed
+to slower storage.  For this reason, zswap hides behind the index of the
+backing device; the same swap entry is used whether the page is in RAM or on
+the backing device.  For this trick to work, though, the slot in the
+backing device must be allocated at the beginning, when a page is first put
+into zswap.  So every zswap usage must include space on a backing device,
+even if the intent is to never actually store pages on disk.  That leads to a
+lot of wasted storage space and makes zswap difficult or impossible to use
+on systems where that space is not available to waste.
+<p>
+<h4>Virtual swap spaces</h4>
+<p>
+The solution that Pham proposes, as is so often the case in this field, is
+to add another layer of indirection.  That means the replacement of the
+per-device swap tables with a single swap table that is independent of the
+underlying device.  When a page is added to the swap cache, an entry from
+this table is allocated for it; the swap-entry type is now just a single
+integer offset.  The table itself is an array of <tt>swp_desc</tt>
+structures:
+<p>
+<pre>
+    struct swp_desc {
+        union {
+            swp_slot_t         slot;
+            struct zswap_entry * zswap_entry;
+        };
+        union {
+            struct folio *     swap_cache;
+            void *             shadow;
+        };
+        unsigned int               swap_count;
+        unsigned short             memcgid:16;
+        bool                       in_swapcache:1;
+        enum swap_type             type:2;
+    };
+</pre>
+<p>
+The first union tells the system where to find a swapped-out page; it
+either points to a device-specific swap slot or an entry in the zswap
+cache.  It is the mapping between the virtual swap slot and a real
+location.  The second union contains either the location of the page in RAM
+(or, more precisely, its folio) or the shadow information used by the
+memory-management subsystem to track how quickly pages are faulted back in.
+The <tt>swap_count</tt> field tracks how many page-table entries refer to
+this swap slot, while <tt>in_swapcache</tt> is set when a page is assigned
+to the slot.  The control group (if any) managing this allocation is noted
+in <tt>memcgid</tt>.
+<p>
+The <tt>type</tt> field tells the kernel what type of mapping is currently
+represented by this swap slot.  If it is <tt>VSWAP_SWAPFILE</tt>, the
+virtual slot maps to a physical slot (identified by the <tt>slot</tt>
+field) on a swap device.  If, instead, it is <tt>VSWAP_ZERO</tt>, it
+represents a swapped-out page that was filled with zeroes that need not be
+stored anywhere.  <tt>VSWAP_ZSWAP</tt> identifies a slot in the zswap
+subsystem (pointed to by <tt>zswap_entry</tt>), and <tt>VSWAP_FOLIO</tt> is
+for a page (indicated by <tt>swap_cache</tt>) that is currently resident in
+RAM.
+<p>
+The big advantage of this arrangement is that a page can move easily from
+one swap device to another.  A zswap page can be pushed out to a storage
+device, for example, and all that needs to change is a pair of fields in
+the <tt>swp_desc</tt> structure.  The slot in that storage device need not
+be assigned until a decision to push the page out is made; if a given page
+is never pushed out, it will not need a slot in the storage device at all.
+If a swap device is removed, a bunch of <tt>swp_desc</tt> entries will need
+to be changed, but there will be no need to go scanning through page
+tables, since the virtual swap slots will be the same.
+<p>
+The cost comes in the form of increased memory usage and complexity.  The
+swap table is one 64-bit word per swap entry; the
+<tt>swp_desc</tt> structure triples that size.  Pham points out that
+the added memory overhead is less than it seems, since this structure holds
+other information that is stored elsewhere in current kernels.  Still, it
+is a significant increase in memory usage in a subsystem whose purpose is
+to make memory available for other uses.  This code also shows performance
+regressions on various benchmarks, though those have improved considerably
+from previous versions of the patch set.
+<p>
+Still, while the value of this work is evident, it is not yet obvious that
+it can clear the bar for merging.  Kairui Song, who has done the bulk of
+the swap-related work described in the previous articles, has <a
+href="/ml/all/CAMgjq7AQNGK-a=AOgvn4-V+zGO21QMbMTVbrYSW_R2oDSLoC+A@mail.gmail.com/">expressed
+concerns</a> about the memory overhead and how the system performs under
+pressure.  Chris Li also <a
+href="/ml/all/CACePvbVvzh8PcF47hz+MfFu3tta5vh3oD+WpGxEL_-NrzYZG3Q@mail.gmail.com/">worries
+about the overhead</a> and said that the series is too focused on improving
+zswap at the expense of other swap methods.  So it seems likely that this
+work will need to see a number of rounds of further development to reach a
+point where it is more widely considered acceptable.
+<p>
+<h4>Postscript: swap tiers</h4>
+<p>
+There is a separate project that appears to be entirely independent from
+the implementation of the virtual swap space, but which might combine well
+with it: the <a
+href="/ml/all/20260217000950.4015880-1-youngjun.park@lge.com">swap tiers
+patch set</a> from Youngjun Park.  In short, this series allows
+administrators to configure multiple swap devices into tiers;
+high-performance devices would go into one tier, while slower devices would
+go into another.  The kernel will prefer to swap to the faster tiers when
+space is available.  There is a set of control-group hooks to allow the
+administrator to control which tiers any given group of processes is
+allowed to use, so latency-sensitive (or higher-paying) workloads could be
+given exclusive access to the faster swap devices.
+
+<p>
+A virtual swap table would clearly complement this arrangement.  Zswap is
+already a special case of tiered swapping; Park's infrastructure would make
+it more general.  Movement of pages between tiers would become relatively
+easy, allowing cold data to be pushed in the direction of slower storage.
+So it would not be surprising to see this patch series and the virtual swap
+space eventually become tied together in some way, assuming that both sets
+of patches continue to advance.
+<p>
+In general, the kernel's swapping subsystem has recently seen more
+attention than it has received in years.  There is clearly interest in
+improving the performance and flexibility of swapping while making the code
+more maintainable in the long run.  The days when developers feared to
+tread in this part of the memory-management subsystem appear to have
+passed.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Swapping</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1059201/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1059585"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 20, 2026 1:25 UTC (Fri)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1059585/">Link</a>] (20 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059585" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>The one problem I have with zswap is that it cannot push out compressed folios as-is. The explanation for this is covered briefly in this article: hides behind frontswap. I don't see virtual swap space changing anything about that, because once a folio gets pushed to the backing device the swap subsystem needs to be able to swap it in as if there were no zswap to begin with.</p>
+
+On a more general note, why has nobody ever thought of compressed swap on the actual backing device? Experience with transparent filesystem compression suggests performance gains for rather little CPU time, since the actual I/O is reduced by the compression ratio. LZ4 is an essentially free I/O booster; very fast at decent compression ratio. I also think that ZStandard fits that bill at even greater compression ratios, albeit at higher CPU cost, so why not invest some of the time spent I/O-waiting on making that wait shorter and gain effective capacity? In the case of zswap that work will already have been done, so it's just the writeback that improves without additional penalty. Arguably, decompression upon writeback is an unfair penalty for zswap; it's just that in real world workloads it doesn't figure because it happens very rarely and, with the proactive shrinker, at (more) opportune occasions. This could also eliminate LRU inversions when the zpool limit gets hit hard, because to get to the backing store a folio must go through compression first; while the LRU entry gets written back to make room for it in the zpool.</p>
+
+As it stands, zswap is a great improvement but, due to its implementation details (frontswap), it cannot go further. Couldn't this virtual swap space just point to zswap entries regardless if they are in RAM or on the backing device? If such an entry is encountered, have zswap decompress it, i.e. go through frontswap in reverse? This is much like when zswap gets disabled at runtime: new folios will just go directly to and from the backing device but the already compressed ones are kept and treated accordingly. In the long run, I think zswap could become the default that way. Don't want compression? Set some dummy compressor to get legacy behavior.
+
+Is all this just too much complexity/overhead, or do kernel devs have such approach on their wish list as well?
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059585/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1059642"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 20, 2026 14:36 UTC (Fri)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1059642/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059642" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The one problem I have with zswap is that it cannot push out compressed folios as-is. The explanation for this is covered briefly in this article: hides behind frontswap</span><br>
+<p>
+Frontswap is a name I haven't heard in a while.<br>
+<p>
+I think it's been quite long since the kernel rid itself of both cleancache and frontswap as general-purpose abstractions, with zswap absorbing the remnants of the latter and growing into a standalone mechanism.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059642/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1059697"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 20, 2026 22:19 UTC (Fri)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1059697/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059697" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Conceptually it is still the same approach, is it not? The point is that one can't write back compressed folios. That makes LRU inversions upon hitting the zpool limit even worse, because they need to be decompressed before writeback while being passed left, right and center by rejected new ones. I think that was the impetus for proactive shrinking.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059697/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1059714"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2026 15:54 UTC (Sat)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1059714/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059714" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Conceptually it is still the same approach, is it not? The point is &lt;...&gt;</span><br>
+<p>
+It might be at the moment, but my point is that it is certainly not true that "due to its implementation details (frontswap), it cannot go further" as frontswap does not exist.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059714/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060085"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2026 23:15 UTC (Tue)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060085/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060085" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      So, Zswap essentially assimilated frontswap, because it was the only user left. But, unless that design changes, i.e. no longer fooling the rest of the kernel that its zpool contents resides on actual swap space, which is why the allocation happens before even touching the pages/folios in question, it can indeed not go further. From what I understand, this virtual swap space just takes the foolery one step further by also pretending that the space actually exists.</p>
+
+Then why not let zswap assimilate the swap allocator, outright? Then it'd only need to allocate on writeback, i.e. just in time, as plain old swap does; no need for virtual swap. And when writebacks are few and far between it's really not an issue to have decompression in that path. For instance, I currently have ~1G in a ~300M zpool, which are mostly cold and got zswapped on some memory spikes induced by my liberal use of tmpfs (mounted with <code>noswap</code>) so something had to give. There was some to and fro, so I estimate that ~3G went through zswap and <em>only ~5000 pages</em> were <code>reject_compress_fail</code> - interestingly, I never see <code>reject_compress_poor</code>. And that's a cumulative counter that never decrements because zswap never sees those pages again - swap-in from the backing store is none of its concern; another quirk born from the "frontswap" design.</p>
+
+Also see the comment by Jonathan Corbet about the next iteration and the linked content, "ghost swap" in particular.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060085/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 2:05 UTC (Wed)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1060093/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060093" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Then why not let zswap assimilate the swap allocator, outright?</span><br>
+<p>
+No objection from me.<br>
+<p>
+Like I said several times already, I am merely remarking that while the present limitations of zswap may have _occurred_ due to it being originally a client of frontswap, nothing says it "cannot go further" than that. You have just suggested one way it, indeed, *can*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 8:17 UTC (Wed)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060107/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060107" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Got ya. You were right, all along. And thanks for bringing me up to speed on that front (pun intended). ;)
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1059745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 22, 2026 2:48 UTC (Sun)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/1059745/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cesarb" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059745" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Experience with transparent filesystem compression suggests performance gains for rather little CPU time, since the actual I/O is reduced by the compression ratio.</span><br>
+<p>
+I don't think it would be worth it, at least for normal 4K pages, since AFAIK the unit of I/O in modern systems is also 4K; that is, even if you could compress a page's contents to a single byte, you'd still have to write a full 4K.<br>
+<p>
+(IIRC, the transparent filesystem compression in btrfs works in blocks of 128K)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1059770"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compression on the backing device?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 23, 2026 0:39 UTC (Mon)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1059770/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059770" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was thinking more towards mTHP which have a higher potential compression ratio. On x86_64 anonymous mTHP start at 16K (for completeness: shared memory mTHP start at 8K for some reason). Given that I see compression ratios &gt;3 with plain 4K pages when using zstd, one compressed 16K mTHP might just fit inside a single 4K block, for example, but not more that two 4K blocks. That'd be a &gt;100% increase in I/O throughput, on average.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059770/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1059791"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clustered pages for swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 23, 2026 11:42 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1059791/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059791" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The usual way round that is to not swap page-by-page, but to try and select groups of pages to swap together; this has other benefits (since you're paying one set of swap subsystem and I/O overheads per swap page group), but has to be balanced against paging out part of your working set.
+<p>This involves a certain amount of activity tracking - has the page been referenced recently? - but you can then do things like swapping in units of 16 pages (64 KiB) at a time most of the time, except when a range of pages contains a recently accessed page (where you switch to page-at-a-time to avoid problems). Complexity is traded off here; you spend more CPU time on which pages to swap, in return for doing less I/O while swapping and getting more clean pages each time you decide to swap at all.
+<p>Note that it's very rare for the system to only need one more clean page before it settles into a steady state, unless you've entered swap thrash anyway; in practice, you're going to be swapping out chunks of memory that aren't part of the working set if you're swapping at all.
+<p>There's also a related trick to consider; if you can mark pages that you've swapped out as "do not re-read from swap", you can write out 16 pages, mark 15 of them as clean, and remove one from RAM. Then, if the other 15 are read, you can avoid removing them from RAM, and if they're written, you can mark the swap page as "discard on decompression". This can be a win in some cases - e.g. if you turn 64 KiB of I/O into 32 KiB of I/O and have no more than 8 pages that you avoid removing from RAM, you win.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059791/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1059982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2026 14:21 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1059982/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059982" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Reading this week's <a href="https://lwn.net/Articles/1058664/">second half of the merge window article</a>, I noticed <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=d38fab605c66">this patch for zram to enable compressed page writeback</a>.
+<p>That puts compressed pages on the actual backing device - pages first get "swapped" to zram, where they're compressed and placed in the zram memory pool. If the zram memory pool fills, the compressed pages in zram are written as-is to zram's writeback device (along with incompressible pages).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060083"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2026 22:35 UTC (Tue)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060083/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060083" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      But Zram writeback is <a href="https://chrisdown.name/zram.pdf">not really automatic [PDF] (page 7)</a> and least of all LRU-based, because all the swap subsystem sees is yet another swap space and all zram sees is yet another block. A low-cost polling approach, i.e. long(-ish) sleep intervals, might be too late to the party when sudden memory spikes happen. Maybe hacking something that monitors PSI (pressure stall info), but then you are already reinventing kernel wheels.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060083/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1060089"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 0:25 UTC (Wed)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060089/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060089" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      One thing just popped up in my head. Why not "unify" zram and tmpfs? Just make tmpfs zswappable. My last encounters with tmpfs and incompressible data on it has led me to the conclusion that it "bypasses" frontswap; my guess is that it's simply unaware of it, since it has seniority, by some margin. Because the data was incompressible, I was expecting lots and lots of <code>reject_compress_fail</code> pages being counted in the zswap stats - this was before I discovered the <code>noswap</code> mount option had been added to tmpfs -, but I didn't see any. Swap space was filling up, alright, but zswap never saw those pages, apparently.</p>
+
+I don't really see the appeal of zram as a general-purpose block device. I believe someone wanted a compressed tmpfs. And then they realized, by running <code>mkswap</code> on it, that one can get "compressed RAM" on the cheap. While that is not unreasonable, using it that way, has some side effects. For instance, one should not have real swap space - at lower <code>pri</code>, of course -, because of LRU inversions when the zram-swap is full. OK, those inversions are on the swap subsystem; they happen without the need for zram in the mix. For instance, I have 4G swap at <code>pri=2</code> on an NVMe-SSD and an additional 16G at <code>pri=1</code> on an SATA-SSD for when I really push things. Obviously, when the 4G are full, the much fresher pages go to the slower 16G space. It's all hypothetical now, mostly because I've enabled zswap, now. This is only meant to show, that LRU inversions are not an inherent swap-on-zram problem; they have been long before zram even existed.</p>
+
+I think, for the purposes of zram, plain tmpfs with a path through zswap would suffice, unless I am missing some real use cases that require the block layer. Think of it, folios read from zram need to be decompressed, so the reader can use them. That means that some pages exist in compressed and uncompressed form at the same time, wasting memory; or maybe they replace one another? Doesn't really matter. My point is that tmpfs was almost there but from the other direction; pages live uncompressed in the page cache until they get swapped out. Just make that swapping go through zswap and zram is obsolete. The added bonus being that hot pages, regardless if they are anonymous or tmpfs or whatever, naturally stay in the "hot" uncompressed region of RAM, and the rest get (z)swapped out, as per usual. Whereas with swap on zram, the pages are already considered cold. And other uses of zram cannot easily make use of swap, because that might just be the same device they are coming from; kernel say: reclaim pages from zram0, swap subsystem writes pages to swap0 which resides on zram0! And just like that, you ruptured the space-time-continuum, by letting Marty McFly prevent his father from getting together with his mother, or some such. ;)</p>
+
+And, of course, that zswap quirk, to require pre-allocating space, (almost) never to be touched, needs to be fixed. But, in my head at least, it could all be way simpler that way. I think the authors of these patches may suffer from tunnel vision, so I am just throwing this out there as food for thought.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060089/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 1:58 UTC (Wed)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1060091/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060091" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Just make tmpfs zswappable.</span><br>
+<p>
+Tmpfs certainly is {,z}swappable. Perhaps your system was misconfigured.<br>
+<p>
+<span class="QuotedText">&gt; I don't really see the appeal of zram as a general-purpose block device. I believe someone wanted a compressed tmpfs. And then they realized, by running mkswap on it, that one can get "compressed RAM" on the cheap. While that is not unreasonable, using it that way, has some side effects.</span><br>
+<p>
+Yes. Trying to pass zram as a swap device, IMO, is a pretty blatant abuse of mm that only flies because practical deployments rarely get to exercise the interesting corner cases (in addition to the priority inversion concerns that you mention). For one, the swap subsystem is not designed around fallibility of swap devices. What would happen, for instance, if you configure a zram device with a limit on physical RAM utilization which is subsequently hit before the declared logical capacity is used up (for example, due to the data being incompressible)? Your guess is as good as mine.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060096"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 4:12 UTC (Wed)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060096/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060096" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+&gt; Just make tmpfs zswappable.</p>
+
+Tmpfs certainly is {,z}swappable. Perhaps your system was misconfigured.
+</blockquote>
+Are you absolutely positive? I do know that it's swappable - says so on the box -, that's why I had been using it. Not so sure about the <em>z</em>swappable part, though. As I said, i was expecting lots of rejected pages on occasions when I put lots of incompressible data on tmpfs, but they did not show in the respective zswap stat counters, all the while swap was filling, with said zswap counters barely changing.</p>
+Maybe it's a more recent change? I haven't followed any changes since I discovered the <code>noswap</code> mount option. Since my heavy tmpfs usage involves incompressible data exclusively, I now prefer capping the tmpfs size somewhere close to but below the physical RAM - was double that before - and have other pages zswapped in their place, when the need arises. Otherwise, it'd be <code>reject_compress_fail</code> galore for tmpfs pages, anyway, and I'd like to save as much I/O as possible from happening. I'll tolerate the odd rejected page, but not on the gigabyte order of magnitude, on top of the outcome being clear before zswap even tried. My use case is only slightly worse off for the limitation of available space.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060096/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060097"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 5:25 UTC (Wed)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1060097/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060097" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Are you absolutely positive?</span><br>
+<p>
+Entirely.<br>
+<p>
+<span class="QuotedText">&gt; Maybe it's a more recent change?</span><br>
+<p>
+Depends on how recent we are talking. Linux 5.10 old enough?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060097/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060103"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 6:05 UTC (Wed)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060103/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060103" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+&gt; Are you absolutely positive?</p>
+
+Entirely.
+</blockquote>
+<a href="https://github.com/torvalds/linux/blob/7dff99b354601dd01829e1511711846e04340a69/mm/shmem.c#L1702C3-L1712C6">Found it</a>:
+<pre>
+		error = swap_writeout(folio, plug);
+		if (error != AOP_WRITEPAGE_ACTIVATE) {
+			/* folio has been unlocked */
+			return error;
+		}
+
+
+		/*
+		 * The intention here is to avoid holding on to the swap when
+		 * zswap was unable to compress and unable to writeback; but
+		 * it will be appropriate if other reactivate cases are added.
+		 */
+</pre>
+
+<blockquote>
+&gt; Maybe it's a more recent change?</p>
+
+Depends on how recent we are talking. Linux 5.10 old enough?</blockquote>
+That may very well be the case. I am running Ubuntu LTS which is not exactly bleeding edge.</p>
+
+Thanks for finally giving me a definitive answer to that question! 
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060103/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060114"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 9:31 UTC (Wed)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1060114/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060114" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It wasn't really "definitive", more like an upper bound that I could give relatively quickly... Tmpfs is zswappable at least up to Linux 4.9 (stretch); this was a good excuse to play around with a clustered Incus and imagebuilder but I won't bother checking further.<br>
+<p>
+<span class="QuotedText">&gt; I am running Ubuntu LTS which is not exactly bleeding edge.</span><br>
+<p>
+So I'd say unless your Ubuntu LTS is like 14.04, you've just got it misconfigured somehow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060114/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 9:35 UTC (Wed)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1060115/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060115" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  So I'd say unless your Ubuntu LTS is like 14.04, you've just got it misconfigured somehow.</span><br>
+<p>
+(That said, given that you say your workloads are incompressible, it's all purely academic anyway. Oh well, still an excuse to build some images.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060117"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 11:44 UTC (Wed)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060117/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060117" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I've just realized that my memory might also be clouded by my tinkering with <code>memory.zswap.writeback=0</code>. But I am pretty certain I saw that behavior before that cgroup knob even existed. And there seem to have been problems with <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=39799b6409febf628337bd7804c3861a9f7f7e8a">accounting &amp; cgroup control</a>. I don't know how relevant they would have been for this case, but there is a set of commits under that umbrella linked to from the kernelnewbies page for the v5.19 release. I found those by accident while researching when writeback disabling was introduced, to narrow the time frame.</p>
+
+Anyway, I am starting to feel like I am abusing this thread/forum, so I'll leave it at that. I am very grateful for all your input and effort! Now I can explore some more use cases I had ruled out before. And if, against expectations, I do see the erroneous behavior, I'll know for sure that it must be an error of some kind.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060117/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1060119"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing back compressed pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 11:50 UTC (Wed)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1060119/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060119" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+It wasn't really "definitive"
+</blockquote>
+Oh, now I get it. The "definitive" was meant in reference to the question if tmpfs somehow bypasses zswap. It does not matter too much, <em>when</em> it was made zswappable.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060119/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1059646"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamic ghost swapfiles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 20, 2026 15:04 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1059646/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1059646" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      For those who are not yet swapped out, so to speak, the story continues with <a href="https://lwn.net/ml/all/20260220-swap-table-p4-v1-0-104795d19815@tencent.com">part four of Kairui Song's ongoing work</a>, which adds a "ghost swapfile" feature as an alternative to the virtual swap idea discussed in this article.
+<p>
+I'd meant the swap series to be two parts, but it seems that a fourth may be necessary...:)
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059646/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1060124"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case of removing swap devices at runtime</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 13:48 UTC (Wed)
+                               by <b>fraetor</b> (subscriber, #161147)
+                              [<a href="/Articles/1060124/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fraetor" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060124" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What is the use case for needing fast removal of swap spaces?<br>
+<p>
+I'd have naivety thought that swap devices would be pretty much static for the life of a system, with only infrequent sysadmin interventions changing it, and it wouldn't be worth optimising too much for speed here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060124/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case of removing swap devices at runtime</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2026 17:16 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1060250/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1059201/#CommAnchor1060250" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; and it wouldn't be worth optimising too much for speed here.</span><br>
+<p>
+Once you're using swap, response will be similar to treacle, so I would have thought optimising for speed would be a very definite benefit!<br>
+<p>
+And while swap devices may be static on personal computers, I would have thought cloud computing is more likely to take the attitude "create swap files as required when memory usage rises", rather than pre-emptively allocate it. These things have a cost - why pay it when you don't need to?<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

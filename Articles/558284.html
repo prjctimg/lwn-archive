@@ -1,0 +1,526 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Is the whole system idle? [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Is the whole system idle?">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The full dynamic tick feature that made its debut in the 3.10 kernel can be good for users who  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/557814/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Is the whole system idle?</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 10, 2013</br>
+           </div>
+The <a href="549580.html">full dynamic tick</a> feature that made its
+debut in the 3.10 kernel can be good for users who want their applications
+to have full use of one or more CPUs without interference from the kernel.
+By getting the clock tick out of the way,
+this feature minimizes kernel overhead and the potential latency problems.
+Unfortunately, full dynamic tick operation also has the potential to increase
+power consumption.  Work is underway to fix that problem, but it turns out
+to require a bit of information that is surprisingly hard to get: is the
+system fully idle or not?
+<p>
+The kernel has had the ability to turn off the periodic clock interrupt on
+idle processors for many years.  Each processor, when it goes idle, will
+simply stop its timer tick; when all processors are idle, the system will
+naturally have the timer tick disabled systemwide.  Fully dynamic tick —
+where the timer tick can be disabled on non-idle CPUs — adds an interesting
+complication, though.  While most processors can (when the conditions are
+right) run without the clock tick, one processor must continue to keep the
+tick enabled so that it can perform a number of necessary system
+timekeeping operations.  Clearly, this "timekeeping CPU" should be able to
+disable its tick and go idle if nothing else is running in the system, but,
+in current kernels, there is no way for that CPU to detect this situation.  
+<p>
+A naive solution to this problem will come easily to mind: maintain a
+global counter tracking the number of idle CPUs.  Whenever a processor goes
+idle, it increments the counter; when the processor becomes busy again, it
+decrements the counter.  When the number of idle CPUs matches the number of
+CPUs in the system, the kernel will know that no work is being done and the
+timekeeping CPU can take a break.
+<p>
+The problem, of course, is that cache contention for that global counter
+would kill performance on larger systems.  Transitions to and from idle are
+common under most workloads, so the cache line containing the counter would
+bounce frequently across the system.  That would defeat some of the point
+of the dynamic tick feature; it seems likely that many users would prefer
+the current power-inefficient mode to a "solution" that carried such a
+heavy cost.
+<p>
+So something smarter needs to be done.  That's the cue for an entry by Paul
+McKenney, whose <a href="/Articles/558229/">seven-part full-system idle
+patch set</a> may well be the solution to this problem.
+<p>
+As one might expect, the solution involves the maintenance of a per-CPU
+array of idle states.  Each CPU can update its status in the array without
+contending with the other CPUs.
+But, once again, the naive solution is inadequate.
+With a per-CPU array, determining whether the system is fully idle requires
+iterating through the entire array to examine the state of each CPU.  So,
+while maintaining the state becomes cheap, answering the "is the system
+idle?" question becomes expensive if the number of CPUs is large.  Given
+that the timekeeping code is 
+likely to want to ask that question frequently (at each timer tick, at
+least), an expensive implementation is not indicated; something else must
+be done.
+<p>
+Paul's approach is to combine the better parts of both naive solutions.  A
+single global variable is created to represent the system's idle state and
+make that 
+state easy to query quickly.  That variable is updated from a scan over the
+individual CPU idle states, but only under specific conditions that
+minimize cross-CPU contention.  The result should be the best of both
+worlds, at the cost of delayed detection of the full-system idle state and
+the addition of some tricky code.
+<p>
+The actual scan of the per-CPU idle flags is not done in the scheduler or
+timekeeping code, as one might expect.  Instead (as others might expect),
+Paul put it into the read-copy-update (RCU) subsystem.  That may seem like
+a strange place, but it makes a certain sense: RCU is already tracking the
+state of the system's CPUs, looking for "grace periods" during which
+unused RCU-protected data structures can be reclaimed.  Tracking whether
+each CPU is fully idle is a relatively small change to the RCU code.  As an
+added benefit, it is easy for RCU to avoid scanning over the CPUs when
+things are busy, so the overhead of maintaining the global full-idle state
+vanishes when the system has other things to do.
+<p>
+The actual idleness of the system is tracked in a global variable called
+<tt>full_sysidle_state</tt>.  Updating this variable too often would bring
+back the cache-line contention problem, though, so the code takes a more
+roundabout path.  Whenever the system is perceived to be idle, the code
+keeps track of when the last processor went idle.  Only after a delay will
+the global idle state be changed.  That delay drops to zero for "small"
+machines (those with no more than eight processors), it increases linearly
+as the number of processors goes up.  So, on a very large system, all
+processors must be idle for quite some time before
+<tt>full_sysidle_state</tt> will change to reflect that state of affairs.
+<p>
+The result is that detection of full-system idle will be delayed on larger
+systems, possibly by a significant fraction of a second.  So the timer tick
+will run a little longer than it strictly needs to.  That is a cost
+associated with 
+Paul's approach, as is the fact that his patch set adds some 500 lines of
+core kernel code for what is, in the end, the maintenance of a single
+integer value.  But that, it seems, is the price that must be paid for
+scalability in a world where systems have large numbers of CPUs.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Dynamic tick</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Read-copy-update</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/558284/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor558745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about delays to shut off the tick on huge systems?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2013 4:51 UTC (Sat)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/558745/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PaulMcKenney" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor558745" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Great article, thank you!<br>
+<p>
+For whatever it is worth, here is an analysis of the full-system-idle delays on larger systems.<br>
+<p>
+One reason for believing that these delays are OK is that the fraction of the system affected by the timekeeping ticks decreases as the system size increases.  To see this, suppose each socket has eight cores, each with two hardware threads.  On a 16-CPU system, the timekeeping ticks are causing the system's one and only socket to power up frequently.  On a 32-CPU system, only half of the sockets are powering up frequently.  On a 64-CPU system, only 25% of the sockets are powering up frequently.  Skipping a few factors of two, on a 4096-CPU system, only about 0.4% of the sockets are powering up frequently.  If this 4096-CPU system is running at HZ=1000, the full-system-idle delay will be about 256 milliseconds, which should be OK.<br>
+<p>
+Another reason for believing that these delays are OK focuses on the probability of the system momentarily going fully idle while running a workload.  Suppose that it is worthwhile to take advantage of the full-system-idle if that state is in effect at least 1% of time time.  If the workload has random per-CPU busy and idle times, this would require that the CPU utilization be below a certain level.<br>
+<p>
+That certain level is 0.1% CPU utilization, or, in bc-speak:<br>
+<p>
+1-e(l(0.01)/4096).<br>
+<p>
+However, if your workload is keeping your 4096-CPU system at 0.1% CPU utilization, your workload would very likely run just as well (and more economically) on a much smaller system, perhaps even as small as four CPUs.<br>
+<p>
+This suggests that the only time that full-system-idle state is important for huge systems is when the system is in fact idle, in other words, when the workload has fully stopped.  In which case, a quarter of a second wind-down time seems eminently reasonable.<br>
+<p>
+Or at least that is what I am hoping.  ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/558745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor558769"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2013 20:28 UTC (Sat)
+                               by <b>vomlehn</b> (guest, #45588)
+                              [<a href="/Articles/558769/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vomlehn" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor558769" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Quote:</p>
+<blockquote>The actual scan of the per-CPU idle flags is not done in the scheduler or timekeeping code...Paul put it into the read-copy-update (RCU) subsystem. </blockquote>
+<p>Got a quibble, from the programming philosophy standpoint, with the approach as described (haven't read the patch and the quibble is about the approach and not whether it's actually done this way). What has happened in this case is the discovery that what RCU was doing has a broader applicability. So, instead of putting the change in the RCU code it should be "hoisted" to a higher level and combined with similar functionality. This may result in a new subsystem or an addition to an existing subsystem. In this case, I would expect the code to be in an "idleness tracking" subsystem. The RCU code would then reference this subsystem.</p>
+
+<p>I don't want to pick on this patch; I've committed this particular sin more than once but once I done my penitance by doing the full restructuring, I feel so much *cleaner*.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/558769/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor558773"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2013 22:59 UTC (Sat)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/558773/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor558773" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From the (admittedly little) I know about RCU, I see it as a fairly general tool to manage concurrency. Tracking "global idleness" sounds like a good enough fit... what do I miss here?<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/558773/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor558774"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2013 23:28 UTC (Sat)
+                               by <b>vomlehn</b> (guest, #45588)
+                              [<a href="/Articles/558774/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vomlehn" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor558774" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>RCU (read-copy-update) is indeed a concurrency-related facility, one focused on updating data in an atomic fashion. RCU has a lot to do with idleness because its implementation tries to use idle periods to do some of its work. It could, however, do its work in other ways that don't depend on idleness. It could, if hardware supported it, be implemented differently (rather like the x86 processor TSX feature used for lock elision, covered in the LWN article <a href="http://lwn.net/Articles/556509/">Merging lock elision into glibc</a> and previous related articles). Without changing the interfaces, it would suddenly have nothing to do with idleness.</p>
+<p>So, this was not a feature of RCU, it was rather an implementation detail of RCU. So long as it remains hidden, i.e. not used outside of RCU, this was a perfectly good place for it. When it becomes visible, it's time to evaluate whether it should be refactored by moving it out of RCU. My current view is that, yes, it should, especially since it seems to belong with other existing idleness and power management features.</p>
+<p>The point I'm trying to make, which I wouldn't want to get lost, is that when we pull formerly hidden code out of the shadows, we need to evaluate whether it still belongs where it used to be or whether our desire to keep code well organized suggests we should move it elsewhere.</p>
+<p>[An aside: I expect the kernel x86 community has already given consideration to an RCU implementation using TSX (Transactional Synchronization Extension) which would require refactoring RCU to separate out the idleness-based code.]</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/558774/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor558952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2013 21:28 UTC (Mon)
+                               by <b>naptastic</b> (guest, #60139)
+                              [<a href="/Articles/558952/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="naptastic" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor558952" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sorry for the naive question but, as an end-user who wants low latency for audio applications (real-time mixing,) how should I configure this feature in order to take maximum advantage of it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/558952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor559485"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2013 14:36 UTC (Thu)
+                               by <b>Funcan</b> (guest, #44209)
+                              [<a href="/Articles/559485/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Funcan" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor559485" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If your highest priority low latency, you probably don't want this feature, nor many other power saving features - you pretty much want to keep your CPUs awake and ready to do work at short notice.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/559485/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor559617"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2013 1:28 UTC (Fri)
+                               by <b>oconnorcjo</b> (guest, #2605)
+                              [<a href="/Articles/559617/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="oconnorcjo" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor559617" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I see this as fixing a problem that does not exist.  If you have a system with 30+ processors, then having one CPU never go idle, seems like a non issue.  The only serious area for this patch is for mobile devices and laptops.  How I might aproach this concept is have a global variable to check idleness and if there are more than 16 CPU's just DON'T check at all.  If a machine has more than 16 CPU's one CPU never going full idle to do clock ticks is not that much of a power savings so just do't do it.  For all cases with less CPU's well the delay factor of checking should be minimal.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/559617/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor559656"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2013 9:20 UTC (Fri)
+                               by <b>micka</b> (subscriber, #38720)
+                              [<a href="/Articles/559656/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="micka" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor559656" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Mobile device with 16 CPU is for next year.<br>
+Well, not really, but I don't know when it will be, and I certainly won't say it will not happen. I wouldn't have thought we'd have 4 CPUs in phones not so long ago, when my desktop computer was single core and I was sad because kernel devs seemed to only be interested in performance on server hardware (ie multi CPU).<br>
+<p>
+I'm no expert, but if you have for example 4 big.LITTLE in a device, isn't that already 8 cores ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/559656/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor559727"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2013 15:42 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/559727/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor559727" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I thought the current implementation of big.LITTLE would treat it as 4 cores with different frequency scaling options.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/559727/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor559742"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2013 17:49 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/559742/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor559742" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The <a rel="nofollow" href="481055.html">big.LITTLE switcher</a> code works that way; <a rel="nofollow" href="541005.html">bit LITTLE MP</a>, instead, treats all of the processors independently.  Neither approach is upstream, currently.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/559742/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor559653"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is the whole system idle?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2013 8:56 UTC (Fri)
+                               by <b>etienne</b> (guest, #25256)
+                              [<a href="/Articles/559653/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="etienne" />
+                <input type="hidden" name="return" value="/Articles/558284/#CommAnchor559653" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The actual scan of the per-CPU idle flags is not done in the scheduler</font><br>
+<p>
+Isn't it the case that IRQ can be directed towards any of the processor cores in hardware, and a core going to sleep shall divert IRQs to other cores before sleeping (because the time to wake-up adds to latency).<br>
+If you are the core assigned to every IRQs and are going to sleep, you are the last one...<br>
+IRQ assignment is obviously not a core local resource, but is done anyway - why not re-use these hardware registers?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/559653/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

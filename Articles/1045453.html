@@ -1,0 +1,657 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A struct sockaddr sequel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A struct sockaddr sequel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the many objectives of the Linux Kernel Self-Protection Project (KSPP), which just compl [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1046324/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A struct sockaddr sequel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 14, 2025</br>
+           </div>
+One of the many objectives of the <a href="https://kspp.github.io/">Linux
+Kernel Self-Protection Project (KSPP)</a>, which just <a
+href="https://hachyderm.io/@kees/115500589609430241">completed ten years of
+work</a>, is to ensure that all array references can be bounds-checked,
+even in the case of flexible array members, the size of which is not known
+at compile time.  One of the most challenging flexible array members in the
+kernel is not even declared as such.  Almost exactly one year ago, LWN <a
+href="997094.html">looked at</a> the effort to increase safety around
+the networking subsystem's heavily used <tt>sockaddr</tt> structure.  One
+year later, Kees Cook is still looking for a way to bring this work to a
+close. 
+<p>
+In short, the problem is that <tt>struct sockaddr</tt> is traditionally
+defined as:
+<p>
+<pre>
+    struct sockaddr {
+        short sa_family;
+	char sa_data[14];
+    };
+</pre>
+<p>
+The <tt>sa_data</tt> field was more than large enough to hold a network
+address in the early 1980s when this structure was first defined for BSD
+Unix, but it is not large enough now.  As a result, a great deal of code,
+in both the kernel and user space, passes around <tt>struct sockaddr</tt>
+pointers that, in truth, point to different structures with more space for
+the addresses they need to hold.  In other words, <tt>sa_data</tt> is being
+treated as a flexible array member, even though it is not declared as one.
+The prevalence of <tt>struct sockaddr</tt> has thrown a spanner into the
+works of many attempts to better check the uses of array members in
+structures.
+<p>
+At the end of last year's episode, much of the kernel had been changed to
+use <tt>struct sockaddr_storage</tt> (actually implemented as <a
+href="https://elixir.bootlin.com/linux/v6.17.7/source/include/uapi/linux/socket.h#L16"><tt>struct
+__kernel_sockaddr_storage</tt></a>), which has a data array large enough
+to hold any known network address.  An attempt was made to change the
+definition <tt>struct sockaddr</tt> to make its <tt>sa_data</tt> field into an
+explicit flexible array member, but that work ran into a minor snag.  There
+are many places in the kernel where <tt>struct sockaddr</tt> is embedded
+within another structure.  In most of these cases, <tt>sa_data</tt> is
+<i>not</i> treated as a flexible array member, so developers have freely
+embedded <tt>struct sockaddr</tt> anywhere within the containing structure,
+often not at the end.
+<p>
+If <tt>sa_data</tt> is redefined as a flexible array member, the compiler
+no longer knows how large the structure will actually be.  That, in turn,
+means that the compiler does not know how to lay out a structure containing
+<tt>struct sockaddr</tt>, so it guesses and emits a warning.  Or, in the
+case of a kernel build, tens of thousands of warnings.  Kernel developers,
+as it turns out, would rather face the prospect of an array overflow than a
+warning flood of that magnitude, so this work came to a halt.
+<p>
+One possible solution would be to replace embedded <tt>struct sockaddr</tt>
+fields with <tt>struct sockaddr_storage</tt>, eliminating the flexible
+array member.  But that would bloat the containing structures with memory
+that is not needed, so that approach is not popular either.
+<p>
+Instead, Cook is working on <a
+href="/ml/all/20251104002608.do.383-kees@kernel.org">a patch series</a>
+that introduces yet another <tt>struct sockaddr</tt> variant:
+<p>
+<pre>
+    struct sockaddr_unsized {
+	__kernel_sa_family_t	sa_family;	/* address family, AF_xxx */
+	char			sa_data[];	/* flexible address data */
+    };
+</pre>
+<p>
+Its purpose is to be used in internal network-subsystem interfaces where
+the size of <tt>sa_data</tt> needs to be flexible, but where its actual
+size is also known.  For example, the <tt>bind()</tt> method in <a
+href="https://elixir.bootlin.com/linux/v6.17.7/source/include/linux/net.h#L161"><tt>struct
+proto_ops</tt></a> is defined as:
+<p>
+<pre>
+    int	(*bind) (struct socket *sock,
+		 struct sockaddr *myaddr,
+		 int sockaddr_len);
+</pre>
+<p>
+The type of <tt>myaddr</tt> can be changed to <tt>struct sockaddr_unsized *</tt>
+since <tt>sockaddr_len</tt> gives the real size of the <tt>sa_data</tt>
+array.  Cook's patch series does many such replacements, eliminating
+the use of variably sized <tt>sockaddr</tt> structures in the networking
+subsystem.  With that done, there are no more uses of <tt>struct
+sockaddr</tt> that read beyond the 14-byte <tt>sa_data</tt> array.  As a
+result, <tt>struct sockaddr</tt> can be reverted to its classic,
+non-flexible definition, and array bounds checking can be applied to code
+using that structure.
+<p>
+That change is enough to make all of those warnings go away, so many would
+likely see it as a good stopping point.  There is still, though, the matter
+of all those <tt>sockaddr_unsized</tt> structures, any of which might be
+the source of a catastrophic overflow at some point.  So, once the dust
+settles from this work, we are likely to see some attention paid to
+implementing bounds checking for those structures.  One possible approach
+mentioned in the patch set is to eventually add an <tt>sa_data_len</tt>
+field, so that the structure would contain the length of its
+<tt>sa_data</tt> array.  That would make it easy to document the
+relationship between the fields with the <a
+href="936728.html"><tt>counted_by()</tt> annotation</a>, enabling the
+compiler to insert bounds checks.
+<p>
+While the ability to write new code in Rust holds promise for reducing the
+number of memory-safety bugs introduced into the kernel, the simple fact is
+that the kernel contains a huge amount of C&nbsp;code that will not be
+going away anytime soon.  Anything that can be done to make that code
+safer is thus welcome.  The many variations of <tt>struct sockaddr</tt>
+that have made the rounds may seem silly to some, but they are a part of
+the process of bringing a bit of safety to an API that was defined over
+40&nbsp;years ago.  Ten years of KSPP have made the kernel safer, but the
+job is far from done.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Flexible array members</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Networking/struct sockaddr</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.19</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1045453/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1046550"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 18:56 UTC (Fri)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/1046550/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magfr" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046550" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does not the sa_family value define the size of sa_data, except for the AF_LOCAL case where the length is necessary?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046550/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046554"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 19:41 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1046554/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046554" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't you need a function call to determine that size though? If it was a straight array lookup, `__af_family_sizeof_sa_data[sa_family]` may itself read off the end of that array. A second bounds check on `sa_family` itself as well perhaps? Are the `AF_*` constant values dense enough to warrant it? It definitely seems like something beyond `__counted_by` at least.<br>
+<p>
+In Rust, I feel one would have `SockAddr::new(family: AfFamily) -&gt; SockAddr` and then make `sa_family` read-only from there on out. But C doesn't allow one to have only some public structure members (without tooling like <a href="https://www.youtube.com/watch?v=bYxn_0jupaI">https://www.youtube.com/watch?v=bYxn_0jupaI</a>).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046554/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046592"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2025 0:18 UTC (Sun)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1046592/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046592" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; In Rust, I feel one would have `SockAddr::new(family: AfFamily) -&gt; SockAddr` and then make `sa_family` read-only from there on out.</span><br>
+<p>
+This is an inelegant way of handling it. The more idiomatic representation would be an enum (the Rust equivalent of a tagged union), which automatically enforces that the discriminant (tag) is correct for whatever data you try to put inside of it. Then we don't need to bother with private members and checked constructors.<br>
+<p>
+You would have a series of separate structs for each address family, each with their own layout, and the enum would be a thin wrapper over those. That way, for example, AF_INET can have a 32-bit address plus a separate field for the port number, AF_INET6 can be largely identical but with a bigger address, AF_UNIX can have a (heap-allocated or fixed-capacity) string for the path, and so on. If one of the address families wants to enforce some invariant at construction time (e.g. "AF_UNIX path must not contain embedded null bytes"), then you put that logic at the struct level, and the enum never has to think about it. This is possible because you always construct the inner struct first, and only then go to wrap it in the enum (so enforcing the struct's invariants is simply not the enum's problem).<br>
+<p>
+Obviously this is not C-FFI compatible, but it's how you would write it from scratch in a hypothetical Rust-only universe. It is also not terribly difficult to convert between a scheme like the above and the C approach, so you might expect to find such a conversion layer in a serious Rust implementation of the sockets API.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046592/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046647"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2025 22:07 UTC (Sun)
+                               by <b>da4089</b> (subscriber, #1195)
+                              [<a href="/Articles/1046647/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="da4089" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046647" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I’m unfamiliar with Rust in this level of detail.<br>
+<p>
+Is it possible for a loadable kernel module to extend that enum at runtime with a previously-unknown-to-the-kernel address family?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046647/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046648"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2025 22:40 UTC (Sun)
+                               by <b>randomguy3</b> (subscriber, #71063)
+                              [<a href="/Articles/1046648/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="randomguy3" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046648" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In C terms, a Rust enum is most similar to a union (plus a value to tell you which union variant is active). Imagine the potential issues with allowing new union variants to be added at runtime - most notably, how would you safely destroy such a value?<br>
+<p>
+Of course (as with most things in software), this could be solved, but it would cost you (in performance, ergonomics, safety and/or another axis of flexibility).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046648/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2025 8:29 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1046664/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046664" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Destruction would be the least of the issues. Every location that uses it and matches on the variant and does something for each of them would be incomplete.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046829"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2025 20:23 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1046829/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046829" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Simple code compatibility can be guarded with #[non_exhaustive], if you anticipate the problem when you define the enum.[1]<br>
+<p>
+But the type system assumes that you will tell it about all of the variants at compile time. Layout optimizations are made under this assumption, so it cannot reasonably be unwound at runtime, even with #[non_exhaustive] (which is primarily meant as a backcompat lint).<br>
+<p>
+If the set of possible types is unbounded at runtime, probably you need to use a dyn-compatible trait instead of an enum. Then we can define methods on addresses and dynamically dispatch to them (or statically dispatch if the type is known). But this has a number of downsides, including all the usual DST restrictions (see [2]), as well as various annoying restrictions on the method signatures.[3]<br>
+<p>
+In contexts where it is acceptable to generate code handling each address type separately, the trait does not need to be dyn-compatible, because you can use ordinary enerics for that (specializations will be monomorphized and compiled at the same time as the rest of the module). But that doesn't work for cases where you want a single data structure that directly or indirectly contains instances of mixed types (e.g. the file descriptor table).<br>
+<p>
+It should also be emphasized that Rust is a systems programming language. If you don't like dyn Trait, you are allowed to manually re-implement your own version of it with unsafe code. There is no strict aliasing rule, so you can unsafely cast between different types as long as the object representations are valid at all of those types, and there's nothing stopping you from building a safe abstraction around that operation. This is probably not a great idea in most situations, but the language doesn't rule it out, and indeed it even provides primitives to help you do it correctly (e.g. std::any::TypeId). This might be appropriate in contexts where you only need a very small subset of dyn Trait functionality and don't want to live with all of its restrictions.<br>
+<p>
+[1]: <a href="https://doc.rust-lang.org/reference/attributes/type_system.html#r-attributes.type-system.non_exhaustive">https://doc.rust-lang.org/reference/attributes/type_syste...</a><br>
+[2]: <a href="https://doc.rust-lang.org/reference/dynamically-sized-types.html">https://doc.rust-lang.org/reference/dynamically-sized-typ...</a><br>
+[3]: <a href="https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility">https://doc.rust-lang.org/reference/items/traits.html#dyn...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046829/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1046658"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2025 4:28 UTC (Mon)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1046658/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046658" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That works with a closed set of options. It may well be so in Linux. But the constructor pattern might be a better fit if modules can provide their own socket family types. There is also the C-FFI boundary compatibility to consider in Linux.<br>
+<p>
+So, yes, I agree that an `enum` would be better in a vacuum, but we're not. I should have been clearer that it was a Rust spelling of a potential C API (because the syntax for this specific bit is nicer than C offers, IMO).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046658/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046665"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2025 8:32 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1046665/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046665" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Honestly, considering how rarely new address families pop up an enum might still be the better choice, that would also have the advantage that you then have to check every location that does something with multiple enum variants to see if code for the new address family has to be added there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046665/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1046853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 18, 2025 8:35 UTC (Tue)
+                               by <b>plugwash</b> (subscriber, #29694)
+                              [<a href="/Articles/1046853/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="plugwash" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046853" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Enums are great until you need to persist data to disk or pass it across a trust/version boundary.<br>
+<p>
+Then they are not so great, firstly the only stable ABI is "repr C" but that disables all layout optimisations. Secondly even if you use "repr C" creating an invalid value is still undefined behaviour.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046854"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 18, 2025 8:43 UTC (Tue)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1046854/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046854" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Persisting data to disk or sending it around the network is no problem with enums, you just shouldn't do it by numeric discriminants, use string discriminant names for that, ideally in a self-describing format like JSON (or the various binary equivalents).<br>
+<p>
+In fact what you should almost never do is persist some sort of numeric discriminant value the way most C programs do since that just leads to headaches in the future, not the least of which is that - without context - nobody has any idea which value means what. That can work fine if your enum is something like a day of the week or a month but not so much if it is something that is less well known or might change in the future.<br>
+<p>
+Passing data around a trust or version boundary also doesn't get any easier if you try to encode what is basically a sum type in terms of the actual facts of the domain you are dealing with in a less natural way the way most languages without sum types do.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046854/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1046660"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2025 6:06 UTC (Mon)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1046660/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046660" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The 4.4BSD Sockets API included an .sa_len member and SA_LEN macro. The BSD derivatives, including macOS, still have it; Solaris and Linux never adopted it, understandably because it was (IME) confusing if and when the member was used, as opposed to the out-of-struct socklen_t parameters to bind(2), connect(2), etc. The .sa_data_len proposal restores this element, except it sizes the family-specific portion rather than the entire struct like .sa_len[1], and it's confined to the kernel, so there'll hopefully be less confusion about the source of truth for the object size.<br>
+<p>
+[1] Analogous ISO C proposals for the counted_by attribute allow expressions for the size, similar to VLAs/VMAs, such that one could use something like, e.g., `counted_by(.sa_len - offsetof(struct sockaddr, sa_data))`.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046660/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1046836"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">sa_family</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2025 19:55 UTC (Mon)
+                               by <b>kees</b> (subscriber, #27264)
+                              [<a href="/Articles/1046836/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kees" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1046836" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Each SA_* is different. Some map to a fixed size, yes. But others map a variable size with a minimum bounds (either explicitly or implicitly).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046836/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1049565"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Historical tidbit</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 7, 2025 19:12 UTC (Sun)
+                               by <b>lukeshu</b> (guest, #105612)
+                              [<a href="/Articles/1049565/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="lukeshu" />
+                <input type="hidden" name="return" value="/Articles/1045453/#CommAnchor1049565" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The sa_data field was more than large enough to hold a network address in the early 1980s when this structure was first defined for BSD Unix</span><br>
+<p>
+That's not quite true! In the earliest versions there were two variants, the `struct sockaddr` that we know today that passed the data in the struct for when the data was small, and an "indirect" `struckt sockaddri` variant that passed length+pointer for when the data was big.<br>
+<p>
+<a rel="nofollow" href="https://github.com/dspinellis/unix-history-repo/blob/3573c034bb533247ae46756dc370f6edec04d287/usr/src/sys/sys/socket.h#L53-L73">https://github.com/dspinellis/unix-history-repo/blob/3573...</a><br>
+<p>
+(I assume there was a calling-convention reason that you couldn't pass more than 16 bytes as arguments.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049565/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

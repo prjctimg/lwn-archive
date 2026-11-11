@@ -1,0 +1,1413 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Debian vulnerability has widespread effects [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Debian vulnerability has widespread effects">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The recent Debian advisory for OpenSSL could lead to predictable cryptographic keys being gene [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/281436/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Debian vulnerability has widespread effects</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>May 14, 2008</br>
+           </div>
+<p>
+The <a
+href="http://lists.debian.org/debian-security-announce/2008/msg00152.html">recent
+Debian advisory for OpenSSL</a> could lead to predictable cryptographic
+keys being generated on affected systems.  Unfortunately, because of the
+way keys are used, especially by <tt>ssh</tt>, this can lead to problems on
+systems that never installed the vulnerable library.  In addition, because the
+<a href="http://openssl.org/">OpenSSL</a> library is used in a wide variety
+of services that require cryptography, a very large subset of security
+tools are affected.  This is a wide-ranging vulnerability that affects
+a substantial fraction of Linux systems.
+</p>
+
+<p>
+For a look at the chain of errors that led to the vulnerability, see
+our <a href="282038.html">front page article</a>.
+Here, we will concentrate on some of the details of the code, the impact of
+the vulnerability, and what to do about it.
+</p>
+
+<p>
+An excellent tool for finding memory-related bugs, <a
+href="http://valgrind.org/">Valgrind</a> was used on an application that
+used the OpenSSL library.  It complained about the library using
+uninitialized memory in two locations in <tt>crypto/rand/md_rand.c</tt>:
+<pre>
+    247:
+            MD_Update(&amp;m,buf,j);
+
+    467:
+    #ifndef PURIFY
+            MD_Update(&amp;m,buf,j); /* purify complains */
+    #endif
+</pre>
+While the lines of code look remarkably similar (modulo the pre-processor
+directive), their actual effect is very different.
+</p>
+
+<p>
+The first is contained in the <tt>ssleay_rand_add()</tt> function, which is
+normally called via the <tt>RAND_add()</tt> function.  It adds the contents
+of the passed in buffer to the entropy pool of the pseudo-random number
+generator (PRNG).  The other is contained in <tt>ssleay_rand_bytes()</tt>,
+normally called via <tt>RAND_bytes()</tt>,
+which is meant to return random bytes.  It adds the contents
+of the passed in buffer&mdash;before filling it with random bytes to return&mdash;to the entropy pool as well.  The major difference
+is that removing the latter might marginally reduce the entropy in the PRNG
+pool, while removing the former effectively stops any entropy from being
+added to the pool.
+</p>
+
+<p>
+For both <tt>RAND_add()</tt> and <tt>RAND_bytes()</tt>, the buffer that
+gets passed in may not have been initialized.  This was evidently known by
+the OpenSSL folks, but remained undocumented for others to trip over
+later.  The "<tt>#ifndef PURIFY</tt>" is a clue that someone, at some
+point, tried to handle the same kind of problem that Valgrind was reporting
+for the similar, but proprietary, Purify tool.  While it isn't necessarily
+<i>wrong</i> to add these uninitialized buffers to the PRNG pool, it is
+something that tools like Valgrind will rightly complain about.  Since it
+is dubious whether it adds much in the way of entropy, while constituting a
+serious hazard for uninitiated, some kind of documentation in the code
+would seem mandatory. 
+</p>
+
+<p>
+The major response from the OpenSSL team seems to be from core team member Ben Laurie's
+weblog, where he has a rant entitled "<a href="http://www.links.org/?p=327">Vendors Are
+Bad For Security</a>".  In it, and its <a
+href="http://www.links.org/?p=328">follow-up</a>, he makes some good points
+about mistakes that were made, while seeming to be unwilling for OpenSSL to take any
+share of the blame.
+</p>
+
+<p>
+The end result is that OpenSSL would create predictable random numbers,
+which would then result in predictable cryptographic keys.  According to
+the advisory:
+<div class="BigQuote">
+Affected keys include SSH keys, OpenVPN keys, DNSSEC keys, and key
+material for use in X.509 certificates and session keys used in SSL/TLS
+connections.  Keys generated with GnuPG or GNUTLS are not affected,
+though.
+</div>
+</p>
+
+<p>
+A <a
+href="http://security.debian.org/project/extra/dowkd/dowkd.pl.gz">program
+that can detect some weak keys</a> has also been released.  It uses
+256K hash values to detect the bad keys, which would imply 18-bits of
+entropy in the PRNG pool of vulnerable OpenSSL libraries.  By using hashes
+of the keys in the detection program, the authors do not directly give away the key
+values that get generated, but it should not be difficult for an attacker
+to generate and use that list.
+</p>
+
+<p>
+For affected Debian-derived systems, the cleanup is relatively
+straightforward, if painful.  The <a
+href="http://wiki.debian.org/SSLkeys">SSLkeys page on the Debian wiki</a>
+has specific information on how to remove weak keys along with how to
+generate new ones for a variety of services affected.  Obviously, none of those steps should be taken until
+the OpenSSL package itself has been upgraded to a version that fixes the hole.
+</p>
+
+<p>
+A bigger problem may be for those installations based on distributions that
+were not directly affected because they did not distribute the vulnerable
+OpenSSL library.  Those machines may very well have weak keys installed in
+user accounts as ssh <tt>authorized_keys</tt>.  A user who generated a key
+pair on some vulnerable host may have copied the public key to a host that
+was not vulnerable.  
+This would allow an
+attacker to access the account of that user by brute forcing the key from
+the 256K possibilities.</p>
+
+<p>
+Because of that danger, the
+Debian project <a
+href="http://lists.debian.org/debian-devel-announce/2008/05/msg00003.html">suspended
+public key authentication on debian.org machines</a>.  In addition, all
+passwords were reset because of the possibility that an attacker could have
+captured them by decrypting the ssh traffic using one of the weak keys.
+One would guess that debian.org machines would have a higher incidence of
+weak keys, but any host that allows users to use ssh public key
+authentication is potentially at risk.
+</p>
+
+<p>
+The weak key detector (dowkd) has some fairly serious limitations:
+<div class="BigQuote">
+dowkd currently handles OpenSSH host and user keys and OpenVPN shared
+secrets, as long as they use default key lengths and have been created
+on a little-endian architecture (such as i386 or amd64).  Note that
+the blacklist by dowkd may be incomplete; it is only intended as a
+quick check.
+</div>
+
+<p>
+In order to ensure that there are no weak keys installed as public keys on
+other hosts, it may be necessary to remove all <tt>authorized_keys</tt>
+(and/or <tt>authorized_keys2</tt>) entries for all users.  It may also be
+wise to set all passwords to something unknown.  Until that is done, there
+still remains a chance that a weak key may allow access to an attacker.  It
+is a unpleasant task that needs to be done for those who administer a multi-user system.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Distribution security</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">OpenSSL</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Random number generation</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/282230/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor282371"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 1:13 UTC (Thu)
+                               by <b>csamuel</b> (<b>&#x272D; supporter &#x272D;</b>, #2624)
+                              [<a href="/Articles/282371/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="csamuel" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282371" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>It is believed that even <a 
+href="http://wiki.debian.org/SSLkeys#head-d841ac769390d013577ce3fd2be24b8cf5a74cfb">using 
+a good DSA key from a client with a broken OpenSSL library</a> can 
+compromise the private key due to a DSA specific attack</p>
+
+<blockquote><em>Additionally, some DSA keys may be compromised by only 
+their use. A strong key (i.e., generated with a 'good' OpenSSL) but used 
+locally on a machine with a 'bad' OpenSSL must be considered to be 
+compromised. This is due to an 'attack' on DSA that allows the secret key 
+to be found if the nonce used in the signature is reused or 
+known.</em></blockquote>
+
+<p>The Metasploit project has already <a 
+href="http://metasploit.com/users/hdm/tools/debian-openssl/">published an 
+exhaustive list of keys</a>:</p>
+
+<blockquote><em>This will generate a new OpenSSH 1024-bit DSA key with 
+the value of getpid() always returning the number "1". We now have our 
+first pre-generated SSH key. If we continue this process for all PIDs up 
+to 32,767 and then repeat it for 2048-bit RSA keys, we have covered the 
+valid key ranges for x86 systems running the buggy version of the OpenSSL 
+library. With this key set, we can compromise any user account that has a 
+vulnerable key listed in the authorized_keys file. This key set is also 
+useful for decrypting a previously-captured SSH session, if the SSH 
+server was using a vulnerable host key. Links to the pregenerated key 
+sets for 1024-bit DSA and 2048-bit RSA keys (x86) are provided in the 
+downloads section below.</em></blockquote>
+
+<p>They also have some tips on how to speed up an attack:</p>
+
+<blockquote><em>When attempting to guess a key generated at boot time 
+(like a SSH host key), those keys with PID values less than 200 would be 
+the best choices for a brute force. When attacking a user-generated key, 
+we can assume that most of the valid user keys were created with a 
+process ID greater than 500 and less than 10,000. This optimization can 
+significantly speed up a brute force attack on a remote user account over 
+the SSH protocol.</em></blockquote>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282371/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 21:15 UTC (Thu)
+                               by <b>janfrode</b> (subscriber, #244)
+                              [<a href="/Articles/282605/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="janfrode" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282605" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Unfortunately this "exhaustive list of keys" doesn't seem to include odd sized keys.. We seem
+to have quite a few keys of size 2047 and 1023 bits. 
+
+Hope someone will generate these lists soon too..
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282617"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 22:06 UTC (Thu)
+                               by <b>janfrode</b> (subscriber, #244)
+                              [<a href="/Articles/282617/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="janfrode" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282617" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Just got feedback from HD Moore that 1023bits is available on his website now, and 2047bits
+will be soon too.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282617/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor282378"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 2:23 UTC (Thu)
+                               by <b>jamesh</b> (guest, #1159)
+                              [<a href="/Articles/282378/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jamesh" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282378" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+If the OpenSSL guys want to continue using uninitialised buffers as a source of entropy, it
+might be worth sprinkling a few calls to VALGRIND_MAKE_MEM_DEFINED() in the appropriate
+locations.
+
+It is a no-op when no running under Valgrind and should be fairly cheap.  If the overhead is
+small enough, it'd be useful to include in release builds on systems that support Valgrind.
+Not being able to run a memory debugger on critical infrastructure like OpenSSL (or on
+applications that use it) is a serious problem.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282378/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 4:41 UTC (Thu)
+                               by <b>proski</b> (guest, #104)
+                              [<a href="/Articles/282399/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="proski" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282399" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I would prefer that only inputs definitely not controlled by attackers are used, and I'm not sure it can be guaranteed that uninitialized data is not manipulated in some way.  There are sources of entropy that are harder to subvert.  I think it's better to have less entropy but avoid giving attackers another possibility for exploits.
+<p>
+You don't use enemy's rivets to build your battleships.  It may be just little pieces of metal that get a very different shape when used, but never underestimate those who are determined to harm you.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor282412"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 6:32 UTC (Thu)
+                               by <b>cpeterso</b> (guest, #305)
+                              [<a href="/Articles/282412/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cpeterso" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282412" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Why does OpenSSL have its own PRNG anyways? Shouldn't it rely on the underlying operating
+system's secure RNG (for those that have one, which includes Debian)?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282412/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 8:56 UTC (Thu)
+                               by <b>IkeTo</b> (subscriber, #2122)
+                              [<a href="/Articles/282436/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="IkeTo" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282436" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+<font class="QuotedText">&gt; Shouldn't it rely on the underlying operating</font>
+<font class="QuotedText">&gt; system's secure RNG (for those that have one, which includes Debian)?</font>
+
+
+It does (see crypto/rand/rand_unix.c in openssl source code).  But there gotta be some way in
+which the random bytes obtained via various system-dependent methods to be put into one
+coherent interface so that the remaining system independent code can use them.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor282425"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Key rollover support in ssh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 7:30 UTC (Thu)
+                               by <b>dion</b> (guest, #2764)
+                              [<a href="/Articles/282425/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dion" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282425" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Wouldn't it be trivial, yet highly useful to have a key-rollover feature in the ssh client?
+
+The client could detect that it's using a defective key and generate a new one, while stashing
+away the old, compromised key.
+When the user tries to log in the ssh client could then try the new key first and fall back to
+the old key.
+When logged in the client could then remove the old key from authorized_keys and insert the
+new key.
+
+This would save a lot of manual work and what's more important: It would eventually get rid of
+all the compromised keys, even on poorly maintained systems (where the server doesn't
+blacklist) where the user is less than diligent about changing his keys.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282425/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor282428"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 7:44 UTC (Thu)
+                               by <b>Ross</b> (guest, #4065)
+                              [<a href="/Articles/282428/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Ross" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282428" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+<font class="QuotedText">&gt; ... While it isn't necessarily wrong to add these uninitialized buffers to the PRNG pool ...</font>
+
+Actually it is, strictly speaking, wrong according to the C standard.  It's as bad as using an
+uninitialized variable, punning pointer types, assuming unaligned access is ok, etc.  -- It
+seems to work, but it can break in really annoying ways.
+
+Warnings and code analysis tools are good -- it is the blind "fixing" of the things they
+report is bad.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282428/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 13:29 UTC (Thu)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/282482/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="BenHutchings" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282482" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+If uninitialised memory is accessed as an array of unsigned char, that's actually OK -
+unsigned char can't have any trap values. I don't know which type is being used here.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282609"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Debian vulnerability has widespread effects</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 21:39 UTC (Thu)
+                               by <b>Ross</b> (guest, #4065)
+                              [<a href="/Articles/282609/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Ross" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282609" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+While that gets rid of the likely causes of actual errors, I beleive it still violates the
+standard, and a compiler is free to do whatever it wants in that situation.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282609/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor282429"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Comments missing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 7:47 UTC (Thu)
+                               by <b>rvfh</b> (guest, #31018)
+                              [<a href="/Articles/282429/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rvfh" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282429" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Not commenting code is usually bad, but not commenting code that uses a 'clever trick' seems
+to me as recipe for disaster. And that's exactly what happened here.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282429/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282454"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Comments missing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 10:41 UTC (Thu)
+                               by <b>erich</b> (guest, #7127)
+                              [<a href="/Articles/282454/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="erich" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282454" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+actually it was a different instance of the line - and that line actually is a pretty
+straightforward use of the Message Digest API - where the harm occurred.
+The place where "likely uninitialized data" was used can be removed safely.
+
+Still I have to agree with you that the code should have been better documented.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282454/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor282455"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Effects much worse for other distributions than expected</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 10:48 UTC (Thu)
+                               by <b>erich</b> (guest, #7127)
+                              [<a href="/Articles/282455/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="erich" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282455" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      What concerns me most is that other distribution users are likely to assume they're safe. They're not necessarily so. They're only safe if none of their users is/was running Debian or Ubuntu.<br>
+
+It's very simple:
+<ul>
+<li>Server A runs some 'unaffected' Linux distribution</li>
+<li>User B is runinng an 'affected' Linux distribution</li>
+<li>User B enables key-based logins on Server A to his account / maybe even the root account</li>
+<li>Since his key is weak, Logins to Server A can be bruteforced easily.</li>
+</ul>
+
+So <b>if any of your users might be running Debian or Ubuntu - so if he might have a weak key - you should update OpenSSH</b> to a version with the blacklist of known weak keys shipped by Debian and Ubuntu.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282455/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282469"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Effects much worse for other distributions than expected</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 11:47 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/282469/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282469" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I *believe* that logins *from* server A to server B are safe, even if server A is using a DSA
+key, because server B never knows anything but the public half of that key (which is, well,
+public).
+
+Am I right?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282469/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282532"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Effects much worse for other distributions than expected</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 15:45 UTC (Thu)
+                               by <b>rfunk</b> (subscriber, #4054)
+                              [<a href="/Articles/282532/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rfunk" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282532" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I think you're backwards.  Or maybe I am.  Referring to two servers rather 
+than a server and a client makes this more confusing; in any ssh 
+connection, one side is acting as a server and the other side is acting as 
+a client, no matter what other purpose the two machines have.
+
+When using public-key authentication, the ssh server knows the public half 
+of the key, and the ssh client knows the private half of key (and also the 
+public half).
+
+If the key is vulnerable, then any client given a bunch of tries can guess 
+the private half of the key.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282532/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282585"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Effects much worse for other distributions than expected</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 19:19 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/282585/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282585" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Er, yeah, sorry, bad phrasing. If the client (from whom you're connecting, 
+which has the secret key) is not vulnerable, and the server (to which 
+you're connecting, and which has the public key) is vulnerable, you are 
+safe: otherwise, you are not.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282585/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282599"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Effects much worse for other distributions than expected</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 20:24 UTC (Thu)
+                               by <b>rfunk</b> (subscriber, #4054)
+                              [<a href="/Articles/282599/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rfunk" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282599" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Actually I wouldn't say you're entirely safe if the server is vulnerable and you're not.  
+There's still the issue of the host key, which is used to prevent the bad guys from 
+pretending to be the server.  If that host key is compromised, then someone can pretend 
+to be the server.  Then you're in a little trouble if they can also get your public key (it's 
+treated as public, shouldn't be horribly hard), and more trouble if you're using password 
+authentication.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282599/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor282467"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Entropy from uninitialized memory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 11:53 UTC (Thu)
+                               by <b>zdzichu</b> (subscriber, #17118)
+                              [<a href="/Articles/282467/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zdzichu" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282467" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I have two questions about this mechanisms.
+
+First, how it comes that only PID and unitialized memory is feed to OpenSSL's PRNG? The other
+comments indicate that there are systems specific feeds (like /dev/random) in sources, yet
+Debian one only used PID and this uninitialized buffer.
+
+Second, let's say that offending patch is removed, and PRNG is seeded from PID and unitialized
+memory. How big is this buffer? This matters, because on Linux malloc()s larger than certain
+size (128k?) are done via mmap(). And kernel zeores mmaped memory. Thus, if buffer used as
+entropy was allocated as big enough by malloc(), it would end zeroed. And _even reverting_
+this patch won't help, as this buffer would still be zeroed. On every Linux, not only Debian.
+
+Of course this buffer may be statically allocated, but this raises another question. I presume
+various "hardening" patchsets would clear all memory before passing it to applications, just
+to mitigate posssibly information disclosure. Won't this actions defeat seeding PRG with
+unitialized memory ?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282467/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282486"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Entropy from uninitialized memory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 13:36 UTC (Thu)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/282486/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="BenHutchings" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282486" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+/dev/random (or similar source) is fed in by the first MD_Update() call, which has now been
+restored.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282486/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor282555"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Entropy from uninitialized memory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 18:06 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/282555/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282555" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+There is a function that adds entropy to the pool. This function is called with secure random
+values in some places, and called with uninitialized memory in other places. The Debian
+developers commented out the line that actually mixes the buffer into the pool, rather than
+making the function only get called with initialized values. This took care of the
+uninitialized memory getting used, but also meant that the secure random numbers didn't get
+used, either.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282555/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor282538"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 16:44 UTC (Thu)
+                               by <b>rfunk</b> (subscriber, #4054)
+                              [<a href="/Articles/282538/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rfunk" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282538" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+While I agree that the OpenSSL code and procedures should have been 
+documented better, I don't think enough attention is being given to the 
+statement that Ben Laurie emphasizes:
+
+** Never fix a bug you don&amp;#8217;t understand. **
+
+I would add that this especially applies to crypto code, and even more 
+especially to crypto code in a widely-used crypto library -- a library 
+that is widely used because people trust that library to get crypto right.
+
+As a longtime Debian user I'm embarrassed and saddened that Debian screwed 
+this up so badly.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282538/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282621"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 23:00 UTC (Thu)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/282621/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdeug" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282621" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+And how do you know if you understand the bug or not? The way Ben Laurie puts it, it's
+basically "trust us; we're smarter than you." The Debian maintainer asked openssl-dev if it
+was okay, and they said it was. There was obviously a failure to communicate, but I'd like a
+better answer then "treat OpenSSL like it's proprietary software".
+
+People make mistakes--all people. I've seen Debian take responsibility and try and fix things.
+I've seen the OpenSSL people blame Debian for having the gall to change free software, and for
+not communicating with a secret mailing list, with a large bit of whining about their poor
+resources. I haven't seen any statements from OpenSSL people saying "we will do this in the
+future to help distributions communicate with us and effectively fix bugs". People who take
+responsibility are hard to vilify; those who use a screwup they were involved in as an excuse
+to vilify others tend to get more blame. Probably a good thing.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282621/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282626"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 23:26 UTC (Thu)
+                               by <b>rfunk</b> (subscriber, #4054)
+                              [<a href="/Articles/282626/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rfunk" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282626" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+For starters, if you're just trying to silence warnings, then you probably don't understand 
+the bug.
+Also, if you know you have know idea what effect your change would have on the very 
+facility that the line is intended to affect, then you probably don't understand the bug.
+
+The Debian maintainer asked openssl-dev if it was ok to comment out two lines of 
+code, "when debugging applications".  The response was "if it helps with debugging, go 
+ahead."  There was nothing saying "I'm checking this into Debian".
+
+It's enlightening to read the original openssl-dev post:
+<a href="http://marc.info/?l=openssl-dev&amp;m=114651085826293&amp;w=2">http://marc.info/?l=openssl-dev&amp;m=114651085826293&amp;...</a>
+
+"When debbuging applications that make use of openssl using valgrind, it can show alot 
+of warnings about doing a conditional jump based on an unitialised value."
+...
+"But I have no idea what effect this really has on the RNG."
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282626/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282633"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2008 1:26 UTC (Fri)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/282633/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdeug" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282633" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+At least one part of the bug was that it was making Valgrind spew out warnings when trying to
+debug user programs. The warnings themselves were the visible part of the bug.
+
+He did not say "if it was ok to comment out two lines of 
+code, "when debugging applications"." He asked if it was okay to comment out two lines of
+code, nothing about limiting when. And even if it did help with debugging, surely the optimal
+response would point out that the result would be a dangerously crippled library? A lot of
+debugging systems make it out into the real world so problems can be discovered without
+installing a special "debuggable" version of the program.
+
+Kurt should have made it more clear what he was going to do with the patch, but the people
+replying should have taken a better look at the patch even without that. A bad patch is not
+just the fault of its creator; everyone who signs off on it also has to take some part of the
+blame.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282633/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282709"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2008 12:55 UTC (Fri)
+                               by <b>rfunk</b> (subscriber, #4054)
+                              [<a href="/Articles/282709/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rfunk" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282709" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+In his first line he gave the context of debugging applications.
+
+He never gave a patch.  He pointed to a couple lines.
+
+Nor did he give any any context to the two lines he was talking about, other than the 
+#ifndef PURIFY around the second line.  The fact that he gave no context is huge for me, 
+because it makes no sense to comment out lines that generate warnings without looking 
+at the context of those lines.
+
+Finally, nobody "signed off" on anything.  One guy said, "If it helps with debugging, I'm in 
+favor of removing them."  That's not the same as, "sure, they're useless lines, delete 
+them for production.  And then give that version to countless people to run in production 
+too."
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282709/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor282734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2008 15:29 UTC (Fri)
+                               by <b>ranmachan</b> (guest, #21283)
+                              [<a href="/Articles/282734/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ranmachan" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282734" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+In this case, the warning _is_ the bug.
+The code was fine and had no bug, it intentionally fed unitialised memory to the entropy pool.
+The 'bug' was in the interaction with valgrind, which rightly operates under the assumption
+that using uninitalised memory is 'bad' and thus generates a warning.  However here it hit the
+(probably only) corner case where using unitialised memory is 'good' and thus the warning was
+bogus.
+Someone asked the Debian Maintainer to fix this warning.  
+Instead of using a valgrind-specific workaround (add information to the executable which tells
+valgrind 'treat this as initialised memory') he chose to remove the code feeding uninitialised
+memory to the entropy pool.
+If he hadn't botched up the patch and crippled the entropy pool, this would be a reasonable
+solution to the problem, since Linux has a good internal entropy generator (/dev/random) which
+is also used to feed the pool.
+AFAICS adding uninitialised memory is more of a fallback "in case there is no /dev/random or
+/dev/random is broken, we still have _some_ more entropy than just the pid and time" (or
+whatever else gets mixed in).
+
+But: IANASE (I am not a security expert)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282741"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2008 15:44 UTC (Fri)
+                               by <b>rfunk</b> (subscriber, #4054)
+                              [<a href="/Articles/282741/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rfunk" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282741" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+The problem here isn't about whether or not to add uninitialized memory to the entropy 
+pool.  Removing that line was fine.  The problem was removing the other line, which is 
+where all entropy (except the PID) was added.
+
+The Debian maintainer didn't look at the wider context to see that one of those lines was 
+absolutely necessary, and that the routine it was in just may have been wrongly called 
+with potentially-uninitialized memory once or twice.
+
+This reminds me of Linus's argument about debuggers making programmers stupid, 
+making them focus on narrow scope rather than understanding the way the code is 
+supposed to work in context.  In this case it was valgrind that made the programmer 
+stupid.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282741/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor282886"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give Debian maintainers the deserved blame</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 18, 2008 13:08 UTC (Sun)
+                               by <b>liljencrantz</b> (guest, #28458)
+                              [<a href="/Articles/282886/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="liljencrantz" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282886" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+No. 
+
+Accessing uninitialized data leads to undefined behaviour. It can be argued that this
+undefined behaviour should logically/morally/statistically be limited to filling that memory
+region with arbitrary data, while letting the system be otherwise unaffected, but that is not
+required by the standard. The question of what undefined means w.r.t. the C standard has come
+up many, many times in the past where users have repeatedly expected that code triggering
+undefined behaviour should still result in what they feel is «reasonable behaviour», e.g. a
+limit to the definition of undefined. This point of view has never been accepted, as it has
+time and time again been found that doing so will decrease the performance or the reliability
+of software. It would be perfectly standards compliant for the compiler to emit code causing
+the system to crash, or to eject a spear from the monitor into the users head. The former
+behaviour would probably be ideal.
+
+As has been said many, many times earlier in this debate, relying on 'clever tricks' that
+happen to work on most modern systems is a very bad idea. Causing programs like Valgrind to
+spew out errors making debugging harder is the least of the problems with this code; it will
+very likely cause programs to crash under some future environemnt and it makes the code
+significantly harder to understand. Because uninitialized memory is also something that an
+attacker may be able to guess or even modify, this is also a rather significant information
+leak. All said and done, this part of the OpenSSL code is a very large and scary bug. The fact
+that the OpenSSL developers seem to be unwilling to admit to just how bad the quality of this
+code was really scares me w.r.t. the overall quality of OpenSSL. If this type of gung ho,
+«works for me» attitude is common in OpenSSL, there are likely many more of these issues
+lurking around in that code base.
+
+Note 1: Obviously, the bug created by the DD while trying to fix the original bug was much
+bigger than the original bug.
+
+Note 2: The existance of extremely shoddy code in OpenSSL is not what scares me - we are all
+fallible. What scares me is the response of the OpenSSL team.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282886/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor282546"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">brute force attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2008 16:59 UTC (Thu)
+                               by <b>kh</b> (guest, #19413)
+                              [<a href="/Articles/282546/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kh" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282546" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+So I guess we will next start to see brute force attacks to ssh keys in addition to the
+current dictionary attacks on passwords against ssh. In the past I was seeing such high volume
+of ssh attempts that they were acting as a denial of service attack on certain servers. I
+stopped this with denyhosts myself - I think this highlights another good of only giving an IP
+address a limited number of failed attempts on any authenticated service. 
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282546/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor282738"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">brute force attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2008 15:31 UTC (Fri)
+                               by <b>ranmachan</b> (guest, #21283)
+                              [<a href="/Articles/282738/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ranmachan" />
+                <input type="hidden" name="return" value="/Articles/282230/#CommAnchor282738" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+There's already a proof of concept exploint on full-disclosure:
+<a href="http://www.derkeiler.com/Mailing-Lists/Full-Disclosure/2008-05/msg00416.html">http://www.derkeiler.com/Mailing-Lists/Full-Disclosure/20...</a>
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/282738/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

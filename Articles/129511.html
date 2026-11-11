@@ -1,0 +1,224 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Realtime preemption and read-copy-update [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Realtime preemption and read-copy-update">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Ingo Molnar's massive realtime preemption patch is an attempt to bring near-realtime response t [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/128951/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Realtime preemption and read-copy-update</h1>
+<div class="Byline">[Posted March 30, 2005 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Ingo Molnar's massive realtime preemption patch is an attempt to bring
+near-realtime response to the stock Linux kernel.  It works by making almost
+everything in the kernel preemptible.  Spinlocks turn into preemptible
+mutexes; interrupt handlers get moved into preemptible kernel threads,
+etc.  The result is a major change in how the scheduling of kernel code is
+done and quick response to external events.
+This work has been quieter in recent times, but it has not stalled by
+any means.
+<p>
+
+When LWN last <a href="107269.html">looked at the realtime preemption
+patch</a>, one of the remaining rough spots was its interaction with the
+read-copy-update (RCU) mechanism.  RCU, remember, encapsulates a
+conceptually simple (though a bit more gnarly in the implementation)
+technique.  A resource of interest (a routing table entry, say) is
+referenced by a pointer.  When that resource must be changed, a copy is
+made and the changes are done there; the pointer is then directed at the
+new copy.  At some future, safe time, the old version can be freed.  Linux
+RCU works by requiring that all accesses to RCU-protected data structures
+be atomic; with that constraint, a "safe time" can be defined as "after
+every processor on the system has scheduled."  Since scheduling while
+holding a reference to an RCU-protected structure is against the rules, any
+such structure which was made inaccessible before all processors schedule
+cannot be referenced by any processor afterward.
+<p>
+
+Since accesses to RCU-protected structures must be atomic, the RCU locking
+function (<tt>rcu_read_lock()</tt>) disables preemption.  But disabling
+preemption is exactly what the realtime preemption patch is trying to get
+away from, so something had to give.  Ingo had solved this problem by
+requiring that all RCU users identify an explicit lock which protects the
+structures in question, and modifying the RCU locking functions to take
+that lock as a parameter.  This approach was never optimal.  It caused the
+creation of a whole 
+new family of new RCU functions to cope with every type of lock that might
+be used, and, simultaneously, decreased the flexibility of the RCU read
+locking mechanism.  And, to a great extent, it simply replaced RCU with
+more traditional locking which, while it works, does not have the
+scalability advantages which were the motivation for RCU in the first
+place.
+<p>
+
+The RCU issue was clearly <a href="/Articles/129563/">on Ingo's mind</a>:
+<p>
+<div class="BigQuote">
+	If PREEMPT_RT is merged into the upstream kernel then it will (at
+	least initially) be at a status similar to NOMMU: it will be
+	tolerated as long as it causes no 'drag' on the main code. The RCU
+	API variants i introduced clearly violated this requirement, and
+	were my #1 worry wrt. upstream mergability.
+</div>
+<p>
+So Ingo was pleased when RCU creator Paul McKenney <a
+href="/Articles/128228/">proposed some approaches</a> for making RCU and
+realtime preemption work together.  Paul's message goes through a series of
+increasingly complex solutions, and is worth reading in its own right.  The
+core idea, however, is that, in a fully preemptible world, RCU cannot
+depend on atomic access to data structures, and thus cannot use the "all
+processors have scheduled" heuristic to know that the time has come to
+execute a given set of RCU cleanup functions.  So the tracking of code
+executing within RCU critical sections must be made more explicit.  Paul's
+solutions used a reader/writer lock for that purpose, but the approach
+taken in Ingo's <a href="/Articles/129211/">latest realtime preemption
+patch</a> is a little different.
+<p>
+
+The code executed to go into an RCU-protected section now looks like this
+(when configured for realtime preemption):
+<p>
+<pre>
+    void rcu_read_lock(void)
+    {
+	if (current-&gt;rcu_read_lock_nesting++ == 0) {
+		current-&gt;rcu_data = &amp;get_cpu_var(rcu_data);
+		atomic_inc(&amp;current-&gt;rcu_data-&gt;active_readers);
+		smp_mb__after_atomic_inc();
+		put_cpu_var(rcu_data);
+	}
+    }
+</pre>
+<p>
+The idea is simple: a per-CPU count of processes in RCU critical sections
+is kept.  When a process goes into a critical section, a pointer to the
+current CPU's counter is stored with the task information, so
+that the right counter will be decremented later on.  There is also a
+per-process variable which keeps track of RCU section nesting.  No further
+work needs to be done before the process can access the protected
+structure; in particular, no locks are acquired.
+<p>
+When the process exits the critical section, the process is reversed: the
+nesting count is decremented.  When that count goes to zero, the per-CPU
+count is decremented as well.  If the per-CPU count drops to zero, then
+that processor is deemed to have "quiesced," with no processes running
+within RCU critical sections.  Once all CPUs have quiesced in this way (as
+tracked by a bitmask of processors in the system), all RCU cleanup
+functions queued before their respective processors quiesced can be
+called.  
+<p>
+
+This scheme restores the core RCU functionality, allowing lock-free access
+to fast-path data structures.  It also retains the current RCU API, with
+the result that the realtime preemption patch becomes significantly less
+intrusive.  It is not a perfect implementation, however.  It requires that
+each CPU regularly find itself with no processes executing within RCU
+critical sections.  Since these sections are now preemptible, the "quiet"
+times could be quite far apart on heavily-loaded systems.  While the system
+is waiting for a processor to quiesce, the RCU callback structures for the
+cleanup functions will continue to accumulate, to the point that quite a
+bit of memory could be used before the cleanup actually happens.  For the
+realtime case, this tradeoff is acceptable: latency, not memory use, is the
+most important factor.  Since the existing RCU algorithm is used when
+realtime preemption is not configured in, everybody should be happy.  In
+practice, further work may be required; in particular, it may be necessary
+to find a way to force RCU cleanup when the system gets low on memory.
+Meanwhile, however, the realtime
+preemption patch appears to have gotten past one more major hurdle on its
+way toward possible inclusion into the mainline.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Latency</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Preemption</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Read-copy-update</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Realtime</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/129511/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor130095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Realtime preemption and read-copy-update</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2005 5:56 UTC (Fri)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/130095/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bronson" />
+                <input type="hidden" name="return" value="/Articles/129511/#CommAnchor130095" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Wow.  Just when I thought Linux was getting good enough, that it has all the features I need for the forseeable future, along comes something like this that makes me say, I want I want I want!<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/130095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2005, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1089 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Adding fs-verity support for Fedora 36? [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Adding fs-verity support for Fedora 36?">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Adding fs-verity file-integrity information to RPM packages for Fedora 36 is the  topic of a re [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/878144/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Adding fs-verity support for Fedora 36?</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>December 14, 2021</br>
+           </div>
+<p>
+Adding <a href="790185.html">fs-verity</a> file-integrity information
+to RPM packages for Fedora&nbsp;36 is the 
+topic of a recent discussion on the Fedora devel mailing list.  The feature
+would provide a means to install files from RPM packages as read-only files
+that cannot be read or otherwise operated on if the data in the files changes
+at any point.  The proposal is mostly about making the plumbing available
+for use cases that are not particularly clear—which has led to some
+questions and skepticism among those participating in the thread.
+</p>
+
+<h4>fs-verity and RPM</h4>
+
+<p>
+Fs-verity is a kernel feature that is supported by some filesystems; it provides a way to ensure
+that the contents of a file cannot 
+change on disk.  It revolves around a <a
+href="https://en.wikipedia.org/wiki/Merkle_tree">Merkle tree</a> that is
+created for each file being protected; the tree contains hashes of each data
+block in the file.  When a file is protected by fs-verity, it is marked as
+read-only and every read operation checks that the block read matches the
+value stored in the tree; the operation fails if there is no match.  In
+addition, the tree itself can be cryptographically signed to ensure that
+nothing has been changed underneath the filesystem by, say, accessing the
+raw block device or image file.
+</p>
+
+<p>
+Fedora program manager Ben Cotton <a
+href="/ml/fedora-devel/CA+voJeW18Nv=m2+FWNZ4wdJo5rddjZaKo+XcO6ph-mhcn-mf-Q@mail.gmail.com/">posted
+the Fedora change proposal</a> to add fs-verity support on behalf of the feature owners:  Davide
+Cavalca, Boris Burkov, Filipe Brandenburger, Michel Alexandre Salim, and
+Matthew Almond.  There are several elements to the plan.  To start with,
+the <a href="https://pagure.io/koji/">Koji
+build system</a> needs to be able to create and sign the Merkle tree for each
+file that gets shipped in the RPM package.  The tree itself is not added to
+the RPM package, just the signed top-level hash for each file.
+</p>
+
+<p>
+On the other end, an optional fs-verity
+RPM plugin would install the Fedora key and enable fs-verity for each
+file it installs.  The filesystem would then recreate the Merkle tree, check it against
+the signature in the RPM metadata, and store the
+tree with the file.  After that, each access to the file will be checked
+against the tree, which means that various kinds of operations (e.g. 
+<tt>read()</tt>, <tt>mmap()</tt>, <tt>execve()</tt>, etc.) will only
+proceed if the data blocks on disk have not changed.
+</p>
+
+<p>
+The proposal mainly focuses on the build side of the equation:
+"<q>Specifically, installing and enabling the fs-verity rpm plugin 
+by default is explicitly considered out of scope here.</q>"  The
+overhead of creating the Merkle tree at installation time did not "<q>appear to
+meaningfully slow down package installs during empirical testing</q>",
+but there is some (unspecified) cost of creating the tree for every Koji build, of
+course.  The Merkle tree is only stored if the RPM fs-verity plugin is
+enabled and adds roughly 1/127th (0.8%) to the size of the installed file.  All
+RPMs would get additional metadata, in the form of signatures, if the
+proposal is adopted, but even that is fairly negligible: "<q>in the vast
+majority of cases we expect to see 
+minimal to no size increase thanks to RPM header packing</q>". 
+</p>
+
+<h4>Reaction</h4>
+
+<p>
+Kevin Fenzi <a
+href="/ml/fedora-devel/20211202210924.uua5ngb2v7vt6yfn@logain.scrye.com/">had
+a number of questions</a> about the proposal.  He wondered which keys
+would be used to sign the Merkle tree at build time and who would work on
+the changes to the <a href="https://pagure.io/robosignatory">RoboSignatory
+component</a> that supplies signatures to Koji in order to make all of this
+happen.  In addition, only ext4, F2FS, and, <a 
+href="https://developers.facebook.com/blog/post/2021/10/19/fs-verity-support-in-btrfs/">since
+Linux&nbsp;5.15</a>, 
+Btrfs (<a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=146054090b0859b28fc39015c7704ccc3c3a347f">commit</a>)
+have support for fs-verity; what happens for other filesystems
+such as XFS?
+</p>
+
+<p>
+Cavalca <a
+href="/ml/fedora-devel/c37598d06b6057c7709a312c36f82407a09435fa.camel@fb.com/">replied</a>,
+noting that the feature owners plan to work on the changes to
+RoboSignatory, but would need some help and advice with code review,
+testing, and deployment.  They will be looking into the possibility of
+using the Fedora package-signing key:
+<blockquote class="bq">
+fs-verity needs a RSA key/cert pair for file signing at package
+signature time. At package install time, the cert needs to be loaded in
+the appropriate kernel keyring. We've always used a dedicated keypair
+during testing -- I'm not actually sure if the package signing key
+could be reused for this, as it's a GPG key, but this is something we
+should follow up on.
+</blockquote>
+</p>
+
+<p>
+Beyond that, if the filesystem does not support fs-verity, the plugin will
+fail and there will be no protection of that sort.  If it is desired,
+though, fs-verity support for XFS could be added, he said.
+</p>
+
+<p>
+Josh Boyer <a
+href="/ml/fedora-devel/CA+5PVA5ZqLNeJE4jW83Uch_V6t=DSMf5F04iy5AgG0aReUCM5A@mail.gmail.com/">asked</a>
+about adding fs-verity support for Fedora when a seemingly similar feature,
+<a href="https://fedoraproject.org/wiki/Changes/Signed_RPM_Contents">adding
+IMA signatures to RPM</a>, was rejected due in part to its <a href="842002.html">impact on RPM
+size</a>.  The <a
+href="https://sourceforge.net/p/linux-ima/wiki/Home/">Integrity Measurement
+Architecture</a> (IMA) is a kernel-based mechanism that can be used to
+detect file tampering, but Salim <a
+href="/ml/fedora-devel/YalkczHTLFIEOHio@michel-fedora-PC198L6J.dhcp.thefacebook.com/">said</a>
+that the impact on RPM size is much smaller for fs-verity than for IMA.
+The idea is that users who do not install the RPM plugin "<q>will be
+mostly unimpacted</q>" by the change.  The proposal compared the
+two integrity mechanisms, noting a smaller impact at run time as well:
+<blockquote class="bq">
+Because
+fsverity operates on block reads, its runtime cost is small (as it
+only needs to verify the block that is being accessed), and it can
+protect from alterations at any point in time.
+<p>
+IMA works by measuring a file as a whole and comparing its signature
+whenever it’s read of executed. It has a higher runtime cost than
+fsverity (as it needs to verify the whole file at once) and it cannot
+detect subsequent alternations.
+</blockquote>
+</p>
+
+<p>
+The proposal also said that IMA provides a rich policy system that can be
+tied into other security mechanisms, such as SELinux; it might make sense
+to integrate the two down the road.  But Boyer and others were interested
+in what benefit fs-verity would bring to Fedora and its use cases. Boyer <a
+href="/ml/fedora-devel/CANyg3HhcWfi2h9OoPMPW9iMe-S2Ann-X8bvOk2RZcBr1tUThOg@mail.gmail.com/">said</a>
+that the benefit listed in the proposal could largely be fulfilled by IMA,
+so he wanted to know more.  Cavalca <a
+href="/ml/fedora-devel/e945e4fdcafe857334030e1e09ab747aadb67a49.camel@fb.com/">said</a>
+that this particular proposal was "<q>mostly about putting in place the
+necessary plumbing</q>"; he also described one potential use case:
+<blockquote class="bq">
+For example, consider an appliance-like system
+placed in an untrusted location where you may not be able to control
+who has physical access (this could be a server, but it could also be a
+kiosk in an internet point or a school). In this scenario, fs-verity
+can be one of the building blocks to ensure and maintain system trust.
+</blockquote>
+</p>
+
+<p>
+As with most security solutions, Cavalca <a
+href="/ml/fedora-devel/35c3df98d28f98c26565fbc78abf0b3eea32e467.camel@fb.com/">continued</a>, 
+fs-verity is no silver bullet, but it is a useful building block:
+<blockquote class="bq">
+Once fs-verity is enabled for a given file (which, in the RPM case,
+happens at package installation time), it cannot be disabled, and the
+file becomes immutable. One can still rename() or unlink() it (and this
+is indeed how rpm is able to replace files when upgrading packages),
+but the actual contents cannot be altered.
+<p>
+Where is this useful? For example, fs-verity can help in the scenario
+where an attacker has out-of-band access to the storage device (say,
+they pull a hard drive from a colo'd server or a sdcard from an
+embedded device, or they boot into a liveusb, or they access a VM image
+directly from a host).
+<p>
+Let's say that happens, and the attacker changes a few blocks of
+/bin/ls on the device to make it run nefarious code. When you boot your
+system again, it would fail at exec() time because the Merkle tree
+wouldn't match.
+</blockquote>
+</p>
+
+<p>
+But since an attacker can simply replace the files, or add new ones, there
+is still a missing piece, as Zbigniew Jędrzejewski-Szmek <a
+href="/ml/fedora-devel/20211212112730.GN11852@in.waw.pl/">pointed out</a>:
+<blockquote class="bq">
+If fs-verity verification prevents me from successfully modifying or
+replacing /usr/bin/foo or /usr/lib/systemd/system/foo.service, is
+there anything which hinders just adding /etc/systemd/system/foo.service
+that does whatever I want?
+</blockquote>
+</p>
+
+<p>
+He asked if there was a Linux Security Module (LSM) available to enforce
+whatever policies are needed to ensure the integrity of the <i>system</i>.
+Beyond that, if an attacker can replace a binary like <tt>/bin/ls</tt>,
+they may also be able to add new keys to the kernel keyring that would allow their
+binaries to pass the fs-verity checks.
+<blockquote class="bq">
+If
+the keys are loaded from the file system, can I just drop in a rogue key,
+similarly to what happens when new keys are distributed as part of
+distro upgrades?
+</blockquote>
+</p>
+
+<p>
+Florian Weimer <a
+href="/ml/fedora-devel/8735my2buj.fsf@oldenburg.str.redhat.com/">described</a>
+two additional problems that he called "unsolvable".  Attackers can reuse
+binaries from unrelated Fedora packages that have been signed properly, or
+they can alter the system configuration to disable the feature at boot
+time.  Given those problems, he said, it is unlikely that anyone who
+actually wants this kind of a feature would use the signatures being added
+to the RPM files:
+<blockquote class="bq">
+The combination of these two unsolvable issues suggests to me that
+anyone who wants to deploy this is better off with their own trust root,
+and that approach will include their particular version of key
+management as well.  But this also means that pre-computed file
+signatures are not [particularly] useful to them.  They would have to
+discard them anyway before deployment.
+</blockquote>
+</p>
+
+<p>
+Burkov <a
+href="/ml/fedora-devel/20211213195317.8512.43519@mailman01.iad2.fedoraproject.org/">agreed</a>
+that there were some missing pieces, but noted that a <a
+href="/ml/fedora-devel/20211213103459.6687.39121@mailman01.iad2.fedoraproject.org/">message</a>
+from Roberto Sassu mentioned some ongoing work integrating fs-verity with
+IMA that might lead to a solution to some of these problems.  But, in a
+similar vein, Lennart Poettering <a
+href="/ml/fedora-devel/Ya9ROukK47NUCybe@gardel-login/">pointed out</a> a
+number of areas where the threat model is not at all clear—the
+protections are not really geared to the problems that Fedora users might
+have:
+<blockquote class="bq">
+This protects file contents, not the [metadata], right? So what about the
+metadata? if I see a fs-verity enabled inode with libssl.so data in it
+today, and it's a vulnerably version, and I make a hardlink to it, and
+then it gets replaced by a fixed version (with a slightly updated
+name) — how you intend to make sure, that i can't fool you into loading
+my copy of the old file but under the new name?
+<p>
+[...] Is there any protection
+against downgrades between RPM package versions? Does this in any way
+protect combinations of binaries/libraries? I mean, pretty much all
+programs we ship consist of a large number of ELF objects, and you
+probably need to sign the combination of them, but this model doesn't
+look like it offers that at all?
+</blockquote>
+</p>
+
+<p>
+There are some areas that need
+further research, Burkov <a
+href="/ml/fedora-devel/20211209235544.30118.71006@mailman01.iad2.fedoraproject.org/">said</a>,
+but the threat model is not really specified because the feature is simply meant
+as plumbing:
+<blockquote class="bq">
+The short answer is that just this change as-is has no practical
+threat model, we viewed it as an enablement step that we believe has a
+realistic path to broadly authenticated rpm contents. Alternatively, it
+does give a sophisticated user an opportunity to build something like that
+for themselves as well.
+</blockquote>
+</p>
+
+<p>
+Poettering <a
+href="/ml/fedora-devel/YbYScdI0IwXIn0+W@gardel-login/">expressed further
+skepticism</a> about the proposal, noting: "<q>Infrastructure that has
+no consuming feature typically 
+doesn't work. Experience tells us that.</q>"  But, even if that were
+overcome, the protection provided is not particularly useful: "<q>If I can have 'ping' and
+'poweroff' binaries both signed by Fedora, but then swap them without
+the signing being able to detect that, why do this at all?</q>" 
+</p>
+
+<p>
+There were other concerns raised as well.  For example, Stephen John
+Smoogen <a
+href="/ml/fedora-devel/CANnLRdgby3MvRVr=q+V29Dx_WVSAR1VcQWgUrbEMQNAX9TrSPQ@mail.gmail.com/">objected</a>
+on logistical grounds.  Any changes need to be in place before the mass
+rebuild for Fedora&nbsp;36, which is currently scheduled for
+January&nbsp;19.  Given the upcoming holiday season, it is pretty unlikely
+that those who need to review and sign off on these kinds of changes will
+even be available to do so. "<q>Even if the changes are trivial ones,
+this is a very short window to land things.</q>"  He suggested that
+Fedora&nbsp;37 would be a more realistic target.
+</p>
+
+<p>
+The <a
+href="https://fedoraproject.org/wiki/Changes/FsVerityRPM">wiki version of
+the change proposal</a> has been updated with further information, along
+with responses to many of the questions and concerns posted in the thread.
+But without a real use case that benefits some actual subset of Fedora
+users, this has the look of a feature that is going nowhere fast.
+Perhaps what is needed is to join forces with those who are working on IMA
+to come up with an integrated plan that does provide a threat model  and real
+use cases.  The IMA proposal, for example, pointed to the <a
+href="https://getfedora.org/en/iot/">Fedora IoT edition</a> as a possible
+consumer of that feature, which is more in line with the existing use of
+fs-verity in Android.  Boyd made it clear that Red Hat is interested in
+seeing IMA support in Fedora, so there would perhaps be some synergy in a
+combined effort.  That approach may find more traction with the Fedora community.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Distribution security</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Integrity</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/878281/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor878699"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 0:15 UTC (Wed)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/878699/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="developer122" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878699" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The building block for larger security schemes is nice and all, but I&#x27;m not really even interested in it from the standpoint of security.<br>
+<p>
+This sounds like it could also be used to ensure the integrity of a file, like system libraries for example, against random corruption. It can be automatically detected if a file has been damaged since it was installed, and I suppose in later work damaged files could be automatically re-aquired.<br>
+<p>
+Not all filesystems are ZFS, with their own internal per-block checksums.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878699/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878701"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 2:33 UTC (Wed)
+                               by <b>Henning</b> (subscriber, #37195)
+                              [<a href="/Articles/878701/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Henning" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878701" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This seems more like a job for dm-integrity and it seems like systemd 250 will support it (at least according to the release notes).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878701/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor878711"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 9:52 UTC (Wed)
+                               by <b>gray_-_wolf</b> (subscriber, #131074)
+                              [<a href="/Articles/878711/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gray_-_wolf" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878711" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Not all filesystems are ZFS, with their own internal per-block checksums.</font><br>
+<p>
+Btrfs does that as well, so there is in-kernel support for this. You don&#x27;t need ZFS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878711/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor878707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 8:51 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/878707/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878707" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So what happens if we need to update the file on purpose, either via RPM, or, such as in the case of the recent log4j issues, through manual workarounds (e.g. adding a property to the shell script starting some Java application)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878710"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 9:18 UTC (Wed)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/878710/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahulsundaram" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878710" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Atleast partly answered by the following in the linked feature proposal<br>
+<p>
+<a href="https://fedoraproject.org/wiki/Changes/FsVerityRPM#Can_you_elaborate_on_the_threat_model.3F_How_is_RPM_able_to_update_files.3F">https://fedoraproject.org/wiki/Changes/FsVerityRPM#Can_yo...</a><br>
+<p>
+<a href="https://fedoraproject.org/wiki/Changes/FsVerityRPM#Can_the_user_modify_a_file_shipped_by_a_package_.28e.g._to_edit_a_script_while_debugging.29_.3F">https://fedoraproject.org/wiki/Changes/FsVerityRPM#Can_th...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878710/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor878714"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 11:15 UTC (Wed)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/878714/">Link</a>] (14 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878714" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems to me the actual users of the feature would be proprietary softwares that don&#x27;t want people to replace bad sections of code with NOP, edit scripts, and so on…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878714/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878716"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 11:45 UTC (Wed)
+                               by <b>Conan_Kudo</b> (subscriber, #103240)
+                              [<a href="/Articles/878716/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Conan_Kudo" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878716" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      It wouldn't work very well for them, since (if you are the administrator) you can just <i>turn it off</i> and do what you will.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878716/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878718"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 13:26 UTC (Wed)
+                               by <b>gray_-_wolf</b> (subscriber, #131074)
+                              [<a href="/Articles/878718/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gray_-_wolf" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878718" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Then what *is* the actual use case for this? If someone can temper with the actual blocks on the device, what does this exactly prevent? I know that the article said that it&#x27;s supposed to be just plumbing with some use case (maybe) comming later, but should the use case be first?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878718/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878750"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 16:07 UTC (Wed)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/878750/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878750" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My suspicious nature is that there is a use case for this but it&#x27;s nothing the community would like.<br>
+<p>
+If there is not a use case I agree that it&#x27;s a complete waste of time since probably use cases will require different features to be implemented.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878750/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor878752"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 16:48 UTC (Wed)
+                               by <b>mebrown</b> (subscriber, #7960)
+                              [<a href="/Articles/878752/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mebrown" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878752" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I ship an embedded linux device. That device has to adhere to various NIST and other governmental standards regarding robustness and reliability. We are very interested in using this stack of technologies to secure our device for our users. We have built in a way for the user to take control of their device and install their own stuff to handle the folks that want to do the open source management themselves, but the default device state is that it is verifiably secure with cryptographic checks up and down the stack. We cant sell into a huge segment of the marketplace without these controls in place.<br>
+<p>
+stack looks like: DM-Crypt + DM-Integrity,  EXT or F2FS, FS-Verity, OSTree + Flatpack<br>
+<p>
+With the above plus SELinux and all internal daemons running as non-root, we have good protection against offline attacks (think desoldering EMMC chips) as well as protection against runtime hacks.<br>
+<p>
+The biggest hole I can see is we need a way to sign/seal directories to prevent executable replacement attacks.<br>
+<p>
+This stack enables us to provide more features over the older technologies, so there is distinct benefit to users even if they never crack it open themselves. The old stack was squashfs+dm-verity, so fundamentally everything was read-only. With the new stack, we can enable installation of application-level updates, installation of new applicaitons, and more.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878752/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 18:05 UTC (Wed)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/878760/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878760" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+but… if you change the files while the machine is off… why not also disable the fs check then as well?<br>
+<p>
+It seems the old problem of trying to make a root account less powerful by just adding extra steps to achieve the same things.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878763"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 18:22 UTC (Wed)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/878763/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878763" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+fsverity is a feature flag, you cannot disable it on a filesystem once it&#x27;s enabled<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878763/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878805"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2021 0:34 UTC (Thu)
+                               by <b>draco</b> (subscriber, #1792)
+                              [<a href="/Articles/878805/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="draco" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878805" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can&#x27;t be turned off even if I&#x27;m directly modifying the bits on the device?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878805/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor878885"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2021 17:43 UTC (Thu)
+                               by <b>mebrown</b> (subscriber, #7960)
+                              [<a href="/Articles/878885/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mebrown" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878885" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The entire point of the stack (DM-Crypt+DM-Integrity) is to ensure there is no possible way to modify anything while the machine is off. This protects against several threat models: supply chain attacks where equipment is intercepted en-route and malicious firmware installed, attacks involving theft, possibly others.<br>
+<p>
+Most of the government purchasing contracts require robust protection against supply chain attacks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878885/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878966"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2021 7:07 UTC (Fri)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/878966/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878966" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But this doesn&#x27;t protect user data?<br>
+<p>
+Isn&#x27;t it better (actually safe instead of kinda safe in a few selected scenarios) to use a usb stick to boot and then an encrypted partition?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878966/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor878788"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 21:27 UTC (Wed)
+                               by <b>walters</b> (subscriber, #7396)
+                              [<a href="/Articles/878788/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="walters" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878788" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Are you doing the ostree+fs-verity stuff out of band?  This relates to <a href="https://github.com/ostreedev/ostree/pull/2269">https://github.com/ostreedev/ostree/pull/2269</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878788/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2021 17:48 UTC (Thu)
+                               by <b>mebrown</b> (subscriber, #7960)
+                              [<a href="/Articles/878887/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mebrown" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878887" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correct. The merkle trees and signatures would all be computed and signed by the build system in a secure manner.<br>
+<p>
+It looks to me like the RPM mechanism in discussion for Fedora actually &#x27;ships&#x27; only the signature with the RPM, and the merkle trees are re-constructed at installation time. We are likely to do something similar, but are still in early design phase so that&#x27;s not coded up yet.<br>
+<p>
+Personally, I am a big fan of the &quot;ship the signatures, reconstruct the merkle trees on install&quot; method. We did something similar in the past with DM-Verity and even re-construct the verity forward error correction codes on install. Saves a fair amount of download bandwidth.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878950"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2021 23:16 UTC (Thu)
+                               by <b>walters</b> (subscriber, #7396)
+                              [<a href="/Articles/878950/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="walters" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878950" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+(upstream ostree developer here btw)<br>
+<p>
+One big problem with ostree and fs-verity that I was wrestling with is that by design, the data format is not extensible - extensibility is hard to mix with cryptographic checksums and reproducibility.  There isn&#x27;t a place to put new per-file data in the current design; at least, not without doing some hacks.<br>
+<p>
+That said we have a big initiative going on recently around &quot;container native&quot; ostree where we encapsulate the updates inside a container image - see <a href="https://fedoraproject.org/wiki/Changes/OstreeNativeContainer">https://fedoraproject.org/wiki/Changes/OstreeNativeContainer</a> - and the tar format is much more flexible (which is both a benefit and a drawback, see e.g. <a href="https://github.com/vbatts/tar-split">https://github.com/vbatts/tar-split</a> )<br>
+<p>
+But basically I&#x27;ve been thinking it could make sense to embed fs-verity Merkle trees and signatures in the tar stream, and have the client know how to write those natively.<br>
+<p>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878950/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor880214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 3, 2022 12:26 UTC (Mon)
+                               by <b>Klavs</b> (guest, #10563)
+                              [<a href="/Articles/880214/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Klavs" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor880214" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+you cannot in fact protect against physical attacks IMHO - and it sounds unlikely anyone would even bother trying for a &quot;personal user&quot;-device - and also - trying to do physical protection, sounds more like you&#x27;re trying to build a tivo device - ie. one thats protected against the owner actually using his rights to modify the software as he sees fit.. - not a good use case in my book.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor880215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 3, 2022 12:27 UTC (Mon)
+                               by <b>Klavs</b> (guest, #10563)
+                              [<a href="/Articles/880215/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Klavs" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor880215" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+TPM is the &quot;closest attempt&quot; - but again - if its a personal user device - I strongly dislike &quot;protecting&quot; against the user being able to exercise their rights<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/880215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor878715"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2021 11:26 UTC (Wed)
+                               by <b>atnot</b> (guest, #124910)
+                              [<a href="/Articles/878715/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="atnot" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor878715" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If the keys are loaded from the file system, can I just drop in a rogue key, similarly to what happens when new keys are distributed as part of distro upgrades?</font><br>
+<p>
+I don&#x27;t think that&#x27;s inherently disarming. Adding keys is a much noisier operation than swapping out binaries with modified versions. If attackers are forced to do easily detectable things to gain persistence on a system, I think that is a good thing. If you can&#x27;t have a lock it&#x27;s good to at least have a seal.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878715/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor879180"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding fs-verity support for Fedora 36?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2021 12:14 UTC (Mon)
+                               by <b>zuki</b> (subscriber, #41808)
+                              [<a href="/Articles/879180/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zuki" />
+                <input type="hidden" name="return" value="/Articles/878281/#CommAnchor879180" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Adding keys is a much noisier operation than swapping out binaries with modified versions.</font><br>
+<p>
+The point I was trying to make is that partial protection is very easy to circumvent without anyone noticing. My Fedora installation is 800k *files* under /usr, and 4500 files under /etc. With so many files, it&#x27;s just too easy to find thousands of files that can be modified to hide something nefarious without anyone ever noticing. Signing keys may be not be the best option for stealth, but they are an obvious example of how you can defeat the system if you can modify arbitrary files.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/879180/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

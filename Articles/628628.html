@@ -1,0 +1,529 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The problem with nested sleeping primitives [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The problem with nested sleeping primitives">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Waiting for events in an operating system is an activity that is fraught with hazards; without  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/627930/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The problem with nested sleeping primitives</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 7, 2015</br>
+           </div>
+Waiting for events in an operating system is an activity that
+is fraught with hazards; without a great deal of care, it is easy to miss
+the event that is being waited for.  The result can be an infinite wait —
+an outcome which tends to be unpopular with users.  The kernel has long
+since buried 
+the relevant code in the core kernel with the idea that, with the right
+API, wait-related race conditions can be avoided.  Recent experience shows,
+though, that the situation is not always quite that simple.
+<p>
+Many years ago, kernel code that needed to wait for an event would execute
+something like this:
+<p>
+<pre>
+    while (!condition)
+ 	sleep_on(&amp;wait_queue);
+</pre>
+<p>
+The problem with this code is that, should the condition become true
+between the test in the <tt>while</tt> loop and the call to
+<tt>sleep_on()</tt>, the wakeup could be lost and the sleep would last
+forever.  For this reason, <tt>sleep_on()</tt> was deprecated for a long
+time and no longer exists in the kernel.
+<p>
+The contemporary pattern looks more like this:
+<p>
+<pre>
+    DEFINE_WAIT(wait);
+
+    while (1) {
+    	prepare_to_wait(&amp;queue, &amp;wait, state);
+    	if (condition)
+	    break;
+	schedule();
+    }
+    finish_wait(&amp;queue, &amp;wait);
+</pre>
+<p>
+
+Here, <tt>prepare_to_wait()</tt> will enqueue the thread on the given
+<tt>queue</tt> and put it into the given execution <tt>state</tt>, which is
+usually either <tt>TASK_INTERRUPTIBLE</tt> or
+<tt>TASK_UNINTERRUPTIBLE</tt>.  Normally, that state will cause the thread
+to block once it calls <tt>schedule()</tt>.  If the wakeup happens first,
+though, the process state will be set back to <tt>TASK_RUNNING</tt> and
+<tt>schedule()</tt> will return immediately (or, at least, as soon as it
+decides this thread should run again).  So, regardless of the timing
+of events, this code should work properly.  The numerous variants of the
+<tt>wait_event()</tt> macro expand into a similar sequence of calls.
+<p>
+Signs of trouble can be found in messages like the following, which are
+turning up on systems running the 3.19-rc kernels:
+<p>
+<pre>
+     do not call blocking ops when !TASK_RUNNING; state=1
+     	set at [&lt;ffffffff910a0f7a&gt;] prepare_to_wait+0x2a/0x90
+</pre>
+<p>
+This message, the result of some new checks added for 3.19, is indicating
+that a thread is performing an action that could block while it is
+ostensibly already in a sleeping state.  One might wonder how that can be,
+but it is not that hard to understand in the light of the sleeping code
+above.
+<p>
+The "<tt>condition</tt>" checked in that code is often a function call;
+that function may perform a fair amount of processing on its own.  It may
+need to acquire locks to properly check for the wakeup condition.  That, of
+course, is where the trouble comes in.  Should the condition-checking
+function call something like <tt>mutex_lock()</tt>, it will go into a new
+version of the going-to-sleep code, changing the task state.  That, of
+course, may well interfere with the outer sleeping code.  For this reason,
+nesting of sleeping primitives in this way is discouraged; the new warning
+was added to point the finger at code performing this kind of nesting.  It
+turns out that kind of nesting happens rather more often than the scheduler
+developers would have liked.
+<p>
+So what is a developer to do if the need arises to take locks while
+checking the sleep condition?  <a
+href="http://git.kernel.org/linus/61ada528dea028331e99e8ceaed87c683ad25de2">One
+solution</a> was added in 3.19; it takes the form of a
+new pattern that looks like this:
+<p>
+<pre>
+    DEFINE_WAIT_FUNC(wait, woken_wait_function);
+
+    add_wait_queue(&amp;queue, &amp;wait);
+    while (1) {
+	if (condition)
+	    break;
+	wait_woken(&amp;wait, state, timeout);
+    }
+    remove_wait_queue(&amp;queue, &amp;wait);
+</pre>
+<p>
+
+The new <tt>wait_woken()</tt> function encapsulates most of the logic
+needed to wait for a wakeup.  At a first glance, though, it looks like it
+would suffer from the same problem as <tt>sleep_on()</tt>: what happens if
+the wakeup comes between the condition test and the <tt>wait_woken()</tt>
+call?  The key here is in the use of a special wakeup function called
+<tt>woken_wait_function()</tt>.  The <tt>DEFINE_WAIT_FUNC()</tt> macro at
+the top of the above code sequence associates this function with the wait
+queue entry, changing what happens when the wakeup arrives.
+<p>
+In particular, that change causes a special flag (<tt>WQ_FLAG_WOKEN</tt>)
+to be set in the <tt>flags</tt> field of the wait queue entry.  If
+<tt>wait_woken()</tt> sees that flag, it knows that the wakeup already
+occurred and doesn't block.  Otherwise, the wakeup has not occurred, so
+<tt>wait_woken()</tt> can safely call <tt>schedule()</tt> to wait.
+<p>
+This pattern solves the problem, but there is a catch: every place in the
+kernel that might be using nested sleeping primitives needs to be found and
+changed.  There are a <i>lot</i> of places to look for problems and
+potentially fix, and the fix is not an easy, mechanical change.  It would
+be nicer to come up with a version of <tt>wait_event()</tt> that doesn't
+suffer from this problem in the first place or, failing that, with
+something new that can be easily substituted for <tt>wait_event()</tt>
+calls. 
+<p>
+Kent Overstreet <a href="/Articles/628632/">thinks he has that
+replacement</a> in the form of the "closure" primitive used in the bcache
+subsystem.  Closures work in a manner similar to <tt>wait_woken()</tt> in
+that the wakeup state is stored internally to the relevant data structure;
+in this case, though, an atomic reference count is used.  Interested
+readers can see <a
+href="/Articles/628633/"><tt>drivers/md/bcache/closure.h</tt></a> and <a
+href="/Articles/628634/"><tt>closure.c</tt></a> for the details.  Scheduler
+developer Peter Zijlstra <a href="/Articles/628635/">is not convinced</a>
+about the closure code, but he agrees that it would be nice to have a
+better solution.
+<p>
+The form of that solution is thus unclear at this point.  What does seem
+clear is that the current nesting of sleeping primitives needs to be
+fixed.  So, one way or another, we are likely to see a fair amount of work
+going into finding and changing problematic calls over the next few
+development cycles.  Until that work is finished, warnings from the new
+debugging code are likely to be a common event.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Race conditions</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/628628/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor628904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with nested sleeping primitives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2015 20:23 UTC (Thu)
+                               by <b>reubenhwk</b> (guest, #75803)
+                              [<a href="/Articles/628904/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="reubenhwk" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor628904" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Why this...
+
+<pre>
+    while (1) {
+	if (condition)
+	    break;
+	wait_woken(&amp;wait, state, timeout);
+    }
+</pre>
+
+...and not this...
+
+<pre>
+    while (!condition) {
+	wait_woken(&amp;wait, state, timeout);
+    }
+</pre>
+
+??
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/628904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor628916"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with nested sleeping primitives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2015 21:47 UTC (Thu)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/628916/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mm7323" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor628916" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+Possibly because this code example is normally in a macro so the condition is re-evaluated - hence you have to watch for the expansion of 'condition' vs precedence of the logical not.
+</p>
+<p>
+Of course, some extra brackets can fix that:
+</p>
+<pre>
+while (!(condition)) {
+	wait_woken(&amp;wait, state, timeout);
+}
+</pre>
+<p>
+Other than that, perhaps there was some compiler that adds instructions for the extra operator, though I'd hope any optimiser should be able to efficiently write the loop from either style.
+</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/628916/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor629934"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with nested sleeping primitives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 18, 2015 20:27 UTC (Sun)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/629934/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vbabka" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor629934" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For the record, macro definitions of course include necessary brackets in their definitions, so there are no gotchas when using them. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/629934/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor629011"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with nested sleeping primitives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2015 17:29 UTC (Fri)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/629011/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor629011" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Probably because it was a smaller change from the previous version with prepare_to_wait(), and therefore easier to review. Also, when the condition is a function with (temporary) side effects, it can be easier to discuss the former than the latter, just in terms of having separate lines for the "while" keyword and the condition text when proposing potential races.<br>
+<p>
+If you were writing new code with a simple condition, the latter would be better, except that you'd use prepare_to_wait() in that case anyway.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/629011/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor628935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Silly question time</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2015 0:01 UTC (Fri)
+                               by <b>Max.Hyre</b> (subscriber, #1054)
+                              [<a href="/Articles/628935/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Max.Hyre" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor628935" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      This from an erstwhile real-time programmer with very limited knowledge of the kernel:
+<br><br>
+Why the problem in
+<pre>
+    	if (condition)
+	    break;
+	schedule();
+</pre>?
+<br>
+If the condition is raised between <tt>if (condition)</tt> and <tt>schedule()</tt>, why isn't it still there to be caught the next time?  Is it that some other process/thread is checking on <tt>condition</tt>, and may snag it erroneously?
+<br><br>
+If someone could enlighten me why <tt>condition</tt> wouldn't be waiting around for pickup at the next test, I'd be appreciative.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/628935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor628947"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Silly question time</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2015 2:21 UTC (Fri)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/628947/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor628947" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because code doesn't just call schedule() - it changes the task state to something other than TASK_RUNNING, so that once they call schedule() the scheduler won't run them a second time until someone else wakes them up.<br>
+<p>
+If you change that to<br>
+<p>
+if (condition)<br>
+        break;<br>
+set_current_state(TASK_UNINTERRUTIBLE);<br>
+schedule();<br>
+<p>
+what happens if the condition becoming true and the wakeup happens after checking the condition, but before setting the task state? See the issue?<br>
+<p>
+The solution is to set the task state to TASK_UNINTERRUTIBLE _before_ checking the condition. Then if the wakeup comes between checking the condition and the schedule(), the task state still gets set back to TASK_RUNNING and the task won't sleep forever.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/628947/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor629020"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with nested sleeping primitives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2015 18:37 UTC (Fri)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/629020/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor629020" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When I tried writing out a nested version, I didn't find any actual problems, presuming that the condition code never goes to sleep after it looks at something that could affect the outcome. The outer sleep code's wakeup could inappropriately abort the inner sleep for a cycle, but when the inner sleep is done, the outer condition code would determine that it shouldn't sleep.<br>
+<p>
+On the other hand, you could be sleeping in the condition code after collecting some data that will ultimately lead to deciding not to wake up, and that data changing could lead to a missed wakeup (since the outer wakeup got discarded and you will go to sleep in the outer schedule() anyway). The only reason I can think of that this would happen is if someone wanted to compare two values, each accessed under a different lock, without nesting the locks either way, which can't be very common. On the other hand, it's impractical to determine automatically whether a particular place is safe or not.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/629020/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor734960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with nested sleeping primitives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 28, 2017 2:27 UTC (Thu)
+                               by <b>waitqueue</b> (guest, #118805)
+                              [<a href="/Articles/734960/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="waitqueue" />
+                <input type="hidden" name="return" value="/Articles/628628/#CommAnchor734960" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Here is the current wait_woken code(v4.13). What if the wakeup comes between "if (!(wq_entry-&gt;flags &amp; WQ_FLAG_WOKEN) &amp;&amp; !is_kthread_should_stop())" and "timeout = schedule_timeout(timeout);"? In this case it seems we also sleep forever.<br>
+<p>
+long wait_woken(struct wait_queue_entry *wq_entry, unsigned mode, long timeout)      <br>
+{                                                                                    <br>
+        set_current_state(mode); /* A */                                             <br>
+        /*                                                                           <br>
+         * The above implies an smp_mb(), which matches with the smp_wmb() from      <br>
+         * woken_wake_function() such that if we observe WQ_FLAG_WOKEN we must       <br>
+         * also observe all state before the wakeup.                                 <br>
+         */                                                                          <br>
+        if (!(wq_entry-&gt;flags &amp; WQ_FLAG_WOKEN) &amp;&amp; !is_kthread_should_stop())         <br>
+                timeout = schedule_timeout(timeout);                                 <br>
+        __set_current_state(TASK_RUNNING);                                           <br>
+                                                                                     <br>
+        /*                                                                           <br>
+         * The below implies an smp_mb(), it too pairs with the smp_wmb() from       <br>
+         * woken_wake_function() such that we must either observe the wait           <br>
+         * condition being true _OR_ WQ_FLAG_WOKEN such that we will not miss        <br>
+         * an event.                                                             <br>
+         */                                                                          <br>
+        smp_store_mb(wq_entry-&gt;flags, wq_entry-&gt;flags &amp; ~WQ_FLAG_WOKEN); /* B */     <br>
+                                                                                     <br>
+        return timeout;                                                              <br>
+}                                                                                    <br>
+EXPORT_SYMBOL(wait_woken);<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/734960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

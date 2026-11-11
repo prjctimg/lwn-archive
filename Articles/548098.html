@@ -1,0 +1,162 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>LSFMM: Problems with mmap_sem [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="LSFMM: Problems with mmap_sem">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The top-level data structure describing a process's virtual address space is called struct mm_s [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>LSFMM: Problems with mmap_sem</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 23, 2013</br>
+           <hr>
+<a href="/Articles/LSFMM2013/">LSFMM Summit 2013</a>
+</div>
+The top-level data structure describing a process's virtual address space
+is called <tt>struct&nbsp;mm_struct</tt>; it contains a reader/writer
+semaphore called <tt>mmap_sem</tt> that serializes changes to the
+structure and to a number of related data structures.  The opening session
+in the memory-management track at the 2013 Linux Filesystem, Storage, and
+Memory Management Summit looked at a specific problem relating to this
+semaphore and how it might be addressed.
+<p>
+The problem has to do with the order in which locks are acquired.  For
+normal filesystem operations, the filesystem code will obtain any locks it
+requires; the memory management subsystem will then grab <tt>mmap_sem</tt>
+should that be required — to bring a read or write buffer into RAM, for
+example.  When a page fault happens, though, the lock ordering is reversed:
+first <tt>mmap_sem</tt> is taken, then the filesystem code is invoked to
+bring the needed page into RAM.  Inconsistent lock ordering is a highly
+effective way to deadlock the system, so this behavior is a bit of a
+problem.  It has, for the most part, been worked around in the filesystem
+code, but those workarounds are getting harder to maintain.
+<p>
+As an example, one of the more problematic locks is <tt>i_mutex</tt>, which
+protects access to an <tt>inode</tt> structure.  In this case, lock
+inversion problems have been worked around by using a different lock in the
+page fault path; this approach works but lacks elegance.  There has been
+talk of turning <tt>i_mutex</tt> into a "range lock," so that only a
+portion of a file would need to be locked at any given time; that would
+enable filesystems to avoid lock ordering problems most of the time.  But
+the real point that was made by filesystem developers is that
+<tt>mmap_sem</tt> is entirely unneeded within the filesystem code; perhaps
+the memory management code could just drop that lock before calling into
+filesystems?
+<p>
+The problem with that idea, according to Michel Lespinasse, is that
+filesystem calls result in the placement of pages into the page cache, and,
+from there, into the relevant process's page tables.  Changes to page
+tables cannot be done without holding <tt>mmap_sem</tt>.  It was suggested
+that the problem could be solved by dropping <tt>mmap_sem</tt> before
+calling into the filesystem, then scanning the page cache to update page
+table entries after the filesystem code has done its work.  This approach
+was seen as workable, but, it was pointed out, if <tt>mmap_sem</tt> is to
+be dropped it must be dropped in <i>every</i> path that calls into the
+filesystem code.
+<p>
+One might think that there shouldn't be too many such paths, but the
+situation is a bit more complicated that that, thanks to
+<tt>get_user_pages()</tt>, which is used by kernel code to fault in
+user-space pages.  Jan Kara reported that he has audited some 50
+<tt>get_user_pages()</tt> call sites in the kernel and found that most of
+them can use <tt>get_user_pages_fast()</tt> instead.  That's an important
+change; <tt>get_user_pages()</tt> requires that <tt>mmap_sem</tt> be held
+by the caller, while <tt>get_user_pages_fast()</tt> does not.  So changing
+all those call sites would eliminate a long list of paths by which
+filesystem code can be called with <tt>mmap_sem</tt> held.  
+<p>
+
+Another approach might be to use a sequence counter to track changes to the
+address space; that would eliminate the need for a real lock much of the
+time.  But that approach adds other challenges: measures would have to be
+taken to keep the relevant virtual memory area (VMA) and file structures
+around while the filesystem code is doing its thing, for example.  Changes
+to the VMA 
+itself are also possible and would have to be watched for.  There is also a
+possibility that some architectures would have to be changed: if the
+counter indicates that a change has been made, it may be necessary to retry
+an attempt to satisfy a page fault, but not all architectures have fault
+retry code in place. 
+<p>
+A possible worst case scenario would be a process that incurs a page fault
+on a given VMA.  While the fault is being handled, the memory could be
+unmapped, causing the VMA to be deleted; then another, unrelated VMA could
+be instantiated for the same address range.  There is little good that
+could come from this kind of confusion.  A sequence counter that
+incremented for every address space change would catch such occurrences,
+but Hugh Dickins worried that it could often be incremented for unrelated
+events, slowing page fault handling.
+<p>
+The session had few in the way of definitive conclusions.  Jan said that he
+would continue to look at users of <tt>get_user_pages()</tt> with the goal
+of eventually eliminating the need to hold <tt>mmap_sem</tt>.  That will
+take some work since, he said, some device drivers include complicated
+<tt>fault()</tt> handlers that do tricky things.  The <tt>fault()</tt>
+function could, perhaps, be called without <tt>mmap_sem</tt> someday, but
+that may come at the cost of adding a separate <tt>fault_locked()</tt> for
+the few places where <tt>mmap_sem</tt> is truly needed.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/mmap_sem</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2013</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/548098/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

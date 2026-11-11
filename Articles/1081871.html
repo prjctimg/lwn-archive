@@ -1,0 +1,595 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Lockless MPSC FIFO queues for io_uring [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Lockless MPSC FIFO queues for io_uring">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Processes that use io_uring tend to keep a lot of balls in the air; being able to have many ope [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1081916/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Lockless MPSC FIFO queues for io_uring</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 15, 2026</br>
+           </div>
+Processes that use <a
+href="https://man7.org/linux/man-pages/man7/io_uring.7.html">io_uring</a>
+tend to keep a lot of balls in the air; being able to have many operations
+underway at any given time is part of the point of that API in the first
+place.  The io_uring subsystem must, as a result, keep track of a lot of
+tasks that have to be performed at the right time.  In current kernels,
+io_uring uses a standard kernel linked-list primitive to track those work
+items.  As of the 7.2 kernel release, though, io_uring will, instead, use a
+new lockless, multi-producer, single-consumer (MPSC) queue, resulting in
+some notable performance gains.  Lockless algorithms tend to be tricky, but
+the one used here is relatively approachable and shows how these algorithms
+can work.
+<p>
+<!-- middle-ad -->
+<h4>The old way's shortcomings</h4>
+<p>
+Task queues in pre-7.2 io_uring are based on the kernel's <a
+href="https://elixir.bootlin.com/linux/v7.1.2/source/include/linux/llist.h">lockless
+singly linked list</a> (llist) API.  At the core of this type is a simple
+structure:
+<p>
+<pre>
+    struct llist_node {
+	struct llist_node *next;
+    };
+</pre>
+<p>
+This structure, when embedded within another structure containing the
+actual data of interest, contains the links that bind those outer
+structures into a list.
+<p>
+There are a few reasons why this list type, despite being designed for
+performance, is not ideal for io_uring.  Since an llist is a singly linked
+list, it can only realistically be accessed from the head.  For a list
+where producers add items and consumers remove them, an llist is
+essentially a stack.  Work items in io_uring need to be processed in the
+order they were received, for basic fairness purposes if nothing else, so a
+pass must be made over the task queue to reverse its order before each
+processing run.  To make things worse, io_uring might choose not to process
+the whole list if it is too long, but the remaining items, having been
+reversed in order, cannot simply be put back onto the task list.  So a
+separate list for reversed-but-not-processed items must be maintained.
+Finally, adding items to an llist involves accessing a single head pointer;
+that can be done without taking locks, but it does require a retry loop.
+For heavily contended lists, those retries (and associated cache-line
+bouncing) can hurt.
+<p>
+Solving these problems requires a data structure that is better suited to
+the needs of the io_uring subsystem.  It must handle multiple producers
+putting work items on the lists, without locking and with a minimum amount
+of contention.  There is a single consumer for each list; that consumer
+should avoid cache contention with the producers to the greatest extent
+possible.  And, clearly, the need to reorder lists before processing should
+not exist.
+<p>
+<h4>Lockless MPSC queues</h4>
+<p>
+The solution is the lockless MPSC queue, <a
+href="/ml/all/20260612025125.1690253-1-axboe@kernel.dk">posted</a> by Jens
+Axboe and using an algorithm credited to Dmitry Vyukov.  This queue still
+uses <tt>struct llist_node</tt> to tie the entries of the list together,
+but the head of the list looks like this:
+<p>
+<pre>
+    struct mpscq {
+	struct llist_node	*tail;
+	struct llist_node	stub;
+    };
+</pre>
+<p>
+The term "head" is actually a bit misleading, since there is no pointer to
+the head of the list here; we'll get to that later.  This view of the list
+is intended for the use of the producers, who need to add items to the tail
+of the list.  The <tt>stub</tt> entry is a sentinel that is only present on
+the list if it is the only entry there — if the list is empty, in other
+words.  When the list is initialized, the <tt>tail</tt> pointer is set to
+point at the stub entry.
+<p>
+<blockquote>
+<img src="../_static/images/2026/mpscq1.svg" alt="[Empty queue]" width=500px>
+</blockquote>
+<p>
+The stub entry's <tt>next</tt> pointer is set to <tt>NULL</tt>.  The
+addition of a node to the tail of the list is done with a call to this
+short function:
+<p>
+<pre>
+    static inline bool mpscq_push(struct mpscq *q, struct llist_node *node)
+    {
+	struct llist_node *prev;
+
+	node-&gt;next = NULL;
+	prev = xchg(&amp;q-&gt;tail, node);
+	WRITE_ONCE(prev-&gt;next, node);
+	return prev == &amp;q-&gt;stub;
+    }
+</pre>
+<p>
+The <tt>next</tt> pointer in the new entry is set to <tt>NULL</tt>,
+indicating that it is the end of the list.  Then, the <tt>xchg()</tt> call
+atomically stores a pointer to the new entry in the list's <tt>tail</tt>
+pointer, returning the previous value of that pointer; in the case of an
+empty list, that will be a pointer to the stub entry.  The <tt>next</tt>
+pointer of the previous end-of-list entry (which, again, might have been
+the stub) is then set to the new entry, completing the task of adding that
+entry to the list.
+<p>
+<blockquote>
+<img src="../_static/images/2026/mpscq2.svg" alt="[Queue with one entry]" width=500px>
+</blockquote>
+<p>
+There is a subtlety to lockless algorithms that is worth noting here.
+Once the <tt>tail</tt> pointer has been aimed at the new list entry, that
+entry is visible to the rest of the world.  Among other things, that
+visibility implies that the <tt>next</tt> pointer in the new entry must be
+properly set before changing <tt>tail</tt>.  Normally, either the compiler
+or the CPU could feel entitled to reorder the assignments to <tt>next</tt>
+and <tt>tail</tt>, which could result in the new <tt>tail</tt> being
+visible before the new node is fully initialized.  The <tt>xchg()</tt>
+operation, though, is defined as a full barrier, meaning that operations
+that happen prior (such as the assignment to <tt>next</tt>) must be visible
+to the rest of the system before the exchange can take place.  In the
+absence of a barrier operation, it would have been necessary to manually
+insert a barrier between those two assignments.
+<p>
+If multiple CPUs attempt to add entries to the same list at the same time,
+the <tt>xchg()</tt> call will serialize them, ensuring that the
+<tt>tail</tt> pointer is updated in an orderly manner.  If two CPUs perform
+their <tt>xchg()</tt> calls simultaneously, one will "win" and go first,
+followed by the other.  That could result in a list that, briefly, looks
+like this:
+<p>
+<blockquote>
+<img src="../_static/images/2026/mpscq3.svg" alt="[Queue during contention]" width=500px>
+</blockquote>
+<p>
+Since each <tt>xchg()</tt> call returns the previous state of the
+<tt>tail</tt> pointer, each addition knows where the preceding entry in the
+list is.  That allows it to set the <tt>next</tt> pointer accordingly.
+Once the two additions complete, the list will look like:
+<p>
+<blockquote>
+<img src="../_static/images/2026/mpscq4.svg" alt="[Queue after contention]" width=500px>
+</blockquote>
+<p>
+There is no locking required to keep the list in a coherent state, and no
+retry loops are needed, so addition operations are fast.  Additions can be
+made while running within any kernel context as well.
+<p>
+<h4>The consumer's view</h4>
+<p>
+The consumer side is just a little bit more involved, starting with the
+fact that the consumer maintains a head-of-list pointer separately from the
+<tt>mpscq</tt> structure; it is a simple <tt>struct llist_node</tt> pointer
+holding the address of the first entry in the list.  The purpose of this
+separation is to ensure that the head and tail pointers are placed in
+separate cache lines, avoiding cache contention between the producers and
+the consumer.  To remove the first entry in the list, the consumer will
+pass that head pointer to:
+<p>
+<pre>
+    static inline struct llist_node *mpscq_pop(struct mpscq *q,
+					   struct llist_node **headp);
+</pre>
+<p>
+There are a few cases that this function has to be prepared for.  When the
+list is first created, in an empty state (as shown above), the head-of-list
+pointer will contain the address of the <tt>stub</tt> entry.  Since
+additions to the list do not change the head pointer, that situation will
+remain until the first item is removed from the list.  Imagine that no
+items have yet been removed from the list shown above; with the separate
+head pointer, the picture looks like this:
+<p>
+<blockquote>
+<img src="../_static/images/2026/mpscq5.svg" alt="[Queue with head pointer]" width=500px>
+</blockquote>
+<p>
+Item removal for that case is handled this way:
+<p>
+<pre>
+	struct llist_node *head = *headp, *next;
+
+	if (head == &amp;q-&gt;stub) {
+	    head = READ_ONCE(head-&gt;next);
+	    if (!head)
+		return NULL;
+	    q-&gt;stub.next = NULL;
+	    *headp = head;
+	}
+</pre>
+<p>
+Remember that the addition of the first entry to the list set the
+<tt>next</tt> pointer in <tt>stub</tt> to that first entry; here the code
+checks that pointer.  If it is <tt>NULL</tt> then the list is empty, so
+<tt>NULL</tt> is returned.  Otherwise the head is advanced to the value of
+the stub's <tt>next</tt> field, which is subsequently set to <tt>NULL</tt>.
+<p>
+<blockquote>
+<img src="../_static/images/2026/mpscq6.svg" alt="[Queue with stub removed]" width=500px>
+</blockquote>
+<p>
+The stub has no further role in the management of the list until it is
+emptied again.
+<p>
+Now that it has been established that there is an entry on the list, the
+next check is to see if it is the <i>last</i> entry.  In the negative case,
+when further entries exist, the head pointer can be advanced to the next of
+those entries, and a pointer to the head entry returned:
+<p>
+<pre>
+	next = READ_ONCE(head-&gt;next);
+	if (next) {
+	    *headp = next;
+	    return head;
+	}
+</pre>
+<p>
+After an item is returned in this way, the situation is:
+<p>
+<blockquote>
+<img src="../_static/images/2026/mpscq7.svg" alt="[Queue with one item removed]" width=500px>
+</blockquote>
+<p>
+If the <tt>next</tt> pointer is <tt>NULL</tt>, though, then there are no
+more entries in the list, and the <tt>tail</tt> pointer must, once again,
+be set to the stub.  There is a twist, though: there may be a producer
+adding a new entry to the list at the same time.  So a compare-and-exchange
+operation is needed to attempt to reset the list to the empty state:
+<p>
+<pre>
+	if (try_cmpxchg(&amp;q-&gt;tail, &amp;head, &amp;q-&gt;stub)) {
+	    *headp = &amp;q-&gt;stub;
+	    return head;
+	}
+	return NULL;
+</pre>
+<p>
+The <tt>try_cmpxchg()</tt> call compares the <tt>tail</tt> pointer to the
+<tt>head</tt> pointer (which, remember, points to the one entry in the
+list).  If the two are equal, it atomically sets the <tt>tail</tt> to point
+to the stub, resetting the list to the empty state shown at the beginning;
+it then returns the last entry in the list.
+<p>
+If, however, the <tt>try_cmpxchg()</tt> call fails, then the consumer has
+raced with another producer, and that producer has changed the
+<tt>tail</tt> pointer behind the consumer's back.  In this case,
+<tt>NULL</tt> is returned and the last entry is left on the list until the
+next time the consumer retries.  The consumer can distinguish this case
+from the list-is-empty case by seeing whether the <tt>tail</tt> pointer is
+aimed at the stub entry:
+<p>
+<pre>
+    static inline bool mpscq_empty(struct mpscq *q)
+    {
+	return READ_ONCE(q-&gt;tail) == &amp;q-&gt;stub;
+    }
+</pre>
+<p>
+That describes the entire API.  The code can be found in <a
+href="https://elixir.bootlin.com/linux/v7.2-rc1/source/io_uring/mpscq.h"><tt>io_uring/mpscq.h</tt></a>;
+it is not, at this point, placed under <tt>lib/</tt> and made available to
+the rest of the kernel.  That could, of course, be changed if an interested
+user outside of io_uring were to emerge.
+<p>
+As of 7.2, this new queue type is used for a couple of different task lists
+within io_uring.  The results, as described in <a
+href="/ml/all/20260612025125.1690253-4-axboe@kernel.dk">this patch</a>, are
+a significant increase in performance with reduced overhead — more work is
+done more quickly, while simultaneously reducing the amount of time spent
+executing in the kernel.  The io_uring code is also simplified somewhat,
+since it no longer needs to reverse the lists or maintain a separate list
+of work items that were removed from the task list but not yet acted upon.
+All told, it would appear to be an optimization whose time has come.
+<p>
+(<b>Postscript</b>: this topic was at risk of being passed over, but it
+received enough votes on <a href="/TopicList/">the LWN public topics
+page</a>, which is available to subscribers at the Project Leader level and
+above, that I decided to give it another look.  My thanks go to the LWN
+readers who thought this development was worthy of an article.)<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">io_uring</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Lockless algorithms</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.2</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1081871/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1083085"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">outstanding!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2026 17:52 UTC (Wed)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1083085/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1081871/#CommAnchor1083085" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+io_uring never fails to impress. such a great piece of work.<br>
+<p>
+nice writeup, also!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1083085/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1083086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not truly lock-free?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2026 18:19 UTC (Wed)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/1083086/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="comex" />
+                <input type="hidden" name="return" value="/Articles/1081871/#CommAnchor1083086" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interesting.  If I'm reading correctly, then this algorithm is not truly "lock-free" in the academic sense, which requires that if an arbitrary thread is suspended, the rest of the system is still able to make progress.<br>
+<p>
+Specifically, suppose a producer is suspended between these two operations:<br>
+<p>
+<span class="QuotedText">&gt; prev = xchg(&amp;q-&gt;tail, node);</span><br>
+&lt;-- here<br>
+<span class="QuotedText">&gt; WRITE_ONCE(prev-&gt;next, node);</span><br>
+<p>
+Then `q-&gt;tail` will be pointing to the producer's `node`, but the consumer has no way of reaching it as it hasn't been linked into any `next` pointers yet.  If the consumer tries to pop, it will reach the `try_cmpxchg` but it will fail, so `mpscq_pop` should return NULL.  However, `mpscq_empty` should still return false.<br>
+<p>
+If a different producer then tries to add another node, it will be stored in the `next` pointer of the `node` from above.  Once the first producer resumes, both nodes will be visible to the consumer as expected.  But as long as the first producer remains suspended, neither node will be visible to the consumer.  All further entries will pile up this way without being visible to the consumer.<br>
+<p>
+In other words, a single producer being suspended can prevent the system from making progress even if another producer and the consumer are both running.<br>
+<p>
+Spoiler: I just checked the original source code and sure enough, this is called out in the block comment at the top. <br>
+<p>
+<span class="QuotedText">&gt; In between, the tail end of the queue is not yet reachable from the head. mpscq_pop() detects this and returns NULL, while mpscq_empty() reports false. The consumer must not treat such a NULL as "queue empty" - it should retry later. The window is two instructions wide, but a producer can be preempted inside it, so the consumer must not spin on it while holding resources the producer might need to make progress.</span><br>
+<p>
+Interesting.  That's not going to be compatible with any kind of real-time requirement – the idea that the consumer should just "retry later" and hope the producer has woken up by then – but I guess those requirements don't generally apply to I/O?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1083086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1083112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not truly lock-free?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 16, 2026 8:51 UTC (Thu)
+                               by <b>stefanha</b> (subscriber, #55072)
+                              [<a href="/Articles/1083112/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="stefanha" />
+                <input type="hidden" name="return" value="/Articles/1081871/#CommAnchor1083112" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the producers wake the consumer after they assign the next pointer, then the consumer is guaranteed to see the final list after the producers have all finished. It won't matter if the first producer is suspended temporarily, at least for correctness, although latency will suffer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1083112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1083266"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not truly lock-free?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 16, 2026 17:33 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1083266/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1081871/#CommAnchor1083266" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it makes sense for a situation where producers can't be made to stop doing other work, but there's no requirement that the consumer will pick up the items produced at any particular point. If a high-priority producer preempts a low-priority producer that's in the right window, the high-priority producer's item isn't visible, but it's the low-priority producer that's responsible for making everything appear when it gets a chance, and the high-priority producer can get back to its realtime operations within a bounded time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1083266/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1085308"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not truly lock-free?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2026 21:08 UTC (Sat)
+                               by <b>Vorpal</b> (guest, #136011)
+                              [<a href="/Articles/1085308/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Vorpal" />
+                <input type="hidden" name="return" value="/Articles/1081871/#CommAnchor1085308" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Real time IO is a thing, but not to disk, and often not to *traditional* network. You often want real time guarantees when sending data over CAN, Modbus, Profibus, or other similar specialised networks. Presumably you would not use IO uring for those, bandwidth tends to be fairly low as well (CAN traditionally was in the several hundred kilobit range, but modern versions can reach a blazingly fast 20 mbit/s).<br>
+<p>
+However, I believe at least Modbus has a variant that is sent over ethernet as well, but I have never worked with it, so I dont know if that is RT and if it involves special hardware to be able to do that.<br>
+<p>
+Other forms of realtime IO tend to be GPIO, serial, and similar. There are also embedded buses like I2C and SPI as well. None of those is likely to use io-uring either. And it is common to put the really time critical parts on a microcontroller and leave Linux to the slower and more compute intensive parts (and have it talk over one of the previously mentioned buses or over serial to the microcontroller). <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085308/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1085453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not truly lock-free?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2026 9:10 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1085453/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1081871/#CommAnchor1085453" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      There are real-time Ethernet networks, too; the underpinning standard is nowadays usually <a href="https://en.wikipedia.org/wiki/Time-Sensitive_Networking">802.1 TSN</a>, but EtherCAT and other such protocols also made Ethernet work for real time (in some cases with special Ethernet-compatible hardware, in other cases just by managing contention).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1083292"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">From most common states and operations to least common?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 17, 2026 3:13 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1083292/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1081871/#CommAnchor1083292" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This type of article is much appreciated because even good comments in the source (when there are enough of them...) generally lack height of view. Thanks!<br>
+<p>
+But I wish edge cases (e.g. empty list) and races were always presented _after_ the most common state and operations. I found myself skipping and rewinding a fair bit and often by too much or too little. In fact, that back and forth is still in progress :-) <br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1083292/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

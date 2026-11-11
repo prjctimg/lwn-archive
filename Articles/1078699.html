@@ -1,0 +1,449 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Hardening the kernel with allocation tokens and bootpatch-SLR [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Hardening the kernel with allocation tokens and bootpatch-SLR">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="There is a lot of work going into eliminating exploitable bugs from the kernel and preventing t [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1079458/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Hardening the kernel with allocation tokens and bootpatch-SLR</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 25, 2026</br>
+           </div>
+There is a lot of work going into eliminating exploitable bugs from the
+kernel and preventing the addition of new ones.  Even if this work is
+maximally successful, though, there is no chance that the kernel will be
+free of these bugs anytime soon.  Thus, there is also ongoing interest in
+hardening the kernel to make the existing bugs more difficult to exploit.
+The upcoming 7.2 kernel release will include a change to how dynamically
+allocated structures are placed in memory to make them harder to overwrite,
+while a project to randomize structure layout at boot time has a rather
+longer timeline.
+<p>
+<h4>Memory partitioning with allocation tokens</h4>
+<p>
+The kernel's slab allocator handles memory management for small objects.
+Allocations come from buckets of fixed-size (mostly powers of two) objects,
+and many types of objects with the same bucket size can be allocated from
+the same slab.  This arrangement allows efficient use of memory, but the
+intermingling of object types in this way can make the kernel more
+vulnerable to certain types of exploits.  If the kernel can be convinced to
+overrun an object of a given type, it may end up accessing or corrupting
+other objects with entirely unrelated types.  Additionally, <a
+href="https://en.wikipedia.org/wiki/Heap_spraying">heap-spraying
+attacks</a> may be used to fill much of the kernel's memory space with
+known data, which can make other sorts of bugs (such as an erroneous
+pointer dereference) easier to exploit.
+<p>
+Back in 2023, <a href="938637.html">a set of patches</a> was merged
+in an attempt to harden the kernel against such attacks; this mechanism
+works by partitioning the memory used by the slab allocator to satisfy
+requests.  Rather than use one set of slabs to provide (for example)
+64-byte memory chunks, the allocator uses sixteen of them.  The specific
+slab used for any given request is chosen randomly, but in such a way that
+the same slab is always used for allocations made at the same call site.
+In this way, the ability to fill memory with techniques like heap spraying
+is much reduced.  The ability to overwrite a targeted object with a buffer
+overflow is also reduced; most object types will be located in distant
+slabs, and the specific mix of object types in any given slab will differ
+from one boot to the next.
+<p>
+Partitioning that is randomized in this way makes many attacks harder, but
+it is a probabilistic defense.  It may separate a target object from the
+vulnerable object most of the time, but it will still put them into the
+same slab one boot out of sixteen.  In multi-system cloud deployments,
+some systems will certainly end up with an attacker-friendly placement of
+vulnerable objects.  Naturally, security-oriented kernel developers would
+like to do better than that.
+<p>
+One attempt to do better is <a
+href="/ml/all/20260511200136.3201646-1-elver@google.com/">type-based slab
+partitioning</a>, by Marco Elver, which was <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=feb662d9168b">merged</a>
+for the 7.2 release.  As its name would suggest, it works by separating
+allocations based on the type of the object being allocated rather than the
+address of the allocation call site.
+<p>
+To do so, this feature takes advantage of the <a
+href="https://clang.llvm.org/docs/AllocToken.html">allocation tokens
+feature</a> that is available with the Clang&nbsp;23 compiler.  In short,
+this feature provides a new compiler built-in function,
+<tt>__builtin_infer_alloc_token()</tt>, which generates an integer token
+value from the type(s) of the argument(s) passed into it.  That token, in
+turn, can be used to select the partition from which an object will be
+allocated.  The result is that objects of the same type will always be
+allocated from the same partition, even if there are several call sites
+performing the allocations.  A structure involved in a vulnerability will
+always be confined to a single partition, and will always be separated from
+most other structure types.
+
+<p>
+As an additional hardening feature, the generation of the token takes into
+account whether the type(s) in question are structures that contain
+pointers; the space for tokens representing pointer-containing types is
+disjoint from the space for all other types.  As a result, types that do
+not contain pointers are kept separate from those that do, making any
+overrun vulnerabilities with those types harder to exploit for the purpose
+of overwriting pointers.
+<p>
+The potential downside of this approach is that the mapping from types to
+partitions is now deterministic and, thus, predictable by attackers.  The
+older, randomized partitioning is still available as a configuration option
+for those who prefer it.  Distributors will have to make a choice, though,
+regarding which hardening variant (if either) they wish to enable for their
+users.
+<p>
+<h4>Run-time structure-layout randomization</h4>
+<p>
+Attackers can benefit from any information they have about how the memory
+in a given system is laid out.  That includes the layout of fields within
+structures; without that information, targets for attack are harder to
+locate in a running system.  Structures are laid out in the source, and the
+C&nbsp;standard is fairly clear about how a structure declaration should
+map to the resulting representation in memory.  Attackers will use that
+information, but may be thrown off if the in-memory layout differs from the
+source in unpredictable ways.
+<p>
+This not a new idea; the kernel has had support for <a
+href="/Articles/722293/">the "randstruct" GCC plugin</a>, which randomizes
+the order of fields within structures, for years.  Randstruct, though, is a
+compile-time operation; it rearranges structure fields while the kernel is
+being built.  For a site running a custom kernel, build-time randomization
+may be sufficient.  For kernels shipped by distributors, though, it is not
+particularly helpful; an attacker can look at the kernel image and know how
+a structure will be laid out in all systems running that particular kernel.
+<p>
+York Jasper Niebuhr recently showed up with <a
+href="/ml/all/20260620133222.94647-1-yjn@yjn-systems.com">an early-stage
+patch set</a>, called Bootpatch-SLR, that is meant to address that
+shortcoming.  It performs structure randomization at boot time, meaning
+that every kernel will have a different layout, and that layout will change
+every time the system is rebooted.  That should make life harder for
+anybody who is trying to target a specific structure field.
+<p>
+Bootpatch-SLR works by annotating structures to be randomized in the source
+with a set of special macros; <a
+href="/ml/all/20260605202511.79272-6-yjn@yjn-systems.com">this patch</a>
+marking up <tt>struct task_struct</tt> shows how it works.  In short, a set
+of fields to be randomized is annotated with markers like:
+<p>
+<pre>
+    struct foo {
+        spslr_struct_fields_start
+	/* fields to be randomized go here */
+	spslr_struct_fields_end
+    };
+</pre>
+<p>
+These markers turn into special ELF sections that will be included in the
+resulting kernel binary; they mark not only the fields to rearrange, but
+also all of the references to those fields.  When the kernel boots, it
+reads those sections, rearranges the indicated structure fields and, by way
+of a bunch of magic code-patching, updates all of the references to match.
+<p>
+Naturally, there are places where fields cannot be so easily rearranged.
+Many places in the kernel embed one structure as the first element of a
+containing structure, then assume that a pointer to the container can be
+cast to a pointer to the embedded structure.  Relocating the embedded
+structure is likely to produce results that are rather more random than
+desired.  The layout of other structures may be determined by protocol
+specifications or hardware.  Structures that should not be changed at all
+can simply be left unannotated; others, though, may be able to tolerate the
+reordering of some fields while others are left untouched.  For that case,
+there is a special marker, <tt>__spslr_field_fixed</tt>, that can be used
+to mark fields that need to keep their declared position within the
+structure.
+<p>
+This idea is appealing; once fully implemented, it could significantly
+increase the resistance of existing kernels to attack.  That is a rather
+distant goal at the moment, though.  Among other things, Bootpatch-SLR is
+implemented as a GCC plugin, and <a href="851090.html">the long-term
+plan</a> is to remove support for these plugins from the kernel's build
+system.  An attempt to add a new one now is unlikely to be successful.
+There are a number of other details that need to be worked out as well;
+several of them are described in <a
+href="https://spslr.yjn-systems.com/bootpatch-slr.html#:~:text=Known%20issues,-The">the
+"known issues" section</a> of the extensive <a
+href="https://spslr.yjn-systems.com/bootpatch-slr.html">online
+documentation for Bootpatch-SLR</a>.
+<p>
+Time will tell whether Bootpatch-SLR will reach a point where it can be
+merged into the mainline kernel; history is full of bright ideas and
+interesting prototypes that never reached that point.  If it does get
+there, though, the security benefits could be significant.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Slab allocators</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Kernel hardening</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1078699/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1079607"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Foods for thought...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 25, 2026 19:23 UTC (Thu)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/1079607/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lionel_Debroux" />
+                <input type="hidden" name="return" value="/Articles/1078699/#CommAnchor1079607" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On the one side, mainline has an old long-term plan of removing GCC plugins, to be replaced either by native compiler features, or LLVM/Clang plugins. Both solutions effectively leave many Linux users unprotected, because pretty few Linux distros build the kernel with Clang, or because it will take years until the compiler features which aren't implemented yet reach multiple important distros, let alone the Enterprise (TM) ones. ISTR that Google builds Android with Clang, so LLVM/Clang plugins could help protect that large contingent of users of _future_ versions, but not billions of users of past versions (without backports, that is, but aren't most older versions unlikely to receive them ?).<br>
+<p>
+On the other side, PaX/grsecurity doubles down on GCC plugins, because, despite the relative maintenance headache that they arguably cause (PaXTeam, spender, minipli, Emese Revfy, and/or whoever else has maintained them and maintains them nowadays seem to manage to cope with it), they have always represented a pragmatic solution for protecting users yesterday, today and tomorrow, against both old and new threats. I remember reading that GCC plugins ease maintenance of PaX/grsecurity, by replacing manual changes, and thereby free up more time for designing new defenses, too.<br>
+The 2017-2021 grsecurity patches published under the GPLv2 show that:<br>
+* AUTOSLAB (per-call-site slab partitioning, which, in my understanding, would be superior to type-based slab partitioning mentioned in this article);<br>
+* CONSTIFY (opt-out constification of statically allocated objects, e.g. ops structs);<br>
+* LATENT_ENTROPY;<br>
+* RAP (three-way forward edge deterministic + backward edge deterministic + backward edge probabilistic CFI, which makes it far superior to hardware implementations such as Intel CET - the grsecurity blog details how);<br>
+* RESPECTRE (automated patching for against speculative access issues, instead of manual patching for a handful of sites);<br>
+* SIZE_OVERFLOW (integer overflow prevention)<br>
+and several others have been implemented for years as GCC plugins, with extensive backwards compatibility to older GCC versions. Not to mention that they pioneered RANDSTRUCT that way, too, well over a decade ago.<br>
+<p>
+Another topic: aren't layout randomizations, be them for address space (KASLR, FG-KASLR, etc.) or structs (mentioned in this article), and the associated complexity and boot-time slowdown, high cost and relatively low payout, when there's lower-hanging fruit, such as a mainline Linux kernel missing MODHARDEN-type functionality ?<br>
+There are already occurrences of "MODHARDEN", which locks down unprivileged module auto-loading, in grsec patches from 2011. I saw several weeks ago that in the 2021 grsecurity patches, the hunks containing MODHARDEN represent ~100 (not a typo) raw lines of patch.<br>
+Unprivileged module auto-loading for uncommon network protocols or filesystems, whose implementations are full of vulnerabilities, has been spotlit in the recent string of LPE exploits: Copy Fail, the Dirty Frag family, etc. Denying unprivileged users the ability to trigger auto-loading of a vulnerable module breaks exploits which depend on that non-default-loaded module being auto-loaded. Then, PaX/grsecurity typically further break the recent exploits by taking extra measures to disable io_uring and by at least shunning unprivileged user namespaces, both of which have consistently shown themselves on the vulnerability feeds over the years, and were also used in the implementation of some of the recent exploits, but that's another matter.<br>
+By now, since over 15 years ago, MODHARDEN alone has made it impossible for unprivileged users to exploit dozens, if not hundreds of vulnerabilities in the Linux kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1079607/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1079640"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">We need a sysctl to disable unprivileged user namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2026 11:21 UTC (Fri)
+                               by <b>rbranco</b> (subscriber, #129813)
+                              [<a href="/Articles/1079640/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rbranco" />
+                <input type="hidden" name="return" value="/Articles/1078699/#CommAnchor1079640" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The recents exploits require unprivileged user namespaces.  This Debian patch should be considered upstream:<br>
+<a href="https://github.com/semplice/linux/blob/master/debian/patches/debian/add-sysctl-to-disallow-unprivileged-CLONE_NEWUSER-by-default.patch">https://github.com/semplice/linux/blob/master/debian/patc...</a><br>
+<p>
+We need something like kernel.unprivileged_userns_clone=0 because user.max_user_namespaces=0 disables user namespaces also for root. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1079640/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1079646"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">We need a sysctl to disable unprivileged user namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2026 12:10 UTC (Fri)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/1079646/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiederm" />
+                <input type="hidden" name="return" value="/Articles/1078699/#CommAnchor1079646" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+user.max_usernamespaces is per user namespace.  So it is completely possible to select your granularity with userspace policy.<br>
+<p>
+That said most times I have looked bugs are not exclusive to unprivileged user namespaces, just easier to trigger with them.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1079646/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1079831"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">We need a sysctl to disable unprivileged user namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2026 22:25 UTC (Fri)
+                               by <b>rbranco</b> (subscriber, #129813)
+                              [<a href="/Articles/1079831/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rbranco" />
+                <input type="hidden" name="return" value="/Articles/1078699/#CommAnchor1079831" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; user.max_usernamespaces is per user namespace. So it is completely possible to select your granularity with userspace policy.</span><br>
+<p>
+Not trivial to do in a distro-agnostic way.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1079831/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1082341"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">We need a sysctl to disable unprivileged user namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 10, 2026 19:55 UTC (Fri)
+                               by <b>rbranco</b> (subscriber, #129813)
+                              [<a href="/Articles/1082341/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rbranco" />
+                <input type="hidden" name="return" value="/Articles/1078699/#CommAnchor1082341" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Found a way to do it with BPF LSM:<br>
+<p>
+<a href="https://github.com/ricardobranco777/bpf-lsm-progs">https://github.com/ricardobranco777/bpf-lsm-progs</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082341/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1087534"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">We need a sysctl to disable unprivileged user namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2026 14:04 UTC (Thu)
+                               by <b>toby</b> (subscriber, #180241)
+                              [<a href="/Articles/1087534/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="toby" />
+                <input type="hidden" name="return" value="/Articles/1078699/#CommAnchor1087534" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From my experience of disabling it in arch linux, it broke many things such as all the electron-based apps, browsers... which seem to have their own isolation which rely on them.<br>
+Even trying to restrict this through apparmor proved very painful... and I finished by reverting a week long effort to harden my distro.<br>
+Restricting namespaces calls for more finegrained control (over what is authorized or not, by whom...) than a simple on/off toggle.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087534/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

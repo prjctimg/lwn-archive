@@ -1,0 +1,564 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>User namespaces + file capabilities = trouble [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="User namespaces + file capabilities = trouble">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="User namespaces are a key part of the kernel's toolkit for assembling containers; processes wit [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;User namespaces + file capabilities = trouble&quot;" href="https://lwn.net/headlines/1103429/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<link rel="stylesheet" href="/CSS/subonly">
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>User namespaces + file capabilities = trouble</h1>
+<h2>[LWN subscriber-only content]</h2>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 5, 2026</br>
+           </div>
+<a href="532593.html">User namespaces</a> are a key part of the
+kernel's toolkit for assembling containers; processes within a user
+namespace can appear to have full root access to the system while gaining
+no extra privileges in the wider system.  At least, that is the intent.  In
+practice, keeping privilege contained within a user namespace has often
+turned out to be difficult.  As an example, consider <a
+href="/ml/all/20261027-b4-setfcap-userns-v8-0-2674adc63f3c@toxicpanda.com">this
+small patch series</a> from Josef Bacik, which is intended to address some
+situations where a process within a user namespace can elevate the
+privileges of processes outside of it.
+<p>
+<h4>Some background</h4>
+<p>
+The first process that is placed into a user namespace is treated much like
+the init process in the base system; it runs with user ID zero and has full
+root privileges.  The kernel, though, remaps all user IDs before using them
+for any access decisions outside of the container.  By default, all user
+IDs are mapped to the "unknown user" ID 65534 before, say, accessing a
+filesystem mounted outside of the namespace.  So root access within the
+namespace may translate to no access at all outside.  If namespaces have been
+nested, there may be multiple levels of remapping applied before reaching
+the initial namespace created when the system boots.
+<p>
+It is possible to change the user (and group) ID mappings for a user
+namespace by writing to the <tt>uid_map</tt> or <tt>gid_map</tt> file in
+the <tt>/proc</tt> directory of any process running inside that namespace.
+Without root privilege, though, it is not possible to remap IDs to anything
+other than that of the process that created the namespace.  If an
+unprivileged process with user ID 1000 creates a user namespace, it can set
+up a mapping from any ID within the namespace, but only to ID 1000 outside.
+Changing the mappings is also a one-time operation; once the mappings have
+been set, they cannot be changed again.
+<p>
+One other bit of important background is <a
+href="https://man7.org/linux/man-pages/man7/capabilities.7.html">capabilities</a>,
+which describe the privileges that any given process has.  The root user,
+by default, has all capabilities; other processes have none.  There are
+times, as we will see, where a process running as root will drop some of
+its capabilities to prevent certain actions from taking place.
+<p>
+Finally, <i>file</i> capabilities can be thought of as a way to create a
+form of setuid executable. A given set of capabilities can be attached to a
+file with the <a
+href="https://man7.org/linux/man-pages/man8/setcap.8.html"><tt>setcap</tt></a>
+command; thereafter, any process running the program in that file will be
+given the named capabilities.  Needless to say, attaching capabilities to a
+file in this way is a privileged operation; specifically, any process
+attempting to do so must have the <tt>CAP_SETFCAP</tt> capability.  The
+kernel has some elaborate mechanisms to allow file capabilities to work
+within a user namespace while being ignored outside.  Specifically,
+"version&nbsp;3 extended attributes" can encode a non-root user ID that can
+map to root inside a namespace owned by that ID.  The curious can see <a
+href="https://man7.org/linux/man-pages/man7/capabilities.7.html#:~:text=File%20capability%20extended%20attribute%20versioning">this
+subsection of the capabilities man page</a> for the gory details.
+<p>
+<h4>The trouble with file capabilities</h4>
+<p>
+User namespaces were designed to map the root user internally to an
+unprivileged user externally.  But it is possible to map root within a
+namespace to root in the containing namespace as well.  Doing so clearly
+presents a number of security challenges but, with sufficient care, a
+root-mapped user namespace can still provide a fair amount of containment.
+This is especially true if the code that runs as the init process within
+the namespace is trusted by whoever manages the containing namespace.  That
+code can do whatever setup is needed, then drop privileges (capabilities)
+before transferring control to whatever workload the container was meant to
+run.
+<p>
+If the root user within a user namespace adds file capabilities to an
+executable file that is visible in the containing namespace, those
+capabilities will normally be qualified by the user ID that root maps to in
+the containing namespace.  As a result, those capabilities will not be
+effective if an unprivileged user runs the executable in the containing
+namespace.  If, however, the contained namespace is root-mapped, this
+qualification does not happen and the capabilities <i>are</i> effective in
+the containing namespace.  Letting root add capabilities to a file in
+this way could, thus, allow privilege to escape the namespace.
+<p>
+The way to prevent this from happening is to take care to drop
+<tt>CAP_SETFCAP</tt> from the root process running within the namespace;
+that process can no longer create file capabilities, and the privilege
+escape goes away.  At least, that happens until this root process creates a
+root-mapped user namespace of its own.  Remember that the initial process
+running in a new user namespace has all capabilities, so that process will
+have regained <tt>CAP_SETFCAP</tt>.  It can then add file capabilities to a
+file in the containing namespace which, being root-mapped as well, will
+propagate the change through to its containing namespace.  At that point,
+there is, once again, a file with elevated capabilities, accessible outside
+the namespace, that an unprivileged user could execute.
+<p>
+<a href="https://git.kernel.org/linus/db2e718a4798">This commit</a>, merged
+just before the 5.12 kernel release in 2021, is meant to address that
+problem.  If a process tries to create a root-to-root mapping by writing to
+a namespace's <tt>uid_map</tt> file, the attempt will fail unless that
+process possesses <tt>CAP_SETFCAP</tt>.  That alone does not suffice,
+though, since the root process within a newly created user namespace does
+hold that capability, and could write to its own <tt>uid_map</tt> file (an
+operation that is allowed if the effective UID within and outside of the
+namespace are the same).  So that patch also records whether the creator of
+the namespace in question had <tt>CAP_SETFCAP</tt>; in the absence of that
+capability, an attempt to create a root-to-root mapping from within the
+namespace will fail.  Problem solved.
+<p>
+<h4>More leaks</h4>
+<p>
+Naturally, the problem is not truly solved, or this patch set (you remember
+the patch set...this is an article about Bacik's patch set) would not
+exist.  It turns out that requiring <tt>CAP_SETFCAP</tt> to create a
+root-mapped user namespace is not enough to prevent privilege leaks in some
+situations.
+<p>
+Imagine a root-mapped user namespace with two root processes; one of them
+(call it "A") holds the full set of capabilities, while the other ("B")
+does not have <tt>CAP_SETFCAP</tt>.  If A creates a user namespace of its
+own, that namespace will have the "creator held <tt>CAP_SETFCAP</tt>" flag
+set.  B&nbsp;can then enter that namespace with a <a
+href="https://man7.org/linux/man-pages/man2/setns.2.html"><tt>setns()</tt></a>
+call; since its UID matches that of the creator of the namespace, that
+entry will be allowed, and B will have the full set of capabilities in that
+namespace.  At that point, B&nbsp;can write a root mapping into the
+<tt>uid_map</tt> file, then start attaching file capabilities that will be
+visible outside of the containing namespace.  In other words, B&nbsp;will
+have regained the <tt>CAP_SETFCAP</tt> capability that had been dropped.
+<p>
+There are other scenarios as well.  If A were to open the <tt>uid_map</tt>
+file without writing to it, then somehow transfer the file descriptor
+to&nbsp;B, it would be possible for B to write a root-to-root mapping
+there.  The check for <tt>CAP_SETFCAP</tt> is done when the
+<tt>uid_map</tt> file is opened, not when it is written, so that mapping
+will be allowed.  One might argue that A should not be giving away a
+privileged file descriptor that way, but it could happen if A simply fails
+to close it before dropping <tt>CAP_SETFCAP</tt>.
+<p>
+If B creates a user namespace, the <tt>CAP_SETFCAP</tt> flag will not be
+set, so B will not be able to create a root mapping for that namespace.
+A,&nbsp;however, has that capability, so it can write a root mapping into
+B's new user namespace.  Once again, that will enable B to set file
+capabilities that are effective in the containing namespace.  In some
+cases, there can be multiple levels of mappings that involve non-root UIDs
+in the middle.  <a href="837566.html">ID-mapped mounts</a>, which are
+often used with containers, add a twist of their own, since a non-root UID
+on the underlying filesystem may appear to be root within a give mount
+namespace.
+<p>
+Finally, B could simply attach to A with <a
+href="https://man7.org/linux/man-pages/man2/ptrace.2.html"><tt>ptrace()</tt></a>,
+an operation that is allowed because the effective UIDs are the same, then
+cause A to write its <tt>uid_map</tt> file or set file capabilities
+directly.  Since A holds <tt>CAP_SETFCAP</tt>, those operations will be
+allowed.
+<p>
+<h4>Plugging the holes</h4>
+<p>
+Preventing these privilege leaks requires enhancing the tracking of
+<tt>CAP_SETFCAP</tt> and some changes that are visible to user space.  The
+<a
+href="/ml/all/20261027-b4-setfcap-userns-v8-1-2674adc63f3c@toxicpanda.com">first
+patch</a> in the series replaces the <tt>parent_could_setfcap</tt> boolean
+in the <a
+href="https://elixir.bootlin.com/linux/v7.3/source/include/linux/user_namespace.h#L79"><tt>user_namespace</tt>
+structure</a> with an integer <tt>setfcap_level</tt> field.  While the old
+boolean recorded whether the creator of the user namespace had
+<tt>CAP_SETFCAP</tt>, the new one records how far up that capability was
+present — how many levels of parent user namespace where it was also held.
+This new variable accounts for the fact that <tt>CAP_SETFCAP</tt> in the
+current user namespace is effective in that many parent namespaces as well.
+<p>
+<a
+href="/ml/all/20261027-b4-setfcap-userns-v8-2-2674adc63f3c@toxicpanda.com">This
+patch</a> is intended to prevent a process from gaining
+<tt>CAP_SETFCAP</tt> on an ancestor user namespace by using
+<tt>setns()</tt>.  Specifically, it adds a check to ensure that, when a
+process calls <tt>setns()</tt> to enter a user namespace that is
+root-mapped at some higher level, the <tt>setfcap_level</tt> of that
+process extends at least as far as that of the target user namespace.  The
+test for root-mapped user namespaces includes namespaces that have not yet
+had a mapping set at all, since they still <i>could</i> become root-mapped
+in the future.  If the <tt>setns()</tt>-calling process does not have
+<tt>CAP_SETFCAP</tt> with sufficient reach, the call will fail with an
+<tt>EPERM</tt> error.  This is one of the visible changes; that call would
+succeed in current kernels.
+<p>
+A similar change is made by <a
+href="/ml/all/20261027-b4-setfcap-userns-v8-3-2674adc63f3c@toxicpanda.com">this
+patch</a> to control setting a root mapping by writing to the
+<tt>uid_map</tt> file.  If the attempted write creates a mapping to the
+root user in any ancestor user namespace, then the writer's
+<tt>setfcap_level</tt> must extend at least that far, or the operation will
+fail.  <a
+href="/ml/all/20261027-b4-setfcap-userns-v8-4-2674adc63f3c@toxicpanda.com">This
+patch</a> addresses the case where a <tt>CAP_SETFCAP</tt>-holding process
+writes the <tt>uid_map</tt> file; it checks attempts to write file
+capabilities and ensures that the writing process has a
+<tt>setfcap_level</tt> that is high enough to reach any root-mapped
+ancestor.  Finally, <a
+href="/ml/all/20261027-b4-setfcap-userns-v8-5-2674adc63f3c@toxicpanda.com">this
+patch</a> applies a similar check to <tt>ptrace()</tt> calls; if the tracer
+does not have a <tt>setfcap_level</tt> that reaches at least as far as that
+of the target, the call will fail.
+<p>
+This series has been through eight revisions as of this writing; it has
+evolved considerably, though the last few versions have been mostly focused
+on adding tests.  In theory, with these patches applied, the ability to
+leak privilege out of user namespace with file capabilities should no
+longer exist.  In practice, there is enough complexity here that one might
+still have cause to wonder.  Ensuring that user namespaces are truly secure
+has been a multi-year endeavor; mapping root access outside of these
+namespaces is only going to make that task more challenging.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Namespaces/User namespaces</a></td></tr>
+            </table><br clear="all">
+<div class="MakeALink">
+               <table align="right"><tr><td>
+               <form action="/SubscriberLink/MakeLink" method="post">
+               <input type="hidden" name="articleid" value="1103429">
+               <input type="submit" value="Send a free link"></form>
+               </td></tr></table>
+               </div>
+               <br clear="all">
+               <table align="right"><tr><td>
+           <form action="/Articles/1103429/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1105670"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">High-maintenance designs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2026 21:05 UTC (Thu)
+                               by <b>MrWim</b> (subscriber, #47432)
+                              [<a href="/Articles/1105670/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MrWim" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1105670" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems like file capabilities (and suid/sgid) are trouble enough on their own. <a href="416494.html">https://lwn.net/Articles/416494/</a> .<br>
+<p>
+It’s about time I learnt how to use polkit and run0. Looking forward to a no-new-privs future.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105670/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1105694"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A few corrections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2026 7:14 UTC (Fri)
+                               by <b>glettieri</b> (subscriber, #15705)
+                              [<a href="/Articles/1105694/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="glettieri" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1105694" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Unfortunately, there are a couple of inaccuracies in the first paragraph of the background section. Processes retain their underlying UID when they create or join a user namespace; the first process does not automatically receive UID 0. Instead, they gain a full set of capabilities in the user namespace, and this also applies to processes that later join it with setns(). The mapping to "nobody" works in the opposite direction: if an external UID has no mapping in the user namespace, it appears as "nobody" inside, rather than being mapped to "nobody" outside. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105694/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1105696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case for userns with root = root?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2026 9:19 UTC (Fri)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1105696/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1105696" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe I just lack imagination, but what is the actual use case for a userns with a root(inside) = root(outside) mapping, especially in a security context where you don't want to trust the root inside?<br>
+<p>
+I mean, forget filesystem capabilities - if you manage to get hold of an UNIX domain socket from within the userns, where the program on the other side relies on SCM_RIGHTS, the kernel will accurately report that the request comes from root. Any IPC service using SCM_RIGHTS w/ UID checks will be broken by this if the socket ever leaks into the container. And as soon as you have a common mounted filesystem in the container and outside of it, you could at the very least use the container to prepare a gadget for someone outside by having the container inside create a setuid(root) binary in the common filesystem, and then an unpriv user on the outside could then call that binary and become root. (Granted, the creation of the setuid(root) binary in and by itself does nothing, but things like this make me queasy.) I'm sure if I spend the rest of the day thinking about things I can come up with a ton of other scenarios here where security expectations from normal software are broken by this.<br>
+<p>
+Honestly, I personally wouldn't consider userns with root(inside) = root(outside) a security boundary at all.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1105707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case for userns with root = root?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2026 12:48 UTC (Fri)
+                               by <b>Loara67</b> (subscriber, #185720)
+                              [<a href="/Articles/1105707/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Loara67" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1105707" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A possible use case for a root-to-root mapping in a user namespaces could be to allow a root process to restrict itself and prevent accidental modifications of the system when performing some operations. With an user namespaces, all it's capabilities are dropped outside of the namespace, therefore preventing accidental modifications.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1105723"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case for userns with root = root?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2026 13:47 UTC (Fri)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1105723/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1105723" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can't you just drop all capabilities regardless of a userns if you want to do something like that?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105723/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1106026"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case for userns with root = root?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 8, 2026 1:56 UTC (Sun)
+                               by <b>Loara67</b> (subscriber, #185720)
+                              [<a href="/Articles/1106026/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Loara67" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1106026" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because you still want full capabilities inside your private mount/network/PID... namespace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1106026/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1105910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case for userns with root = root?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2026 18:59 UTC (Fri)
+                               by <b>hallyn</b> (subscriber, #22558)
+                              [<a href="/Articles/1105910/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hallyn" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1105910" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The uid equivalence to root owned files will still allow you to make a *lot* of accidental or malicious changes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1106347"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case for userns with root = root?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2026 4:53 UTC (Tue)
+                               by <b>notriddle</b> (subscriber, #130608)
+                              [<a href="/Articles/1106347/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="notriddle" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1106347" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>systemd-homed has to perform a recursive chown if you activate a mobile hone with a UID that is already used by something else.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1106347/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1106596"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case for userns with root = root?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 11, 2026 3:06 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1106596/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1103429/#CommAnchor1106596" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Is there not a uid/gid mapping layer somewhere? Recursive <code>chown</code> seems harsh…not everything is necessarily owned by one user.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1106596/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

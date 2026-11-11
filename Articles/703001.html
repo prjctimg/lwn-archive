@@ -1,0 +1,909 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Supporting UEFI secure boot in Debian [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Supporting UEFI secure boot in Debian">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Debian project can be accused of many things, but jumping too quickly on leading-edge techn [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/703020/">Return to the Distributions page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Supporting UEFI secure boot in Debian</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 10, 2016</br>
+           <hr>
+<a href="../Archives/ConferenceByYear/index.html">Kernel
+Recipes</a>
+</div>
+The Debian project can be accused of many things, but jumping too quickly
+on leading-edge technology is not one of them.  That can be seen in, among other
+things, the fact that there is still not a version of the distribution that
+supports the UEFI secure boot mechanism.  But, as Ben Hutchings explained
+during his 2016 Kernel Recipes talk, such support is in the works, and it
+will be implemented in a uniquely Debian-like manner.
+<p>
+Hutchings started by reviewing how the secure boot technology works.  On
+systems with secure boot, the UEFI firmware is able to validate the
+system's bootloader by checking its signature against a list of trusted
+
+<a href="/Articles/703003/"><img
+src="../_static/images/conf/2016/recipes/BenHutchings-sm.jpg" width=200 height=250
+alt="[Ben Hutchings]" title="Ben Hutchings" border=0 hspace=3 vspace=3
+align="right"></a> 
+
+
+keys; it can also validate UEFI drivers and firmware updates.  This
+checking is intended to defend the system against persistent malware 
+by ensuring that the system's low-level software has not been tampered
+with.  Support for secure boot is mandatory for systems that will run
+Windows, so all desktop systems sold since 2012 have it.  It is possible to
+build 
+in trust for multiple signing keys but, in practice, the one key that is
+trusted by everybody is Microsoft's key.
+<p>
+To boot Linux on a system with secure boot enabled, the first stage
+bootloader must have a Microsoft signature; in the Linux world, that is
+usually the special "shim" utility.  Distributors create their own
+signing key, which they then build into shim; that key is then used to
+verify the GRUB installation.  GRUB, in turn, verifies the signature for
+the kernel image; the kernel must validate any modules that it loads.  By
+checking for proper signatures at every stage of the boot process, the
+system can be protected against hostile software modifications.
+<p>
+Supporting secure boot requires some fundamental changes in how Linux
+systems work.  Traditionally, the root account can run arbitrary code, but
+that cannot be allowed under secure boot; even root should be unable to
+fully take over the system.  To keep that from happening, the module loader
+must check signatures on kernel modules.  The "kexec" mechanism must be
+prevented from booting into an arbitrary, unsigned image.  Various I/O
+devices that are capable of modifying arbitrary memory must be disabled.
+The hibernation mechanism must be disabled entirely, though future work
+could, by signing and verifying the hibernation image, make that work
+again.  Debian will be using <a href="514985.html">Matthew Garrett's
+patches</a> that make 
+these changes; the patches are still not upstream and may never be, though,
+since certain high-profile kernel developers dislike them.
+<p>
+<h4>The Debian way</h4>
+<p>
+The commonly-used approach of signing the kernel image creates some
+problems for Debian, though.  The project's practice with signatures has
+been to sign metadata describing software, never the code itself.  Debian
+does not want to put signing keys onto <a
+href="https://buildd.debian.org/">its "buildd" systems</a>; those 
+systems are distributed around the globe and present any number of ways in
+which the keys could be exposed.  Debian is also committed to
+<a href="https://wiki.debian.org/ReproducibleBuilds">reproducible
+builds</a>, which cannot depend on secrets (or they would 
+no longer be reproducible).
+<p>
+As a result, Debian cannot automatically build signed kernel binaries in a
+single 
+step.  Instead, the process starts with the creation of an unsigned
+binary.  The signature for that binary is then created offline and a second
+source package is created to contain it.  A second-stage build then
+rebuilds the kernel binary and applies the signature to it, resulting in a
+new package with a fully signed kernel binary.  As long as
+the build is truly reproducible, the signature will still apply to the
+recreated binary.  This
+mechanism allows anybody to create a signed Debian kernel image — as long
+as it precisely matches the kernel that was created by Debian itself.
+<p>
+Some changes to the <a href="https://wiki.debian.org/DebianDak">Debian
+Archive Kit (dak) software</a>, which signs archive metadata, 
+will be needed, since it now needs to be able to publish detached
+signatures too.  It may be necessary to publish the signature without
+publishing the accompanying binary immediately; this could happen in
+response to an embargoed security issue, for example.  There is a script
+that turns a tarball of EFI binaries (and kernel modules) into a tarball of
+signatures, which are then installed into the archive metadata.  The source
+package for the initial build is changed to include this tarball, along
+with a preparation script used by the second-stage build.
+<p>
+Some might wonder whether Ubuntu had already done this sort of work.
+Ubuntu's solution doesn't work for Debian, though, for a number of reasons,
+starting with the fact that Ubuntu's package builder doesn't use dak.
+Ubuntu's signing 
+script only covers EFI binaries, leaving modules unsigned; it also creates
+signed binaries directly instead of using the two-stage signing process
+that Debian requires.  Ubuntu only supports the amd64 architecture; Debian
+wants to 
+support all architectures where secure boot is relevant.  One other little
+complication is that the Ubuntu and Debian kernel packages have diverged
+significantly over the last ten years.  The two projects do share some of
+the utilities, though, including shim and the <tt>grub-signed</tt> bootloader.
+<p>
+What about the ARM architecture?  The upstream kernel has EFI stub support
+for both 32-bit and 64-bit ARM systems.  Debian has out-of-tree securelevel
+patches that work for arm64; other tools, including <tt>sbsigntool</tt>,
+
+<a href="/Articles/703004/"><img
+src="../_static/images/conf/2016/recipes/JulienCristau-sm.jpg" width=200 height=250
+alt="[Julian Cristau]" title="Julien Cristau" border=0 hspace=3 vspace=3
+align="right"></a> 
+
+shim, and the GRUB EFI code, also work there.  So it should be possible to
+support arm64 systems under secure boot, at least.  The smaller ARM systems
+that feature secure boot are locked down and will only run Microsoft
+software, but that should be less of a problem in the server space.
+<p>
+
+Julien Cristau stepped up briefly to talk about how signing keys will be
+managed as this whole thing goes into production.  Once again, the Ubuntu
+example is only so helpful for Debian.  Ubuntu has its own data center,
+under its control, with the result that it has relatively good security for
+its machines.  Debian lacks this data center, depending instead on machines
+hosted in various places around the world; it can thus never have as good a
+handle on the security of those machines.  Signing keys will need to be
+kept in a hardware token, such as a YubiKey device.  Patches are in the
+works to make all of this work in a secure manner.
+<p>
+
+<h4>Where things stand</h4>
+<p>
+Hutchings came back to summarize the status of this work; the current state
+of affairs can also be found in the Debian bug tracker as <a
+href="https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=820036">bug 
+#820036</a>.  The changes to dak are in progress, and can be expected soon.
+The shim package is done, and is in review; there is still a need to put
+together a signed GRUB build.  The signed build for the kernel is ready to
+go, but a signed build for the <tt>fwupdate</tt> utility is not ready yet.
+The installer and live images are ready to work with signed binaries, as is
+the support to actually install it all.  The target for this work is the
+Debian&nbsp;9 ("Stretch") release, which goes into freeze in January.  More
+information can 
+be found on <a href="https://wiki.debian.org/SecureBoot">the Debian
+secure boot wiki page</a>.
+<p>
+The first question from the audience had to do with the UEFI signing key:
+would it be possible to use a separate key and avoid the need for
+Microsoft's signature?  There is some appeal to that approach, but it has a
+big disadvantage: users would would have to install the new key in their
+firmware.  There are a lot of different firmware implementations out there,
+each of which has its own horrible interface for key installation.
+Creating documentation to get Debian users through that process would not
+be fun.
+<p>
+Why is Debian only coming out with secure boot support now?  Hutchings
+responded that the project has wanted this support all along, but has
+obviously been slow in implementing it.  There has been a lot of talk about
+how to do it, but nobody actually got the work done.  As a result, it's
+still not possible to install Debian without disabling secure boot in the
+firmware.  That is about to change, though, now that support for secure
+boot is almost ready.
+<p>
+The final question suggested that, if Debian were to continue to not
+support secure boot, that might force vendors to make the feature easier to
+do without.  Hutchings's response there was a dry "it's still not the year
+of the Linux desktop"; he does not believe that Linux distributors can push
+desktop hardware vendors around in that way.
+<p>
+[Your editor thanks Kernel Recipes for supporting his travel to this event.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Distribution security</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Secure boot</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Kernel Recipes/2016</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/703001/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor703098"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2016 15:33 UTC (Mon)
+                               by <b>rahvin</b> (guest, #16953)
+                              [<a href="/Articles/703098/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahvin" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703098" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's good to see this finally coming but I'm one of the people that appreciates that Debian is methodical about these type of changes even if it takes longer. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703098/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2016 16:16 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/703115/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703115" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Debian lacks this data center, depending instead on machines hosted in various places around the world; it can thus never have as good a handle on the security of those machines.</font><br>
+<p>
+This seems like a misleading statement, especially in the context of buildd systems that build software for Debian.<br>
+<p>
+The problem is *not* with keeping those systems secure from malicious attacks; if that were a problem, users couldn't count on the resulting packages.<br>
+<p>
+The problem is that the information on those systems can't be kept *secret*.  Too many people would have access to the signing keys.<br>
+<p>
+Hence the solution of the Debian kernel maintainers creating the signatures offline, using keys on hardware crypto tokens.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2016 20:26 UTC (Mon)
+                               by <b>xtifr</b> (guest, #143)
+                              [<a href="/Articles/703150/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="xtifr" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703150" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, thanks. I was a little confused about that part. But when you put it that way, it makes perfect sense.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703157"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2016 21:30 UTC (Mon)
+                               by <b>jcristau</b> (subscriber, #41237)
+                              [<a href="/Articles/703157/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jcristau" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703157" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, that's not what I was talking about.  The kernel maintainers creating the signatures is a temporary stopgap while we sort out signing by the archive software.  The key Ben currently uses is not trusted by any firmware, and doesn't cover grub and other packages.  But before we go and sign bootloaders automatically we want to make reasonably sure we notice any tampering with the key, which having the key unencrypted on-disk on a host connected to the internet (ftp-master.debian.org) wouldn't provide, hence the HSM.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703157/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor703160"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2016 21:58 UTC (Mon)
+                               by <b>micka</b> (subscriber, #38720)
+                              [<a href="/Articles/703160/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="micka" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703160" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So if I understand...<br>
+<p>
+<font class="QuotedText">&gt; Instead, the process starts with the creation of an unsigned binary.</font><br>
+<p>
+So one unsigned kernel package, the same as currently (?). Reproducible provided we can find all variation sources.<br>
+<p>
+<font class="QuotedText">&gt;The signature for that binary is then created offline and a second source package is created to contain it</font><br>
+<p>
+So one second package. If the first was kernel-image_XXXX, this one would be kernel-image-sig_XXXX or whatever.<br>
+What is the 'reproducible' status of this one? Do we abandon the reproducibility?<br>
+<p>
+<font class="QuotedText">&gt; A second-stage build then rebuilds the kernel binary and applies the signature to it, resulting in a new package with a fully signed kernel binary</font><br>
+<p>
+I'm begining ot be a bit lost. This is a new package which source(?) are the other previous binary(?) packages?<br>
+<p>
+<font class="QuotedText">&gt;As long as the build is truly reproducible, the signature will still apply to the recreated binary.</font><br>
+<p>
+So we have reproducibility provided the second package (signature) is reproducible?<br>
+<p>
+(I'm sorry if there are so many question marks, those are the points that wasn't able to clear by myself)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703160/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703167"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2016 0:18 UTC (Tue)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/703167/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="BenHutchings" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703167" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>So one unsigned kernel package, the same as currently (?). Reproducible provided we can find all variation sources.</blockquote>
+<p>Same source package, linux. The reproducible builds project now shows it as unreproducible, but only because they now vary the source directory. We can make it insensitive to the source directory once gcc supports path remapping in the preprocessor.</p>
+<blockquote>So one second package. If the first was kernel-image_XXXX, this one would be kernel-image-sig_XXXX or whatever.</blockquote>
+<p>The second source package is linux-signed. It contains the detached signatures for all the binary packages that get signed.</p>
+<blockquote>What is the 'reproducible' status of this one? Do we abandon the reproducibility?</blockquote>
+<p>It's reproducible.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703167/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703265"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2016 22:18 UTC (Tue)
+                               by <b>st</b> (guest, #96477)
+                              [<a href="/Articles/703265/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="st" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703265" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To clarify, is the signature itself reproducible without possession of the necessary secret, or is the signature not reproducible, but the package that gets built from the signature source package the part that's reproducible?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703265/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703266"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2016 22:23 UTC (Tue)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/703266/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="BenHutchings" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703266" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The latter.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703266/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703283"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2016 7:09 UTC (Wed)
+                               by <b>micka</b> (subscriber, #38720)
+                              [<a href="/Articles/703283/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="micka" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703283" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So anyone can't validate that the build is reproducible?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703283/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703285"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2016 7:25 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/703285/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703285" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can do a local rebuild and validate that you have the same bits as in the signed kernel. But you will not be able to replicate the signature itself.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703285/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703284"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2016 7:26 UTC (Wed)
+                               by <b>chirlu</b> (guest, #89906)
+                              [<a href="/Articles/703284/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chirlu" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703284" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can verify the signature, can’t you? You can’t reproduce it yourself, though, as you lack the key.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703284/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor703518"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 3:02 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/703518/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703518" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I've been trying to figure out UEFI secure boot since LWN started writing about it in 2011.
+
+<blockquote>
+Support for secure boot is mandatory for systems that will run Windows, so all desktop systems sold since 2012 have it.
+</blockquote>
+<p>
+What is "support for"?  Does it mean the system must refuse to run an unsigned boot loader?  Or maybe that it must be possible for the user to configure it so?
+<p>
+Have there been any computers made since 2012 that can run both Windows and Debian, and if so, will they run Debian out of the box?
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703518/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 12:33 UTC (Fri)
+                               by <b>tao</b> (subscriber, #17563)
+                              [<a href="/Articles/703553/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tao" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703553" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, it means that the BIOS/Firmware must have *support for* (not exactly hard to figure that one out) secure boot. Not that it has to *only* support secure boot.<br>
+<p>
+My current laptop, purchased this spring, is a ThinkPad 13. Works perfectly with Debian out of the box (and seeing as it came installed with Windows I'm gonna assume that Windows works on it too). My collection of Intel NUCs work just fine with Debian out of the box. The ThinkPad X1 Carbon I have at the office works just fine with Debian. etc..<br>
+<p>
+TLDR:<br>
+<p>
+That it gives the option to use secure boot, no, yes, yes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703604"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 15:17 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/703604/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703604" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      OK, then what is the point?  If your computer came with Windows, but willing to run Debian once you installed it, and according to this article, Debian today does not spring from anything signed by Microsoft, then what is to stop a worm running on Windows from changing the boot loader to something malicious and running a compromised Windows?
+<P>
+"Support," by the way, is used to mean half a dozen things in the computer world, most not consistent with the traditional dictionary definition of that word.  One has to ask.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703604/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703619"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 17:03 UTC (Fri)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/703619/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zlynx" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703619" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+First enter the firmware configuration and disable Secure Boot. Every machine I've used lately supports this.<br>
+<p>
+On a brand new system you may need to boot Windows in order to reboot to firmware configuration because Fast Boot is on. If you can't get to options even then you can download software to directly edit EFI variables.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703619/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703620"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 17:20 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/703620/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703620" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+First enter the firmware configuration and disable Secure Boot.
+</blockquote>
+<p>
+OK, I understand that.  (But it's not what I meant when I asked about "out of the box.")
+<p>
+There was talk when UEFI secure boot was new that computers would not have that option, i.e. that Microsoft would not let its products run on machines that let the user disable it.
+<p>
+I am glad to hear it ended up this way.  The world makes more sense now.
+<blockquote>
+ If you can't get to options even then you can download software to directly edit EFI variables
+</blockquote>
+<p>
+But this gets back to the "what's the point" area, depending on what exactly it means.  If you can download and run software under Windows to directly edit EFI variables and turn off secure boot, then that's exactly what a virus would do.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703620/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703624"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 17:44 UTC (Fri)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/703624/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zlynx" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703624" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was thinking of disabling Fast Boot. If the firmware lets you edit Secure Boot that would be a problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703624/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703633"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 19:40 UTC (Fri)
+                               by <b>jem</b> (subscriber, #24231)
+                              [<a href="/Articles/703633/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jem" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703633" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;There was talk when UEFI secure boot was new that computers would not have that option, i.e. that Microsoft would not let its products run on machines that let the user disable it.</font><br>
+<p>
+On x86 you are able to disable Secure Boot, on ARM you are not. Both are requirements from Microsoft for Windows logo certification.<br>
+<p>
+<font class="QuotedText">&gt;But this gets back to the "what's the point" area, depending on what exactly it means. If you can download and run software under Windows to directly edit EFI variables and turn off secure boot, then that's exactly what a virus would do.</font><br>
+<p>
+That's not possible. The firmware must be implemented so that "physical presence" is required to disable secure boot.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703633/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703782"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 17, 2016 17:43 UTC (Mon)
+                               by <b>pjones</b> (subscriber, #31722)
+                              [<a href="/Articles/703782/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pjones" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor703782" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just directly editing variables won't let you disable Secure Boot unless you happen to know the system vendor's (or Microsoft's) private RSA2048 key.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703782/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor705138"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting UEFI secure boot in Debian</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2016 19:08 UTC (Mon)
+                               by <b>JanC_</b> (subscriber, #34940)
+                              [<a href="/Articles/705138/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JanC_" />
+                <input type="hidden" name="return" value="/Articles/703001/#CommAnchor705138" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also, usually you can get into the the firmware configuration even when Fast Boot is on if it can't find a bootable disk (otherwise you would be in trouble if your hard disk ever fails).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/705138/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

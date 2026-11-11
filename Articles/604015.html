@@ -1,0 +1,202 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Capsicum for Linux [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Capsicum for Linux">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Capsicum is a process sandboxing framework that was originally developed for FreeBSD; it was co [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/603653/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Capsicum for Linux</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 2, 2014</br>
+           </div>
+Capsicum is a process sandboxing framework that was originally developed
+for FreeBSD; it was <a href="/Articles/482858/">covered here</a> in early
+2012.  <a href="/Articles/603929/">The beginnings of Capsicum support for
+Linux</a> have now been posted by David Drysdale for review; that provides
+a good opportunity to look at how this mechanism might fit into the Linux
+kernel.  This work might be a hard sell in the kernel community, but
+Capsicum might just provide a sufficiently useful set of features to make the
+trouble worthwhile.
+
+<p>
+
+Capsicum is built around a concept called "capabilities," which, naturally
+enough, is entirely different from Linux capabilities (and from POSIX
+capabilities as well).  In the Capsicum
+world, capabilities are attached to file descriptors to regulate which
+operations can be performed on those descriptors.  So, for example, a file
+descriptor can only be read if the <tt>CAP_READ</tt> capability is present.
+Access to <tt>lseek()</tt> is controlled by <tt>CAP_SEEK</tt>,
+memory mapping has a set of capabilities (<tt>CAP_MMAP_W</tt> to create a
+writable mapping, for example), truncation is controlled by
+<tt>CAP_FTRUNCATE</tt>, and so on.  There are two special capabilities for
+<tt>ioctl()</tt> and <tt>fcntl()</tt> that restrict those calls to specific
+subcommands. 
+<p>
+By default, open file descriptors are unrestricted.  The normal mode of
+operation is that a process will apply restrictions to itself using the new
+<tt>cap_rights_limit()</tt> system call:
+<p>
+<pre>
+    int cap_rights_limit(unsigned int fd, struct cap_rights *new_rights,
+    			 unsigned int new_fcntls, int nioctls, unsigned int *new_ioctls);
+</pre>
+<p>
+After this call, operations on <tt>fd</tt> will be limited to those listed
+in <tt>new_rights</tt>.  If those rights include <tt>CAP_FCNTL</tt>,
+then <tt>new_fcntls</tt> limits the set of <tt>fcntl()</tt> commands
+available.  Similarly, if the capabilities on the file descriptor include
+<tt>CAP_IOCTL</tt>, the <tt>new_ioctls</tt> array (of length
+<tt>nioctls</tt>) provides the set of 
+allowed <tt>ioctl()</tt> commands.  Multiple calls to
+<tt>cap_rights_limit()</tt> can be made for the same file descriptor, but
+those calls can only remove capabilities, never add them.
+<p>
+There is also a <tt>cap_rights_get()</tt> call to query the set of
+capabilities attached to a given file descriptor.
+<p>
+Needless to say, restrictions on file descriptors are of limited value if
+the constrained process can simply open new descriptors on the same
+objects.  To prevent that from happening, Capsicum implements a "capability
+mode" entered via <tt>cap_enter()</tt>.  Once that mode has been entered,
+access to most global namespaces is curtailed, preventing the opening of
+new files.  A process <i>can</i> still open a file with <tt>openat()</tt>
+if it has a directory file descriptor (and, of course, the relevant
+capabilities are present).  Such files are constrained to be underneath
+that directory, though — use of absolute pathnames or "<tt>../</tt>" is not
+allowed.
+<p>
+(As an aside, the "can only open files below this directory" functionality
+was deemed to be sufficiently useful that David pulled it out into a
+separate patch and made it available independently of Capsicum.  <a
+href="/Articles/604052/">This patch</a> adds a new <tt>O_BENEATH_ONLY</tt>
+flag for calls like <tt>openat()</tt>.  Once a directory has been opened with
+this option, the resulting file descriptor can only be used to open files
+that exist below that directory in the filesystem hierarchy.)
+<p>
+That said, the patch set as posted does not provide an implementation of
+<tt>cap_enter()</tt>.  Also missing is the entire "process capabilities"
+mechanism, which represents specific processes as file descriptors so that
+the relevant system calls (<tt>wait()</tt>, <tt>kill()</tt>, etc.) can be
+controlled.  The patch set is described as being "part&nbsp;1," so, one
+assumes, the remaining pieces will come later.
+<p>
+Within the kernel, system call implementations typically start by
+converting
+passed-in file
+descriptors to <tt>struct file</tt> with  calls to <tt>fdget()</tt>.  This
+is the point where David decided to apply the capability checks.  When file
+descriptors are restricted with Capsicum, the normal <tt>file</tt>
+structure is replaced by a wrapper structure containing the rights
+information.  Every <tt>fdget()</tt> call in the kernel (there are about
+100 of them) must be replaced with a call to:
+<p>
+<pre>
+    struct file *fdgetr(unsigned int fd, int caps ...);
+</pre>
+<p>
+Where <tt>caps</tt> is a variable-length list of capabilities that must be
+present for the operation to succeed.  Callers must also be changed to deal
+with an "error pointer" return value; <tt>fdget()</tt> in current kernels
+can return <tt>NULL</tt> but not a specific error value.  The result is
+that the patch set is somewhat invasive; that may be a cause of resistance
+should the patch set reach a point where it is being seriously proposed for
+inclusion. 
+<p>
+The patch set currently works by creating a pair of new Linux security
+module (LSM) hooks to do the actual capability checks.  David wonders,
+though, whether that is the right approach, since Capsicum is not a
+complete security module.  If the kernel implemented stacked security
+modules, perhaps Capsicum could be run in this mode alongside another, more
+complete module.  But stacking does not look like it will be supported in
+the kernel anytime soon.  So Capsicum may well be better off implemented
+outside of the LSM framework.
+<p>
+There is another question that is worth considering here.  The kernel's <a
+href="475043.html">secure computing (seccomp)</a> subsystem allows
+the loading of programs (written for the BPF virtual machine) that can, in
+theory, implement all of the restrictions found in Capsicum, especially if
+<a href="603983.html">the recently proposed BPF changes</a> are
+merged.  It might not be <i>easy</i>, 
+but it should be possible.  Somebody is bound to ask whether the kernel
+needs another sandbox-creation mechanism with similar capabilities.
+<p>
+In general, the addition of new security-related subsystems can be a hard
+sell; many developers see little value for a lot of cost in these
+subsystems.  But there is value in the ability to reduce the damage that
+can be done by a compromised process, and FreeBSD's use of Capsicum means
+that some applications have already had the necessary code added.  Adding
+the same API to Linux would allow that work to be reused.  So Capsicum
+seems worth considering, even if it will likely have some obstacles to
+overcome before merging is a possibility.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Security technologies</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">BSD</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Capabilities</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/604015/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

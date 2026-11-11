@@ -1,0 +1,826 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Practical uses for a null filesystem [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Practical uses for a null filesystem">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the first changes merged for the upcoming 7.0 release was nullfs, an empty filesystem th [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1062572/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Practical uses for a null filesystem</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 12, 2026</br>
+           </div>
+One of the first changes merged for the upcoming 7.0 release was <a
+href="/ml/all/20260112-work-immutable-rootfs-v2-0-88dd1c34a204@kernel.org/">nullfs</a>,
+an empty filesystem that cannot actually contain any files.  One might
+logically wonder why the kernel would need such a thing.  It turns out,
+though, that there are places where a null filesystem can come in handy.
+For 7.0, nullfs will be used to make life a bit easier for <tt>init</tt>
+programs; future releases will likely use nullfs to increase the isolation
+of kernel threads from the <tt>init</tt> process.
+<p>
+<h4>Making root actually pivotable</h4>
+<p>
+The process of bootstrapping a computer involves a number of tricky steps,
+one of which is locating and mounting the root filesystem.  That task might
+involve digging through text files, contacting other systems over the
+network, assembling RAID volumes, and more.  As a result, there really
+needs to be a temporary root filesystem, with usable commands, before the
+real root filesystem can be mounted.  That initial filesystem usually comes
+in the form of an initramfs image that is bundled with the kernel binary.
+<!-- middle-ad -->
+<p>
+That initial filesystem is the first root filesystem, but there comes a
+time when it must be replaced with the real root.  The kernel provides a
+system call, <a
+href="https://www.man7.org/linux/man-pages/man2/pivot_root.2.html"><tt>pivot_root()</tt></a>,
+for just that purpose.  It will cause a new filesystem to become the root
+filesystem, and will cause any existing processes to move from the old root
+to the new.  There is only one tiny little problem: <tt>pivot_root()</tt>
+cannot be used for this purpose for the actual root filesystem.  From the
+man page:
+<p>
+<blockquote class="bq">
+	The rootfs (initial ramfs) cannot be pivot_root()ed.  The
+       	recommended method of changing the root filesystem in this case is
+       	to delete everything in rootfs, overmount rootfs with the new root,
+       	attach stdin/stdout/stderr to the new /dev/console, and exec the
+       	new init(1).  Helper programs for this process exist; see
+       	switch_root(8).
+</blockquote>
+<p>
+Even with the availability of a helper, the need for this kind of
+workaround is seen by some as mildly inelegant.  (The system call
+<i>can</i> be used in other contexts, such as setting up a new root for a
+container). 
+<p>
+The solution is to base the filesystem tree on an empty filesystem — nullfs
+— upon which both the temporary and permanent root filesystems can be
+mounted.  <tt>pivot_root()</tt> can then be used to place the permanent
+root below the temporary one in the mount stack, allowing the latter to be unmounted.  The
+system can then continue the bootstrap without the need for the
+above-described workaround.  The nullfs implementation, as found in 7.0,
+enables this type of operation.
+<p>
+<h4>Isolating kernel threads</h4>
+<p>
+There are other possible uses for nullfs, though; consider the case of
+kernel threads.  The first two processes created by a booting Linux kernel
+are <tt>init</tt> and <tt>kthreadd</tt>.  The <tt>init</tt> process will
+serve as the ultimate ancestor for all user-space processes created
+thereafter.  Instead, <tt>kthreadd</tt> is the parent for all of the kernel
+threads that will be spawned over the life of the system.  When the
+<tt>ps</tt> command shows you a process with a name like
+"<tt>[rcu_tasks_rude_kthread]</tt>", you'll know that it is an ill-mannered
+child of <tt>kthreadd</tt>.
+<p>
+Christian Brauner (who implemented nullfs), pointed out an interesting
+relationship between those two processes in <a href="/ml/all/20260311-work-kthread-nullfs-v3-0-3dd2cbe92ad0@kernel.org">this
+patch series cover letter</a>.  They share the same initial
+<tt>fs_struct</tt> <strike>file-descriptor table</strike>,
+meaning that they each have access to the other's filesystem state.  When
+<tt>init</tt> forks, it explicitly disconnects its children from its file
+table, but <tt>kthreadd</tt> does not do that.  As a result, every running
+kernel thread shares full access to <tt>init</tt>'s filesystem state, and vice
+versa.  Normally, all of those processes mutually trust each other, but the
+potential for mischief (and unfortunate bugs) is real.
+<p>
+Brauner's proposed solution is to isolate kernel threads from the initial
+<strike>file table</strike> <tt>fs_struct</tt> and, instead, to run each of
+them with a nullfs instance as its root filesystem.  In that way, a kernel
+thread can no longer interfere with the <tt>init</tt>
+process; indeed, it has no access to the filesystem at all.  This seems
+like a bit of worthwhile kernel hardening, given that most kernel threads
+have no need for filesystem access.  As an added bonus,
+<tt>pivot_root()</tt> no longer needs to forcibly change the root
+filesystem for all of the running kernel threads, since they no longer need
+to be moved to the new root.
+<p>
+The <tt>init</tt> process, too, is separated from the initial <tt>fs_struct</tt>
+and given one of its own, just like any other fully independent process.
+At that point, the initial <tt>fs_struct</tt> is entirely unused — most of the time.
+<p>
+Separating kernel threads from the filesystem is almost always the right
+thing to do; as Brauner <a
+href="/ml/all/20260310-schummeln-akkord-db58004d6f59@brauner">noted</a>:
+"<q>Offloading fs work to kthreads is really nasty [...]  It's a broken
+concept.</q>" It is also unnecessary most of the time; after all,
+<tt>rcu_tasks_rude_kthread</tt> can happily go about its job of
+inconsiderately interrupting CPUs to force RCU grace periods without
+accessing any files.  But there are other kernel threads that do, indeed,
+need occasional access to the filesystem.  Enabling this access is why
+kernel threads have long retained their connection to the initial <tt>fs_struct</tt>.
+For cases like that, the patch series adds a mechanism to
+temporarily give a kernel thread access to the filesystem:
+<p>
+<pre>
+    scoped_with_init_fs() {
+    	/* code here can perform filesystem operations */
+    }
+</pre>
+<p>
+The use of the <a href="934679.html">scoped guard</a> ensures that
+the access is only provided within the indicated scope, with no possibility
+of that access being left in place accidentally.
+<p>
+There are roughly a dozen kernel threads that have to be patched to use
+this new mechanism.  The production of core dumps, for example, naturally
+requires filesystem access.  Unix-domain sockets need to be able to look up
+names in the filesystem, firmware loading must be able to find and open the
+file containing the firmware, the devtmpfs filesystem must be able to
+provide the filesystem content, and so on.  So there are a number of holes
+punched into the wall separating kernel threads from the filesystem, but
+they are small, localized, and easy to find.
+<p>
+Brauner is careful to not set expectations too high for this work at this
+point: "<q>Is it crazy? Yes. Is it likely broken? Yes. Does it at least
+boot? Yes.</q>"  It is a significant change to some of the deepest code
+within the kernel, code that has had its current form for a long time.  The
+existence of surprises seems almost certain.  But, so far, nobody has
+questioned the goals or direction of this patch series.  Greater isolation
+for kernel threads (and <tt>init</tt>) thus seems likely to show up in a
+future kernel release.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/nullfs</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Kernel threads</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.0</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1062163/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1062676"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Variant for chroot ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 4:34 UTC (Fri)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1062676/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062676" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What I'd like to see would be a variant of chroot() which would automatically create such a nullfs, enter it and lazy-unmount it so that once the caller dies, it's automatically unmounted. It would allow to completely isolate the caller. I'm using chroot() to empty directories with no permissions as an isolation for daemons and it works reasonably well because you cannot easily escape it (nowhere to mkdir+chroot+cd again). Of course the daemon must not hold any FD pointing to an external directory! In this case we could imagine something like this:<br>
+<p>
+#define NULLFS_DIR (const char *)1<br>
+chroot(NULLFS_DIR);  // mount nullfs and mark it lazy-umount (will it work before chdir()?)<br>
+chdir("/");<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062676/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062677"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Variant for chroot ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 5:25 UTC (Fri)
+                               by <b>tamiko</b> (subscriber, #115350)
+                              [<a href="/Articles/1062677/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tamiko" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062677" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It sounds like you're looking for the $ unshare helper program. Unsharing the current mount namespace and putting a child process into it has exactly the semantics you're looking for: when the child exits the namespace is removed as well.<br>
+<p>
+The new nullfs mount has the advantage that you can start with a truly empty mount namespace instead of mounting over and sealing. That's at least my current understanding.<br>
+<p>
+But out of curiosity: do you know "bubblewrap"? It is a fantastic helper tool to createnlightweight sandboxes via namespaces. Best of all, you can run it as an unprivileged user. And it can do all of the sandboxing you're talking about.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062677/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062687"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Variant for chroot ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 9:42 UTC (Fri)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1062687/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062687" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  It sounds like you're looking for the $ unshare helper program. Unsharing the current mount namespace and putting a child process into it has exactly the semantics you're looking for: when the child exits the namespace is removed as well.</span><br>
+<p>
+I'm already using it for other stuff, and could indeed call unshare(CLONE_FS) in the program. But I seem to remember that abstract unix socket paths are affected by unshare(CLONE_FS). This could be an acceptable tradeoff for most use cases though.<br>
+<p>
+<span class="QuotedText">&gt; But out of curiosity: do you know "bubblewrap"?</span><br>
+<p>
+No I don't.<br>
+<p>
+<span class="QuotedText">&gt; It is a fantastic helper tool to createnlightweight sandboxes via namespaces. Best of all, you can run it as an unprivileged user. And it can do all of the sandboxing you're talking about.</span><br>
+<p>
+I'm really talking about doing the sandboxing from within the deamon itself. Normally my programs boot, parse config files, load libraries etc, then chroot(), chdir() and drop privileges. Here I could indeed do unshare() instead of the first two steps and it would also work for unprivileged users, but maybe with an abns limitation that I'd need to recheck. Thanks for raising this hint I had just forgotten about!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062687/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062777"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Variant for chroot ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 13:57 UTC (Fri)
+                               by <b>qyliss</b> (guest, #131684)
+                              [<a href="/Articles/1062777/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="qyliss" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062777" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; But I seem to remember that abstract unix socket paths are affected by unshare(CLONE_FS). This could be an acceptable tradeoff for most use cases though.</span><br>
+<p>
+According to network_namespaces(7), those are scoped to network namespace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062777/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1062894"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Variant for chroot ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2026 1:35 UTC (Sat)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1062894/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062894" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; enter it and lazy-unmount it so that once the caller dies, it's automatically unmounted</span><br>
+<p>
+This is already the behavior of, say, a tmpfs in a mount namespace. It's reference-counted and once the last process referencing it dies, the tmpfs is cleaned up. You can see this very clearly by creating a large file and looking at memory usage before/after a kill -9 of the owning process.<br>
+<p>
+Mostly for amusement purposes, I wrote a mkdtemp() alternative that works by creating a child process in a new unprivileged user+mount namespace and having it pass back a handle to a tmpfs. <a href="https://ldpreload.com/p/verytmp.c">https://ldpreload.com/p/verytmp.c</a><br>
+<p>
+A friend ported it to Rust and has a slightly more detailed writeup: <a href="https://blinsay.com/posts/verytmp/">https://blinsay.com/posts/verytmp/</a><br>
+<p>
+(nullfs appears to not be mountable inside a userns, largely because it's a global singleton. So you don't actually need to garbage-collect it, but I guess this also means you might not be a way to actually get to it from a regular userspace process.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062894/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Variant for chroot ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 9:24 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1062960/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062960" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At first I thought mounting nullfs might be safer to allow for a user than most other filesystems since it can not replace the content it is mounted over, just hide it, but I guess there is the edge case of config.d style directories where you could cut out some parts of the configuration for some setuid root tool like sudo that way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1062680"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 5:34 UTC (Fri)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/1062680/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pabs" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062680" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What blocks pivot_root() from being able to pivot away from the initramfs to the real rootfs?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062680/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 20:49 UTC (Fri)
+                               by <b>jbroadus</b> (subscriber, #115605)
+                              [<a href="/Articles/1062872/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jbroadus" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062872" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Brief explanation in the patch cover letter:<br>
+ <br>
+"Currently pivot_root() doesn't work on the real rootfs because it cannot be unmounted. Userspace has to do a recursive removal of the<br>
+initramfs contents manually before continuing the boot."<br>
+<p>
+So maybe picot_root() could be modified but wouldn't know how to clean up the old filesystem?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062880"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 22:26 UTC (Fri)
+                               by <b>Nikratio</b> (subscriber, #71966)
+                              [<a href="/Articles/1062880/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nikratio" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062880" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I'm confused by this as well. The manpage quote says "The rootfs (initial ramfs) cannot be pivot_root()ed" and the cover letter says that "pivot_root() doesn't work on the real rootfs". So it seems there are cases where pivot_root does work - namely when the root filesystem is not of type rootfs but something like ext3. Is that true? If so, then what makes rootfs so different that pivot_root can't work there? And wouldn't it be easier to just fix that instead of them nullfs workaround?
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062880/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2026 0:06 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1062887/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062887" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My (possibly wrong) interpretation is that this is not a filesystem-level restriction, but a mounting restriction. In other words, the problem is not that there's some specific "rootfs" filesystem that is unable to be pivoted. Rather, the problem is that, post-boot, the mount system is unable to represent a state where nothing is mounted. Presumably, the pivot_root() syscall would need to transition through such a state, and working around this limitation is either impossible or not worth the complexity.<br>
+<p>
+But this is pure guesswork on my part.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062897"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2026 5:07 UTC (Sat)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1062897/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062897" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another guesswork-grade interpretation is that the "real rootfs" is declared and/or constructed statically somewhere within Linux, and simply cannot be destroyed as a conseqence of that.<br>
+<p>
+But I am indeed confused as well by this limitation. Surely removing the underlying cause would have been easier than switching the entire mechanism to use nullfs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062897/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1062907"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2026 13:54 UTC (Sat)
+                               by <b>Nikratio</b> (subscriber, #71966)
+                              [<a href="/Articles/1062907/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nikratio" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062907" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; My (possibly wrong) interpretation is that this is not a filesystem-level restriction, but a mounting restriction. In other words, the problem  is not that there's some specific "rootfs" filesystem that is unable to be pivoted. Rather, the problem is that, post-boot, the mount system is  unable to represent a state where nothing is mounted. Presumably, the pivot_root() syscall would need to transition through such a state,  and working around this limitation is either impossible or not worth the complexity.</span><br>
+<p>
+I think that interpretation boils down to "the pivot _root system call fundamentally does not work", since pivoting ing the root filesystem is the one and only thing this system call is supposed to do. I highly doubt this would have been added if it never works.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062907/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063116"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 17:41 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1063116/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1063116" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Per the man page, it changes the root filesystem *for the current mount namespace.* As described under NOTES, this is primarily useful for setting up containers. It was at one point also used during boot, but this is (apparently) no longer possible.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063116/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1063099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 13:55 UTC (Mon)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/1063099/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="abatters" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1063099" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe pivot_root() was used with the old-style initrd, but it doesn't work with the new-style initramfs.  See initrd(4).  Note that the old initrd code is being removed: <a href="https://lwn.net/Articles/1057769/">https://lwn.net/Articles/1057769/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1077826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">pivot_root()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 15, 2026 7:06 UTC (Mon)
+                               by <b>maxfragg</b> (guest, #122266)
+                              [<a href="/Articles/1077826/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="maxfragg" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1077826" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+that is correct.<br>
+the central issue is, that initramfs isn't truly a filesystem, but rather a way to populate the fs-cache without underlying backing filesystem/blockdevice.<br>
+Its an elegant hack that doesn't create a real mountpoint, so you can't pivot it out of the way.<br>
+initrd was actually creating a filesystem, but needed way more code to support it, so you could pivot away from it.<br>
+The issue isn't about the first real filesystem, but about the fact that initramfs creates a world before, without any true filesystem/mountpoint.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1062693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this sort of a &quot;template filesystem?&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 10:54 UTC (Fri)
+                               by <b>jpeisach</b> (subscriber, #181966)
+                              [<a href="/Articles/1062693/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jpeisach" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062693" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could future filesystems pretty much use this as a place to start? Of course they still have to implement file operations, but it's something, I guess.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1062858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Confusion with 4.4BSD's nullfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2026 17:48 UTC (Fri)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1062858/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062858" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Although I get why this name makes sense in isolation, this seems unnecessarily confusing to use. 4.4BSD's nullfs (still present in FreeBSD today) is what Linux calls a bind mount, and now that name is being used for a very different thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1062891"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is unprivileged use possible?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2026 1:07 UTC (Sat)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1062891/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062891" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Many container managers, including sydbox, offer functionality to mount a scratch tmpfs or ramfs and build the mounts on top of that. Can we now instead use nullfs for this root mount? That'd be a nice plus imho.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062891/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1062892"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is unprivileged use possible?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2026 1:12 UTC (Sat)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1062892/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1062163/#CommAnchor1062892" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another useful functionality is to mount nullfs over critical paths to mask such as /boot, /proc/sys/kernel etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062892/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

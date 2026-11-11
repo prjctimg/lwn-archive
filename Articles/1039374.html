@@ -1,0 +1,369 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A new API for interrupt-aware spinlocks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A new API for interrupt-aware spinlocks">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Boqun Feng spoke at  Kangrejos 2025 about adding a frequently needed API for Rust drivers that [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1041304/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A new API for interrupt-aware spinlocks</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>October 15, 2025</br>
+           <hr>
+<a href="https://lwn.net/Articles/1039334/">Kangrejos</a>
+</div>
+<p>
+Boqun Feng spoke at
+<a href="https://kangrejos.com/">
+Kangrejos&nbsp;2025</a> about adding a frequently needed API for Rust drivers
+that need to handle interrupts: interrupt-aware spinlocks. Most drivers will
+need to communicate information from interrupt handlers to main driver code, and
+this exchange is frequently synchronized with the use of spinlocks. While his
+first attempts ran into problems, Feng's ultimate solution could help prevent bugs
+in C code as well, by tracking the number of nested scopes that have disabled
+interrupts. The <a href="/ml/all/20251013155205.2004838-1-lyude@redhat.com/">
+patch set</a>, which contains work from Feng and Lyude Paul, is still under review.
+</p>
+
+<p>
+Code that acquires a spinlock needs to disable preemption: otherwise, if it were
+preempted, everything else contending for the lock would just pointlessly burn
+CPU time. The same thing (almost) applies to using spinlocks in interrupts, Feng
+said. If kernel code acquires a spinlock in process context, and then an
+interrupt arrives, the handler for which tries to acquire the same lock, the system will deadlock.
+The simple rule in the kernel is that if a lock is ever used in both interrupt
+handler and process context, the lock must be "irq-safe" (meaning that the acquirer
+disables interrupts when appropriate). The kernel's lockdep tool will check that
+this rule is followed.
+</p>
+
+<a href="/Articles/1041344">
+<img src="../_static/images/2025/boqun-feng-kangrejos-small.png" class="lthumb"
+alt="[Boqun Feng]" title="Boqun Feng" />
+</a>
+
+<p>
+Every sufficiently complex driver will need an interrupt handler, Feng continued. In
+order to write drivers in Rust, kernel programmers will need an abstraction to deal with interrupts
+and irq-safe locks. The existing irq-safe spinlocks in C use either
+<tt>spin_lock_irq()</tt>/<tt>spin_unlock_irq()</tt> or
+<tt>spin_lock_irqsave()</tt>/<tt>spin_lock_irqrestore()</tt>, depending on whether the
+code is expected to run in an interrupt-enabled context or not. The former pair of
+functions leaves interrupts unconditionally enabled after the lock is released,
+while the latter pair
+stores the current interrupt state and restores it afterward. There are also
+some scope guards that can handle unlocking these spinlocks automatically at
+the end of a function.
+</p>
+
+<p>
+The first attempt at a Rust API was actually analogous to the kernel's
+<a href="934679.html">
+scope guards</a>. In
+Rust, having a special guard type that, when dropped, releases a lock is a
+common pattern. The problem that Feng ran into was one that the C API
+struggles with as well: what happens if two locks are dropped in the wrong
+order? Consider a piece of code that starts out with interrupts enabled,
+acquires lock A using <tt>spin_lock_irqsave()</tt> (resulting in interrupts
+being temporarily disabled), and then acquires lock B, again using
+<tt>spin_lock_irqsave()</tt>. The second call will store "disabled" as the
+current interrupt state. Releasing lock A and then lock B ends with interrupts
+being permanently disabled, which "<q>is not ideal</q>".
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Feng looked at a few different ways to solve the problem, including using a
+token type to track whether the code was called in an interruptible context at
+compile time, but that proved to be too complex. Ultimately, in a
+<a href="/ml/rust-for-linux/20240916213025.477225-1-lyude@redhat.com/">
+mailing list
+discussion</a> of the problem in early September, Thomas Gleixner
+<a href="/ml/rust-for-linux/87iktrahld.ffs@tglx/">commented</a>:
+</p>
+
+<blockquote class="bq">
+<p>
+Thinking more about this. I think there is a more general problem here.
+</p>
+<p>
+Much of the Rust effort today is trying to emulate the existing way how
+the C implementations work.
+</p>
+<p>
+I think that's fundamentally wrong because a lot of the programming
+patterns in the kernel are fundamentally wrong in C as well. They are
+just proliferated technical debt.
+</p>
+<p>
+What should be done is to look at it from the Rust perspective in the
+first place: How should this stuff be implemented correctly?
+</p>
+</blockquote>
+
+<p>
+That sent Feng back to the drawing board; he eventually settled on an approach
+that tracks the number of nested scopes with interrupts disabled. When the
+number changes between zero and one, the code can enable or disable interrupts
+as appropriate, but it no longer matters what order locks are dropped in. That
+code is written in C, so it can benefit the rest of the kernel as well.
+</p>
+
+<p>
+Andreas Hindborg asked whether all of the existing C users of
+<tt>spin_lock_irqsave()</tt> would be adapted to Feng's approach, or whether
+this was a new API. Feng clarified that it was a new API, but that Rust code
+should only use this one. He said that in the mailing list discussion of the change,
+scheduling maintainer Peter Zijlstra was
+<a href="/ml/rust-for-linux/20241024161759.GF9767@noisy.programming.kicks-ass.net/">
+opposed</a> to ending up with <em>three</em> ways to lock and unlock interrupt-aware
+spinlocks, and ran into problems when he attempted to mechanically convert the
+existing C users, but Feng was optimistic that Zijlstra would accept a slower transition.
+</p>
+
+<p>
+Joel Fernandes asked how this API interacts with
+<a
+href="https://rust.docs.kernel.org/kernel/sync/struct.CondVar.html#method.wait">
+<tt>CondVar::wait()</tt></a>, which temporarily releases a spinlock (and reenables
+interrupts) while waiting for a notification. Feng said that
+<tt>CondVar::wait()</tt> would save the current depth of
+interrupt-disabling-nesting, and restore it afterward. Fernandes pointed out
+that this would only work with one lock held, which Feng agreed with. Waiting on
+a conditional variable with two locks held is broken anyway "<q>and lockdep
+would yell at you</q>".
+</p>
+
+<p>
+The approach Feng presented nicely enables Rust code to interact with interrupt-aware
+spinlocks, but there's another small API change that it would enable: Rust
+could have a separate guard type to enable and disable interrupts (on the local CPU) for
+non-spinlock reasons. If the running code already has an instance of that type
+(indicating that it must have disabled interrupts at some point), then it
+can lock a spinlock without incrementing the count. That would be "<q>useful in
+a few obscure cases</q>", as well as for performance optimization.
+</p>
+
+<p>
+Gary Guo, Benno Lossin, and Feng then launched into a detailed discussion of
+whether it would be better to let the existing interrupt-aware-spinlock guards
+serve that purpose, rather than creating a new type. The back and forth quickly
+escaped me, but it ended with the conclusion that Feng's API is the right path
+forward, although there may be some ways to avoid the
+performance overhead of an atomic write in the hot path in more cases in the future.
+</p>
+
+<p>
+At that point, Feng went into the implementation details of the new API. There
+is a 32-bit, per-CPU field accessed via the
+<a href="/Articles/831678/">
+<tt>preempt_count()</tt></a> function
+that is faster than a normal per-CPU variable; Feng tried seeing if he could
+steal bits 16 through 23 for the interrupt-disabled nesting count, but that
+reduced the level of non-maskable interrupt (NMI) nesting that could be tracked from 16 bits to eight bits.
+Feng wasn't sure why the kernel needs 32,000 levels of NMI nesting, but the
+maintainer insisted. Since most code only needs to care whether any NMI nesting
+is happening, not the exact level, Feng and Fernandes ended up reducing the
+NMI-nesting count to one bit in <tt>preempt_count()</tt>, plus a normal per-CPU
+variable for the actual depth.
+</p>
+
+<p>
+The existing C users of interrupt-aware spinlocks should, in many cases, be able
+to just use the new API. Whenever a function has a paired disable and enable,
+that can safely be replaced with calls to the new
+<tt>local_interrupt_disable()</tt> and <tt>local_interrupt_enable()</tt>
+functions. "<q>But there are some 'creative' unpaired uses.</q>"
+</p>
+
+<p>
+Feng wrote a tool to find unpaired uses, in order to figure out how big a hassle
+migration would be. In the process, he actually found a latent bug in the kernel
+where someone had used the unconditional API in a callback when it should have
+used <tt>local_irq_save()</tt>. He doesn't think that the Rust API should be
+blocked on rewriting the existing code, though; that can be done more gradually
+afterward. "<q>The new API is nicer; so
+maybe people will voluntarily switch.</q>"
+</p>
+
+<p>
+If Zijlstra and other maintainers aren't happy with that answer, Feng's backup plan is to expose
+per-CPU variables to Rust, and then write the new API entirely in Rust — leaving
+the new API unavailable to C users. If most
+of the existing C users could have been trivially moved to the new, safer API, it would
+be a shame to miss out on improving the kernel's existing C code. Time will tell whether Feng's
+proposal is adopted, but, either way, the API for Rust drivers should soon be one step closer
+to parity with its counterpart for C drivers.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/Rust</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Kangrejos/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1039374/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1042156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Mixing variants</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2025 17:00 UTC (Wed)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/1042156/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="abatters" />
+                <input type="hidden" name="return" value="/Articles/1039374/#CommAnchor1042156" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As far as I am aware, you can just use spin_lock() on an irq-safe lock if you already know that irqs are disabled, which might happen when acquiring two spinlocks.  For example,<br>
+<p>
+spin_lock_irq(&amp;irq_aware_lock1);<br>
+spin_lock(&amp;irq_aware_lock2); /* irqs already disabled */<br>
+<p>
+The irqsave variant is for situations where you don't know if interrupts are already enabled or disabled.<br>
+<p>
+If you release the two locks above out-of-reverse-order, you would enable irqs on the last unlock:<br>
+<p>
+spin_unlock(&amp;irq_aware_lock1);<br>
+...<br>
+spin_unlock_irq(&amp;irq_aware_lock2);<br>
+<p>
+The new API will perhaps make this pattern less confusing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1042156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1042887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Mixing variants</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2025 12:22 UTC (Wed)
+                               by <b>andy_shev</b> (subscriber, #75870)
+                              [<a href="/Articles/1042887/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andy_shev" />
+                <input type="hidden" name="return" value="/Articles/1039374/#CommAnchor1042887" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The obvious problem here is when there are two competing functions that any of them _may_ be called first, hence the order is undetermined and hence both must use `spin_lock_irqsave()` variants. I think that what is the case Feng has in mind.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1042887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1043811"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Mixing variants</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 28, 2025 14:23 UTC (Tue)
+                               by <b>yanjun.zhu</b> (guest, #173290)
+                              [<a href="/Articles/1043811/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="yanjun.zhu" />
+                <input type="hidden" name="return" value="/Articles/1039374/#CommAnchor1043811" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+spin_lock_irqsave/spin_unlock_irqrestore should be enough in c code. In Rust, 2 similar spin locks should resolve the problem?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043811/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

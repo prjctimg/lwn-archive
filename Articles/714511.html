@@ -1,0 +1,201 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Inter-event tracing [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Inter-event tracing">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's tracing infrastructure is primarily concerned with events, which are  usually tied [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/714140/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Inter-event tracing</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 15, 2017</br>
+           </div>
+The kernel's tracing infrastructure is primarily concerned with events,
+which are 
+usually tied to the execution of specific blocks of code.  But the
+interesting information is often in what happens <i>between</i> events.
+The most obvious variable of this type that one might want to monitor is
+timing — how much time elapses between one event and another that follows
+from it? — but others exist as well.  Options for the calculation of
+inter-event values include the use of BPF programs or postprocessing in
+user space; a new patch set may soon add the ability to perform these
+calculations directly in the kernel instead.
+<p>
+Tom Zanussi's <a href="/Articles/714001/">inter-event support patch set</a>
+is clearly focused on timing measurements.  It is an extension of his <a
+href="635522.html">histogram triggers work</a> that was merged in the
+4.6 development cycle.  That work provides a mechanism for the storage of
+data from events, but it can only do one thing with the result: generate a
+histogram.  This storage capability has the potential for other uses and
+can be employed for inter-event tracing, but there are a few problems that
+need to be solved for that to be possible.
+<p>
+The first of those is to arrange for the storage of data from one event to
+be used later when 
+another event fires.  An example provided with the patch set involves the
+<tt>sched_wakeup</tt> event, which fires when the kernel decides that a
+sleeping process is now runnable and should wake up.  Consider the
+following command:
+<p>
+<pre>
+    echo hist:keys=pid:ts0=common_timestamp.usecs \
+         &gt;&gt; /sys/kernel/debug/tracing/events/sched/sched_wakeup/trigger
+</pre>
+<p>
+This command establishes a special sort of "histogram" (really just using
+the histogram mechanism's data-storage capability) on the
+<tt>sched_wakeup</tt> event.  The <tt>keys=pid</tt> directive uses the ID
+of the process to be awakened as the key with which the data is stored.
+The actual data associated with that key is specified with
+<tt>ts0=common_timestamp.usecs</tt>.  It 
+creates a new variable, <tt>ts0</tt>, that remembers the current time when
+the event was fired.  The <tt>common_timestamp</tt> field is also new; it
+makes timestamp information available on any event.
+<p>
+The above records when the kernel decided to wake a process; now it is time
+to compute how long it takes until that process actually runs in a CPU.
+That time is the wakeup latency experienced by the process; one generally
+wants it to be as low as possible and, in a realtime setting, it must not
+exceed the maximum the system can tolerate.  The wakeup latency can be
+calculated using the <tt>sched_switch</tt> event, which fires when a new
+process is given access to the processor.  That is done with a command
+like:
+<p>
+<pre>
+    echo 'hist:keys=woken_pid=next_pid:woken_prio=next_prio:\
+          wakeup_lat=common_timestamp.usecs-ts0:\
+	  onmatch().trace(wakeup_latency)' \
+          &gt;&gt; /sys/kernel/debug/tracing/events/sched/sched_switch/trigger
+</pre>
+<p>
+There are a few things happening here, needless to say.  The
+<tt>keys=woken_pid=next_pid</tt> fragment takes the <tt>next_pid</tt> event
+variable (identifying the process to be switched to in the processor), assigns
+it to a new variable called <tt>woken_pid</tt>, and uses it as the key into
+the histogram data.  The next fragment, <tt>woken_prio=next_prio</tt>, stores
+the priority of the new process in the new <tt>woken_prio</tt> variable.
+Things get a bit more complicated with:
+<p>
+<pre>
+    wakeup_lat=common_timestamp.usecs-ts0
+</pre>
+<p>
+Here, the <tt>ts0</tt> timestamp value that was saved in the
+<tt>sched_wakeup</tt> event is recalled and subtracted from the current
+time, yielding the latency; that value is then stored in yet another new
+variable called <tt>wakeup_lat</tt>.
+<p>
+The <tt>onmatch()</tt> directive in the above command relates to how the
+computed latency is reported.  That value is computed from two separate
+events and, thus, is not really associated with either of
+the events described above, so it should not be reported with them.
+Instead, the patch set creates a new abstraction called a "synthetic event"
+that is used to report calculated, inter-event values.  In this case, such
+an event can be created with a command like:
+<p>
+<pre>
+    echo 'wakeup_latency lat=sched_switch:wakeup_lat \
+                         pid=sched_switch:woken_pid \
+                         prio=sched_switch:woken_prio' \
+         &gt;&gt; /sys/kernel/debug/tracing/synthetic_events
+</pre>
+<p>
+This command creates a new event called <tt>wakeup_latency</tt>; three
+variables are created, essentially as pointers to variables in the
+<tt>sched_switch</tt> event.  One of those, <tt>wakeup_lat</tt> (redefined
+as <tt>lat</tt> here) is the calculated latency.
+<p>
+With that event in place, we can look at the final part of the previous
+command:
+<p>
+<pre>
+    onmatch().trace(wakeup_latency)
+</pre>
+<p>
+The <tt>onmatch()</tt> pseudo-function acts if there is a match on the
+histogram key (the process ID in this case); when it acts, it will cause
+the synthetic event named in the <tt>trace()</tt> "call" to be fired.  That
+event behaves like any other event in all respects; it can be read out to
+user space or used to create a histogram, for example.
+<p>
+With the above commands, it is possible to monitor wakeup latencies in the
+system.  The command set has been simplified a bit from the original
+commands in the patch 
+set, which include extra filtering to limit latency tracking to processes
+running the <tt>cyclictest</tt> testing tool.  For more details, see the
+patch set announcement linked above or <a href="/Articles/714516/">the
+documentation</a> that is part of the patch set itself.
+<p>
+The patch set has seen a fair amount of active review, resulting in generally
+positive comments.  It does seem likely, though, that the details of the
+syntax as described above will change before this work is considered ready
+for merging.  Nobody has, so far, suggested that attached BPF programs
+should be used to perform these calculations, though the problem could
+conceivably be solved that way.  In any case, for now, the patch set is
+being reworked to reflect the review comments received so far; a new
+version should be expected before too long.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Tracing</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/714511/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

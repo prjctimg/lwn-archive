@@ -1,0 +1,406 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>TCP cookie transactions [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="TCP cookie transactions">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" In the currently ongoing Linux kernel merge window, for the kernel which will become 2.6.33, a [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/366083/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>TCP cookie transactions</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>December 16, 2009</br>
+           </div>
+<p>
+In the currently ongoing Linux kernel <a
+href="365443.html">merge window</a>, for the kernel which will
+become 2.6.33, a new TCP feature has been added.  <a
+href="http://www.usenix.org/publications/login/2009-12/openpdfs/metzger.pdf">TCP
+cookie transactions [PDF]</a> are meant to eliminate various kinds of
+attacks, such as denial of service, while making the TCP connection
+handshake use fewer resources.  One of the main motivations for cookie
+transactions is to avoid some problems that have cropped up in rolling out
+DNSSEC (Domain Name System Security).
+</p>
+
+<p>
+DNSSEC responses are substantially larger than those of DNS, large enough
+that they have outgrown the default UDP datagram size of 512 bytes.  UDP is
+generally used for DNS today, but large responses from DNSSEC over UDP
+result in multiple IP fragments.  While it is perfectly reasonable to break
+up UDP packets that way, there are a large number of Network Address
+Translation (NAT) routers and firewalls that do not properly handle
+multiple UDP fragments.
+</p>
+
+<p>
+When a DNS response is not received&mdash;or not received properly&mdash;a
+DNS resolver will typically retry the request over TCP.  Because TCP
+is connection-oriented, there is a handshake that goes on to establish that
+connection before any data gets transferred.  Normally, servers need to
+save some state between the two client packets that constitute the
+handshake.  When handling an enormous number of requests, as the DNS root
+servers will for example, the storage of the state information adds up quickly.  In
+addition, the well-known SYN-flood attack sends just the first packet of
+the handshake, often from a spoofed IP address, and never replies to the
+server to complete the connection.  Enough "half open" connections can
+exhaust the server's resources, leading to a denial of service.
+</p>
+
+<p>
+<a href="http://lwn.net/Articles/277146/">SYN cookies</a> were created to
+defend against SYN flood attacks, and have been in the Linux kernel since
+1997 when those attacks were raging. But, as Perry Metzger, William Allen
+Simpson, and Paul Vixie describe in their TCP cookie transactions (TCPCT)
+paper linked above, SYN cookies are only used when a system is under
+attack.  They are a clever hack that uses the TCP sequence number to allow servers to defer using
+resources until they receive the second handshake packet from the client.
+Crucially, SYN cookies did not require client support, so they could be
+deployed unilaterally on the server side.
+</p>
+
+<p>
+Various other mechanisms have been proposed to handle these problems over
+the years but, as outlined in the paper, failed to completely solve the
+problem. TCPCT sets out to do just that.  It adds a new TCP option that
+contains a much larger, cryptographically secure cookie that is sent by the
+client in the initial handshake (SYN) packet.  The server can then create a
+cookie for the reply that only it can decode.  When the client uses that
+cookie in its second handshake (the third overall of the three-way
+handshake), the server can recover all of the information it needs to
+establish the connection from the cookie.
+</p>
+
+<p>
+In addition, TCPCT allows for a limited amount of data to be sent in the
+request from the client and reply from the server, which allows for a
+query/response like DNS to be handled as part of the connection
+establishment.  In those cases, the connection is torn down as soon as it
+is established. 
+</p>
+
+<p> TCPCT also addresses another problem that heavily used servers often
+have: port exhaustion.  The TCP protocol requires that there be a timeout
+before port numbers are reused so that old messages that get delivered do
+not get confused with those of a newly-established connection.  This is the TIME_WAIT
+timeout (usually four minutes) that is often annoying to those who restart
+server programs frequently (at least those without the
+<tt>SO_REUSEADDR</tt> socket flag).  There are a limited number of ports
+available (nominally 64K, but at least 1K are reserved), an active
+server may have all of its free ports in the TIME_WAIT state.  Because
+TCPCT can distinguish new and old connections based on the cookie data, it
+no longer has to wait on the server side.  Only clients need wait out the
+TIME_WAIT period.  </p>
+
+<p> Obviously, TCPCT requires client support, and it will be some time
+before most operating systems have that support.  As is often the case,
+Linux is out ahead of the pack by supporting TCPCT in the mainline.  But
+even for Linux, it will be quite some time before 2.6.33 kernels make their
+way out to users via their distributions.  Given that, widespread DNSSEC
+deployment seems quite a few years off, something that is a bit
+disheartening given all of the recent DNS server issues.  </p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Domain Name System (DNS)</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Internet</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/366986/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor367150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCP cookie transactions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2009 19:10 UTC (Thu)
+                               by <b>agl</b> (guest, #4541)
+                              [<a href="/Articles/367150/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="agl" />
+                <input type="hidden" name="return" value="/Articles/366986/#CommAnchor367150" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It should be noted that the TCPCT support in 2.6.33 uses an experimental <br>
+option number (253 [1]) and is thus a prototype. It will take (at least) <br>
+another patch to give this a real option number before it can be rolled out <br>
+successfully.<br>
+<p>
+[1] <a href="http://tinyurl.com/yjjvb2v">http://tinyurl.com/yjjvb2v</a>  [git.kernel.org]<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/367150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor367718"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCP cookie transactions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2009 10:12 UTC (Tue)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/367718/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/366986/#CommAnchor367718" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Btw, you can also create URLs like<br>
+<p>
+<a href="http://git.kernel.org/linus/435cf559f02ea3a3159eb316f97dc88bdebe9432">http://git.kernel.org/linus/435cf559f02ea3a3159eb316f97dc...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/367718/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor367700"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Technical details?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2009 4:18 UTC (Tue)
+                               by <b>markh</b> (subscriber, #33984)
+                              [<a href="/Articles/367700/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="markh" />
+                <input type="hidden" name="return" value="/Articles/366986/#CommAnchor367700" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Where does one find the spec for this?  This sounds interesting, but the linked PDF is vague on a number of important details.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/367700/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor367893"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Technical details?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2009 16:58 UTC (Wed)
+                               by <b>agl</b> (guest, #4541)
+                              [<a href="/Articles/367893/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="agl" />
+                <input type="hidden" name="return" value="/Articles/366986/#CommAnchor367893" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have the draft via private communication with the author. I'm not sure <br>
+that I want to post his draft on the public Internet, but if you email me I <br>
+can forward it along.<br>
+<p>
+'@'.join(['agl', 'imperialviolet.org'])<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/367893/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor367989"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCP cookie transactions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2009 15:07 UTC (Thu)
+                               by <b>chojrak11</b> (guest, #52056)
+                              [<a href="/Articles/367989/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chojrak11" />
+                <input type="hidden" name="return" value="/Articles/366986/#CommAnchor367989" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If TCP cookie transactions primary use is to overcome DNS problems, then it's stupid. DNS should fix its problems itself. One clever solution is DNSCurve. DNSSEC is a mess that we should immediately abandon.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/367989/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor368098"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two questions about handling many connections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 27, 2009 4:01 UTC (Sun)
+                               by <b>Ross</b> (guest, #4065)
+                              [<a href="/Articles/368098/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Ross" />
+                <input type="hidden" name="return" value="/Articles/366986/#CommAnchor368098" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not increase the port number space to 32 bits when other incompatible changes are made to UDP and TCP?  This would help many things -- port exhaustion on busy servers, and more space for NAT routers to use, better "authentication" for DNS lookups.<br>
+<p>
+Also, if I understand correctly, this proposal will add some features of Transactional TCP plus syncookies to standard TCP.  But just like syncookies, this doesn't seem to solve the problem with a large set of distributed attacking hosts -- because of three underlying assumptions:<br>
+<p>
+1) That the attacking hosts are forging IPs and are therefore unable to reply to anything sent by the server with the proper "authentication" (sequence number, keyed hash, etc.).<br>
+<p>
+2) That a single client would not be able to complete a huge number of connections without running out of memory itself, so it has to send SYNs and ignore any responses.<br>
+<p>
+3) That a client can only complete connections that it initiated.<br>
+<p>
+But aren't all of those assumptions wrong in many common situations today?<br>
+<p>
+With botnets, attackers may have access to tens of thousands of different hosts with real IP addresses.  And couldn't attackers deploy something like "reverse syncookies" where they encode the connection information allowing them to force the server to hold the state and making their code stateless.  And almost all ingress/egress filtering is done with large blocks of IPs, which means a single compromised host can use entire subnets or even netblocks of IPs, at least if they are in the same broadcast domain.<br>
+<p>
+So I guess I'm saying the problem is the asymmetric nature of the system -- there are just lots more potential clients than you have servers and I'm not sure if there is any way to prevent them from overwhelming you if a significant fraction are being used maliciously.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/368098/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor368443"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCP cookie transactions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 2, 2010 18:02 UTC (Sat)
+                               by <b>wombat</b> (guest, #62778)
+                              [<a href="/Articles/368443/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wombat" />
+                <input type="hidden" name="return" value="/Articles/366986/#CommAnchor368443" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think it's correct to say that TCPCT will be in the 2.6.33 kernel - the first patches have been accepted but more will be needed before any extra functionality is available (more patches were submitted on the 31st December but, assuming they are accepted there will be more to come)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/368443/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

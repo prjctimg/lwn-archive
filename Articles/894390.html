@@ -1,0 +1,300 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Page pinning and filesystems [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Page pinning and filesystems">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="It would have been surprising indeed if the 2022 Linux Storage, Filesystem, Memory-management a [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/894038/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Page pinning and filesystems</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 10, 2022</br>
+           <hr>
+<a href="/Articles/lsfmm2022/">LSFMM</a>
+</div>
+It would have been surprising indeed if the <a
+href="https://events.linuxfoundation.org/lsfmm/">2022 Linux Storage,
+Filesystem, Memory-management and BPF Summit</a> (LSFMM) did not include a
+session working toward solutions to the longstanding problems with
+<tt>get_user_pages()</tt>, an internal function that locks user-space pages
+in memory for access by the kernel.  The issue has, after all, <a
+href="753027.html">come</a> <a href="784574.html">up</a> <a
+href="807108.html">numerous</a> <a href="849638.html">times</a>
+over the years.  This year's event duly contained a session in the joint
+filesystem and memory-management track, led by John Hubbard, with a focus
+on page pinning and how it interacts with filesystems.
+<p>
+File-backed pages, naturally, have a filesystem behind them that manages
+the movement of data to and from persistent storage.
+The root of the problem with page pinning is that the kernel uses it to
+operate on the contents of pages outside of the filesystem's purview; that
+can lead to unpleasant surprises when those contents change at times when the
+filesystem is not expecting it.  If filesystems were aware of pinned pages
+then they could at least attempt to take evasive action, but pinning is
+generally invisible to filesystems.
+<p>
+The approach that has been taken is to try to make pinning explicit and
+visible; to that end, the new <a
+href="https://docs.kernel.org/core-api/pin_user_pages.html?highlight=page_maybe_dma_pinned"><tt>pin_user_pages()</tt>
+API</a> was added.  The effect is about the same as with
+<tt>get_user_pages()</tt>, but this interface attempts to mark pages to
+show that they have been pinned.
+There is still one little problem, though: there are no
+spare bits in <tt>struct page</tt> to track the <i>number</i> of times a given
+page has been pinned, so the developers had to hack things by using
+a bias value (1024) in the page reference count.  As a result, if a
+page has at least that many references, it will appear to be pinned even if
+
+<a href="/Articles/894394/"><img src="../_static/images/conf/2022/lsfmm/JohnHubbard-sm.png"
+alt="[John Hubbard]" title="John Hubbard" class="rthumb"></a>
+
+it is not.  For that reason, the function to query whether a page is
+pinned is called <a
+href="https://docs.kernel.org/core-api/pin_user_pages.html?highlight=page_maybe_dma_pinned#page-maybe-dma-pinned-the-whole-point-of-pinning"><tt>page_maybe_dma_pinned()</tt></a>.
+Hubbard complained about the "maybe" in the name; it seems inadequate, but
+it is the best that the development community has been able to achieve so
+far.
+<p>
+Matthew Wilcox said that the <a href="893512.html">folio work</a>
+might be able to provide a few extra bits for a pin counter, but it is
+probably not enough.  There was some talk of putting this count into a side
+structure, moving it out of <tt>struct page</tt> entirely.  David
+Howells noted that the sorts of accesses that pin pages (DMA and direct
+I/O, primarily) are not that common, so the side-structure idea might be
+the best approach.  David Hildenbrand wasn't sure of the scope of the
+problem, since the bias is 1024, it takes a lot of references for a page to
+appear to be pinned.  Wilcox pointed out that frequently mapped pages, such
+as those containing the C&nbsp;library, will have high reference counts.
+<p>
+Hubbard returned to the status of the pinning work, saying that developers
+need to think about why they need access to the pages in question.  If they
+are doing something that will touch a page's contents, then
+<tt>pin_user_pages()</tt> should be used.  In other cases, often where the
+intent is to make changes to the underlying <tt>page</tt> structures,
+<tt>get_user_pages()</tt> is the right function to call.  The process of
+converting filesystems to deal with pinning is ongoing; it is not a small
+job.  There are also a lot of cases where 
+kernel code uses <tt>set_page_dirty()</tt> to mark a page as having
+been modified, then unpins the page.  He made a helper for that case,
+but it feels wrong to him; each one is a place where pages are being marked
+"dirty" outside of the filesystem that is responsible for them, but which
+is still not actively involved in (or aware of) the operation.  At least
+the evil is concentrated now, he said.
+<p>
+At this point, Hubbard noted that he had 12 minutes left in his session to
+come up with a finished design that fully solves the pinning problem.  Even
+after everything has been converted to the new pinning API, he said, the
+problems that drove all this work in the first place will remain unfixed.  His
+suggestion was to add an API allowing kernel 
+code to take a lease on a range within a file, and to require leases to be
+taken before pinning file pages.  There is a significant advantage to this
+approach: it is a correct solution that would connect the filesystem and
+memory-management code.  There has to be some way of communicating
+information about changes to file-backed code to filesystems, and this is
+the only proposal he has seen so far.
+<p>
+Ira Weiny objected that leases are hard to get right; there are lots of
+roadblocks that come up.  He agreed, though, that some way of making
+filesystems aware of pins is needed.  But filesystems, he said, don't like
+letting go of pages they are responsible for.  Ext4 maintainer Ted Ts'o
+answered, though, that the prospect doesn't worry him.  A lease (or
+equivalent mechanism) would be telling the filesystem that the pages in the
+affected range may be marked dirty at some point in the future; that
+implies that if the indicated pages don't have blocks allocated in the
+filesystem, that must be rectified immediately.  A copy-on-write filesystem
+might have to copy the whole range, even if the pages are never dirtied in
+the end.  If the pages <i>are</i> dirtied all of this is fine, and perhaps
+even better, since allocating for the whole range at once might lead to
+better layout.
+<p>
+Howells said that he did an implementation of file leases for network
+filesystems, but he ended up abandoning it.  There were just too many
+problems with <a
+href="https://man7.org/linux/man-pages/man2/truncate.2.html"><tt>truncate()</tt></a>,
+and with direct I/O; it is hard to get it right.  Hubbard suggested just
+ignoring <tt>truncate()</tt>, to general laughter.
+<p>
+Chris Mason said that, for Btrfs, marking the page dirty is not the only
+problem.  Btrfs has to lock pages before doing I/O so that their contents
+can't change; among other things, a checksum of the page's contents must be
+taken, and that checksum must continue to match those contents.  Josef
+Bacik said, in his classic way, that the situation was bad in 
+general, and that this problem is the biggest barrier to the sharing of
+pages in the page cache.  The memory-management subsystem going behind a
+filesystem's back is a huge problem, he said, that has to be fixed.  He is
+not thrilled with the lease idea, though; it would conflict with the way
+that Btrfs manages ranges of dirty pages.
+<p>
+Kent Overstreet answered, though, that user space has always been able to
+modify pages at inopportune times.  Direct I/O, for example, bypasses the
+page cache, and a buffer used for direct I/O can be mapped into a file as
+well.  This can actually lead to deadlocks in some situations, and could be
+an attack vector.  Bacik said that Btrfs has a special path for just this
+case.
+<p>
+Hubbard, having not really gotten the 12-minute design he was after, closed
+the session by noting that fixing these problems may cause performance
+regressions.  There may be objections but, he said, the higher performance
+was an "illusion" and the system was not correct.  There was some brief
+discussion of ways to mitigate some of any future performance loss, but
+developers may still find themselves having to explain to users why their
+I/O should not have been as fast as it was before the system was made to
+work correctly.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/get_user_pages()</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2022</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/894390/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor894635"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page pinning and filesystems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2022 0:22 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/894635/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/894390/#CommAnchor894635" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Wilcox pointed out that frequently mapped pages, such as those containing the C library, will have high reference counts. </font><br>
+<p>
+What is the downside of that? It&#x27;s not like C library can be swapped out or reclaimed meaningfully.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/894635/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor894643"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page pinning and filesystems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2022 3:25 UTC (Wed)
+                               by <b>nickodell</b> (subscriber, #125165)
+                              [<a href="/Articles/894643/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nickodell" />
+                <input type="hidden" name="return" value="/Articles/894390/#CommAnchor894643" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Page pinning means that a page cannot be unloaded, but it also means that the page cannot be moved to a different location in physical memory. The kernel might want to move a page if it&#x27;s trying to allocate a physically contiguous region of memory, for example for hugepages. If there are false positives (pages that appear to be pinned but aren&#x27;t) then the kernel will have a hard time allocating this memory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/894643/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor894825"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page pinning and filesystems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2022 16:37 UTC (Wed)
+                               by <b>awww</b> (guest, #122021)
+                              [<a href="/Articles/894825/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="awww" />
+                <input type="hidden" name="return" value="/Articles/894390/#CommAnchor894825" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How well does moving a page with 1024 mappings work? That&#x27;s a lot of tlb flushes and mmap locks to take...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/894825/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1242 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Spam reduction with greylisting [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Spam reduction with greylisting">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Running your own email server involves trying to keep back the tide of unsolicited email often  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/703018/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Spam reduction with greylisting</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="GAByline">
+           <p>October 12, 2016</p>
+           <p>This article was contributed by Tom Yates</p>
+           </div>
+Running your own email server involves trying to keep back the tide of
+unsolicited email often known as spam, and a good way to do this is to
+understand that most spam comes from botnets rather than real mail servers.
+Greylisting is a lightweight and elegant technique for distinguishing
+between the two sources of email and, when we look at the numbers, it turns
+out to be surprisingly 
+effective.
+
+
+<p>
+
+A common body of opinion says that there is no good reason to run your own
+mail server.  Organizations such as Google will, for not much money, allow
+you to run your entire corporate email as a hosted service.  You can use
+the mail client of your choice, thanks to services like IMAP and SMTP AUTH
+decoupling the client experience from the back-end provider; there's also an
+excellent webmail interface for when you're out and about.  Nevertheless,
+my experience is that, sooner or later, some shortcoming proves to be an
+inconvenience to the business.
+
+Perhaps the webmail site is blocked by some client network you're visiting,
+or important list emails aren't reaching your inbox and you can't work out
+why.  Maybe the hosting provider has made some arbitrary decisions about
+content and some of your new employees <a
+href="http://www.smh.com.au/articles/2004/02/26/1077676867921.html">find
+their names are unacceptable</a> and they cannot sign up.
+
+
+When this happens, and if your provider is unhelpful or
+unresponsive, you will find yourself revisiting the decision to run your
+own server.
+
+
+<p>
+
+Should you decide to run your own, however, you will lose all the
+<em>beneficial</em> content filtering that your provider was doing —
+specifically, slimming the torrent of unsolicited commercial email that
+bedevils us all.  There are many content filters, some commercial but many
+free, which can be inserted into the delivery pipeline of most mail servers
+to examine each incoming mail.  This, however, is the point where you discover
+that the internet can deliver rubbish to your server more quickly than you
+can easily and cheaply scan it, and the departmental budget is carefully
+examined to see if it can accommodate a couple of big compute servers to run
+the spam filtering.
+
+
+<p>
+
+The cheapest, easiest tests are those that are done during <a
+href="https://tools.ietf.org/html/rfc5321#section-3.2"> the early phases of
+the SMTP transaction</a>, specifically the <tt>EHLO</tt>, <tt>MAIL
+FROM</tt>, and <tt>RCPT TO</tt> phases, before the <tt>DATA</tt> phase is
+entered and the body of the email is transmitted.  Any rejection that can
+be done at this early stage is cheap, both in network terms (because the
+message has not yet been transmitted) and in compute terms (because
+processing the few tens of bytes the client has thus far sent generally
+requires less hardware than processing an 8MB MIME-encoded email).  There
+are tests that can be done at the <tt>EHLO</tt> phase, such as those
+relating to the <a
+href="http://www.postfix.org/postconf.5.html#reject_non_fqdn_helo_hostname">resolvability
+and validity of the client hostname</a>, and at the <tt>MAIL FROM</tt>
+phase, such as checking the client IP address against any <a
+href="http://www.openspf.org/">Sender-Policy-Framework records</a>
+advertised for the sender's declared domain name.  Other tests can be done
+here, such as realtime blackhole list (RBL) lookups; I do not use those, since
+I've found no RBL to be sufficiently reliable for use as a bright-line test
+for acceptance (rather than as contributors to a total spam score in the
+content-based filtering system that comes later in the pipeline).
+
+
+<p>
+
+But at this stage you have three pieces of information — the sender's IP
+address, and the envelope sender and recipient addresses — so another
+elegant test can now be applied.  To understand this test, it is necessary
+to appreciate that much of the spam email on the internet does not come
+from expensively-hosted bulk email senders, though those do exist.
+Instead, <a
+href="https://www.usenix.org/legacy/event/nsdi09/tech/full_papers/john/john_html/">perhaps
+as much as 85%</a> comes from <a
+href="https://en.wikipedia.org/wiki/Botnet">botnets</a> — distributed
+networks of compromised computers, each under the control of a single
+malicious actor.  Many such actors use their botnets to send large
+quantities of unsolicited commercial email, usually for pay on behalf of
+third-parties.
+<p>
+In a perfect world, SMTP would contain an exchange where
+the server asked <em>Are you a real mail server?</em>, and the client would
+reply "Yes, definitely", or "No, I'm part of a botnet".  The
+client would tell the truth, and the server would accept mail only from
+clients that were themselves real mail servers.  Sadly, we're not there
+yet.  Until we are, one excellent way to distinguish botnet members from
+real mail servers is to ask the client to <em>behave</em> like a real mail
+server.  One thing real mail servers are required to do is to cope with
+temporary disappointment, such as the receiving server not having enough
+free disk space or the user's mailbox being temporarily locked.  When a
+receiving server says it has a temporary problem by means of a <a
+href="https://tools.ietf.org/html/rfc5321#section-4.2.1">400-class return
+code</a>, the sender should wait for a while, then retry the transaction.
+Most botnet clients are senders of a type known as fire-and-forget; they
+just want to zip through the fifty-million recipient addresses they've been
+given.  If the one they're on right now has a temporary problem, well,
+that's just too bad; they drop that email on the floor and go on to the
+next one.
+
+
+<h4>Greylisting</h4>
+
+<a href="https://tools.ietf.org/html/rfc6647">Greylisting</a> takes
+advantage of this difference in behavior.  A receiving server can require
+a sending client to prove its <em>bona fides</em> by 
+temporarily refusing an email on first delivery attempt while making a
+note of the triplet consisting of the sender's IP address, the envelope sender,
+and envelope recipient.
+When a client arrives with an email with a matching triplet, the
+server assumes that this is a redelivery attempt and accepts the email.  A
+well-behaving greylist will then add the triplet to a whitelist; having
+proved itself once, should the same client try to send other mail from the
+same sender to the same recipient, there's no reason not to accept it
+straightaway, at least for a while.  Some implementations will extend this
+courtesy to <em>any</em> mail from that client.  To prevent botnet members
+from simply trying each delivery twice, back-to-back, most implementations
+will require a certain time to elapse between the first delivery attempt,
+and the redelivery attempt that is permitted to succeed.
+
+
+<p>
+
+More subtlety is possible.  In the simplest case, IP addresses under one's
+direct control can be configured as automatically whitelisted.  Since few
+botnet mailers implement <tt>SMTP STARTTLS</tt>, any email that arrives
+under cover of SMTP encryption can be accepted immediately.  Any mail that
+is submitted after <tt>SMTP AUTH</tt> succeeds is clearly from a legitimate
+local user, and can again be accepted immediately.
+
+
+<p>
+
+Greylisting is not without its downsides.  The biggest problem is that much
+email will be delayed, and the size of this delay is not under the
+control of the receiver.  Although most greylisting implementations
+will print a human-readable message indicating how long the sending server
+must wait before redelivery can succeed, there is as yet no standards-based
+way for the sender to recognize this, and wait only that long before
+retrying.  Instead, the client will have its own configuration telling it how
+often to retry and, if this does not match the greylist's expectations,
+severely delayed deliveries can result.  Although email delivery has never, in
+principle, been guaranteed nor instantaneous, some users have developed
+expectations outside the service guarantees.  As <a
+href="https://en.wikipedia.org/wiki/Greylisting">Wikipedia dryly notes</a>:
+
+<div class="BigQuote">
+Explaining this to users that have become accustomed to immediate email
+delivery will probably not convince them that a mail server that uses
+greylisting is behaving correctly.
+</div>
+<p>
+Problems arise with service providers that maintain a bank of sending
+servers, and move queued emails between these servers after each delivery
+attempt.  Since the triplet includes the sender IP, this means each
+redelivery attempt is seen by greylisting as being a new email; much time
+can elapse before an email is lucky enough to be tried a second time from a
+given sending server.  This is not, in my experience, common, but it does
+happen; all one can then do is add the whole bank of servers to an IP
+whitelist.
+
+
+
+<h4>How effective is it?</h4>
+
+My mail server is not a big one, and the community it serves is fairly small.
+Nonetheless, it's been on the internet a long time, and I see no reason to
+think it non-representative.  I looked at the logs for incoming mail for
+September 2016, and this broke down as follows, approximately:
+
+<ul class="spacylist">
+<li>There were 101,900 inbound delivery attempts 
+<li>Of these 101,900, 3,370 were SPF failures, 1,300 were from invalid sender hostnames, and 3,800 were
+to invalid recipients, leaving 93,400
+<li>Of those 93,400, 71,100 attempted no redelivery and so failed greylisting, leaving
+22,300 which passed greylisting and went on to local delivery
+<li>Of those 22,300, 7,800 were list emails filed via procmail, leaving 14,500
+which went to the content-based spam filtering system
+<li>Of those 14,500, 3,600 were identified as spam by content-based filtering
+</ul>
+
+The important figures are that 14,500 went to content-based filtering, and
+that 71,100 were rejected by greylisting.  My server is small, and
+low-powered, which keeps the hosting costs down.  Had I not greylisted,
+instead of content-filtering 14,500 emails, I would have had to process and
+store 85,600, some six times as many.  I would certainly have needed more
+CPU and memory in order to do this.
+
+
+<p>
+
+Wikipedia says that greylisting typically delays email by about 15 minutes.
+Looking at my body of emails from September 2016, where greylisting delayed
+delivery of an inbound email the median delay was 900 seconds.  The mean,
+however, 
+was around 8,000s, due to a long-tailed distribution (a comparatively small
+number of very large delays).  Nonetheless, assuming that all the mail that didn't
+pass greylisting was spam, greylisting is the single most effective
+antispam technique on my mail server.
+<p>
+If you're of a mind to give greylisting a try on your mail server, 
+Sendmail does it most easily through the milter interface.  My Sendmail 
+uses <a href="http://hcpnet.free.fr/milter-greylist/">milter-greylist</a>, 
+which works well and painlessly for me; the project has <a 
+href="http://milter-greylist.wikidot.com/sendmail">instructions on 
+configuring it with Sendmail</a>.  The milter-greylist developers also note
+that it works with  
+Postfix, but <a href="http://milter-greylist.wikidot.com/postfix">those 
+instructions</a> seem to be a lot thinner, and other implementations like 
+<a href="https://postgrey.schweikert.ch/">postgrey</a> may work better. 
+<a href="https://help.ubuntu.com/community/PostfixGreylisting">Ubuntu 
+seems to recommend postgrey</a> for Postfix, and the <a 
+href="https://wiki.centos.org/HowTos/postgrey">CentOS people also have a   
+HOWTO</a> for it.  Exim has always been a bit of a mystery for me, but 
+greylisting.org has <a 
+href="http://www.greylisting.org/implementations/exim.php">a number of   
+suggestions</a> for greylisting with Exim.  It would be nice if 
+greylisting capabilities shipped as a standard part of all major mail 
+transport agents (MTAs), but until then it should be fairly easy to glue 
+it onto your MTA of choice.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Email/Spam reduction</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Spam</a></td></tr>
+            <tr><td><a href="../Archives/GuestIndex/index.html">GuestArticles</a></td><td><a href="../Archives/GuestIndex/index.html">Yates, Tom</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/703059/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor703370"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 4:44 UTC (Thu)
+                               by <b>DG</b> (subscriber, #16978)
+                              [<a href="/Articles/703370/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DG" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703370" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've been using greylisting for ages (postgrey), but unfortunately there are still senders who have problems  with it (generally because their outbound IP changes on each delivery attempt). So you end up needing to maintain a client whitelist.<br>
+<p>
+See also <a href="http://www.postfix.org/POSTSCREEN_README.html">http://www.postfix.org/POSTSCREEN_README.html</a> which works on a similar idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703370/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703371"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 4:52 UTC (Thu)
+                               by <b>xanni</b> (subscriber, #361)
+                              [<a href="/Articles/703371/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="xanni" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703371" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've also been using greylisting for many many years (with qpsmtpd) and agree that it's probably the single most effective anti-spam technique.  That's not the only thing users complain about - they also complain about my rejection of very large attachments, and of course the occasional non-delivery of emails that got flagged as spam or viruses.  That's the price you pay for running your own server.  Then of course there are the problems with other providers occasionally refusing to accept your outgoing emails for various reasons...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703371/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 8:39 UTC (Thu)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/703379/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703379" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I use <a href="https://github.com/Exim/exim/wiki/SimpleGreylisting">Simple Greylisting for exim</a>, and I don't see any senders who have a problem with it. I'd be interested to know what the difference is between my implementation of Simple Greylisting and your implementation of postgrey that makes it so different.
+<p>My setup has greylisting take place at end of DATA (I'm not bothered about the potential for bandwidth saving); if your mail scores over 0.0 SpamAssassin points, lacks a "Message-Id:" header, contains broken MIME, has a "Subject:" header beginning with "Re", "Aw" or other reply marker and no "References" or "In-Reply-To" header, or if your mail server is on one of the "dial up" DNS black lists, you go through the Simple Greylisting flow. All other mail bypasses the greylisting completely - if it's not suspicious, there's no reason to hold it up.
+<p>I'm wondering whether the difference is that you greylist more aggressively than I do, or whether there's an algorithmic difference between Simple Greylisting and postgrey that means you see the odd false positive when I don't.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703386"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 8:59 UTC (Thu)
+                               by <b>DG</b> (subscriber, #16978)
+                              [<a href="/Articles/703386/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DG" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703386" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Postgrey is a traditional greylisting daemon - i.e. it's run before DATA, and if the (MAIL FROM, RCPT TO, REMOTE IP) tuple isn't already known then it returns a 450 error code. <br>
+<p>
+You're only applying greylisting to a subset of remote hosts - e.g. only those that look like their from "dial-up" connections or spamassassin thinks it's possibly spammy.... etc etc.<br>
+<p>
+We've found it necessary to whitelist mail from e.g. blackberry.net, ovh.net, amazonses.com, outlook.com - all of who don't have consistent sending servers (and a large pool of sending servers).<br>
+<p>
+I've seen quite a few comments recently about how greylisting is no longer useful / should not be used etc. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703386/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703389"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 9:04 UTC (Thu)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/703389/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703389" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I've just checked my database - I have outlook.com and amazonses.com servers in there, as they've forwarded spammy mail to me, but have retried sending and thus are whitelisted. I wonder what the difference is between you and me such that you have to whitelist outlook.com and amazonses.com, but my setup automatically whitelists them?
+<p>At a guess, it's because my setup is able to automatically whitelist the original sending host, as my tuple is (MAIL FROM, RCPT TO, Message-Id) instead of (MAIL FROM, RCPT TO, REMOTE IP), and I can map back to the original sending host, not just the host that's retrying. If I'm right, this is an issue with "traditional" greylisting, but not with post-DATA greylisting.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703389/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 9:40 UTC (Thu)
+                               by <b>skx</b> (subscriber, #14652)
+                              [<a href="/Articles/703392/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="skx" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703392" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I found the simpler solution was to configure my own greylisting solution only to record "sender" + "recipient".  That takes care of the problem of larger-senders rotating IPs  when  they attempt to re-deliver mail.</p>
+<p>I'm sure it has flaws of its own, using less data, but it seemed a simpler solution that noticing failures and maintaining a manual whitelist.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703666"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2016 20:30 UTC (Sat)
+                               by <b>storner</b> (subscriber, #119)
+                              [<a href="/Articles/703666/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="storner" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703666" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I use sqlgrey with Postfix, which has a couple of different ways to treat the IP part of the tuple:<br>
+<p>
+# - full   : greylist by IP address<br>
+# - classc : greylist by class C network. eg:<br>
+#            2.3.4.6 connection accepted if 2.3.4.145 did connect earlier.<br>
+# - smart  : greylist by class C network unless there is no reverse lookup<br>
+#            or it looks like a home-user address.<br>
+<p>
+"smart" is the default, and I haven't had any problems with outlook.com or amazon's mail servers.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703666/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor703388"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 9:25 UTC (Thu)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/703388/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="matthias" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703388" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Nonetheless, assuming that all the mail that didn't pass greylisting was spam, greylisting is the single most effective antispam technique on my mail server. </font><br>
+<p>
+How do you define effective? Filtering out the biggest number of spam? In this case greylisting has an unfair advantage compared to the content based filtering. It sees much more spam, while the content based filter sees much less spam and has no change of filtering out that many mails.<br>
+<p>
+A fair comparison should for all filtering methods count the precision and recall. The first is 1-(false positives/filtered out messages) saying roughly how many false positives there are. Almost impossible to count that number, as you do not see the messages. Note that even SPF has false positives by incorrectly configured mail servers (especially mail servers doing some sort of forwarding). Hopefully this number is near 1 for all methods of filtering.<br>
+<p>
+The recall is (filtered out spam messages/all spam messages). For your greylisting this looks like 95% assuming that the non-catched spam is roughly 3600 mails. I do not see the numbers for content based filtering. The important number missing is how many spam mails went unfiltered through all filters. If this is below 200 than content based filtering would be as effective.<br>
+<p>
+I do not want to say that greylisting is bad, just the reasoning is not sound. And of course just looking at effectiveness keeps out performance. It is perfectly sensible to have a fast (CPU-time) method with a high precision at the front of the filtering pipeline. <br>
+<p>
+I do not like greylisting, as I prefer a delivery time of a couple of seconds. but that is a matter of taste.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703388/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703401"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 10:58 UTC (Thu)
+                               by <b>mina86</b> (guest, #68442)
+                              [<a href="/Articles/703401/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mina86" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703401" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was just gonna say that for proper analysis, some of the messages blocked by gray-listing should be let through to be able to see false-positives.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703401/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703402"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 11:05 UTC (Thu)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/703402/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="matthias" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703402" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+By the nature of greylisting, this is impossible. If you let a message through, you cannot know whether it would have been blocked, because you do not know whether the sending mailserver would retry to send the message if it would have been rejected with the message: "Message delivery temporarily not possible. Please Retry."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703402/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703407"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 12:22 UTC (Thu)
+                               by <b>mina86</b> (guest, #68442)
+                              [<a href="/Articles/703407/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mina86" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703407" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you gray-list after receiving the full message you will have its content to analyse and can wait for retry from the server with, say, a week time-out.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703407/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703408"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 12:33 UTC (Thu)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/703408/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703408" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>And note that you can restrict yourself to the decisions you could make before DATA, so that you've got the full content plus no modification to behaviour (hopefully) from the greylisting.
+<p>This breaks down if anyone's SMTP implementation does something weird like tie the message to a server once it's done internal &rarr; RFC-compliant conversion, though.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703408/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor703498"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 20:12 UTC (Thu)
+                               by <b>mgb</b> (guest, #3226)
+                              [<a href="/Articles/703498/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mgb" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703498" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; How do you define effective?</font><br>
+<p>
+We had rDNS checking, anti-virus, and anti-spam.  We added greylisting.  We saw a further significant reduction in spam.  Support issues from greylisting are an order of magnitude less than from rDNS checking, and neither is excessive.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703498/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor703411"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 13:38 UTC (Thu)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/703411/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703411" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even if you do not run your own mail server, you might still receive so much spam that you have to filter them, but then you have less option available. It is even worse for false positive.<br>
+<p>
+I do not like the idea of smtp server 'lying' by sending 4xx error code.<br>
+It would be much better if there was a 4xx code dedicated to greylisting.<br>
+Then servers could react accordingly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703411/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703483"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 17:38 UTC (Thu)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/703483/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703483" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>How is it a lie?  The server is saying "I'm not prepared to accept your message at the moment, but I might be willing to do so at a later time.  That's exactly what 4xx codes were meant for.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703483/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor703432"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 15:27 UTC (Thu)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/703432/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703432" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Our greylisting code has been tweaked to both make it more effective and to reduce the annoying side-effects.
+
+<p>Increasing effectiveness:
+<ul>
+<li>We greylist after the DATA phase.  While this sounds counter-intuitive, we include a hash of the subject in the greylist information.  This stops some spamware that mutates the subject with each delivery attempt.
+</ul>
+
+<p>Reducing annoyances:
+<ul>
+<li>We consider only the first 24 bits of an IPv4 address or the first 64 bits of an IPv6 address in the greylist data.  This helps quite a bit with organizations that have a pool of outbound delivery machines.  They're quite often within a class-C network.
+<li>Once a machine passes greylisting, we don't bother greylisting it again for 40 days.  Because obviously, if IP address a.b.c.d made it past greylisting once, it's very likely to make it past every single time.
+</ul>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703432/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703520"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 3:48 UTC (Fri)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/703520/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pabs" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703520" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which code do you mean when you say "our"?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703520/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 15:23 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/703605/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703605" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+dskoll's company is <a href="https://www.roaringpenguin.com/">https://www.roaringpenguin.com/</a>.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor703489"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2016 18:53 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/703489/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703489" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've been using sqlgrey for years; for a long time it was all I needed. E-mail isn't my primary method of communication though so I can't say it's for everyone - the delay when I *am* expecting mail is irritating.<br>
+<p>
+Alas, it's not perfect: a while back I got a tidal wave of scam emails bouncing through hosts with exploitable PHP scripts and a standards-compliant mailer. Adding spamhaus checks didn't help, even trying to force TLS1.2 didn't (don't try this at home - it violates spec). In the end I blocked them by User-Agent header.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703489/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703524"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 5:35 UTC (Fri)
+                               by <b>einstein</b> (subscriber, #2052)
+                              [<a href="/Articles/703524/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="einstein" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703524" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I didn't see any mention of postscreen here, but it should get an honorable mention. It ships with postfix and performs a role similar to postgrey and also has hooks for policy daemons, milters, and is part of a multi-layer postfix defense.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703524/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703562"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 13:02 UTC (Fri)
+                               by <b>jtaylor</b> (subscriber, #91739)
+                              [<a href="/Articles/703562/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jtaylor" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703562" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; To prevent botnet members from simply trying each delivery twice, back-to-back, most implementations will require a certain time to elapse between the first delivery attempt, and the redelivery attempt that is permitted to succeed. </font><br>
+<p>
+So a spammer only needs to send a second mail to an address after some small amount of time has passed to get around greylisting?<br>
+Is this just an uncommon enough anti-spam approach so spammers don't really care to work around it or is there some other reason why spammers don't adapt to this?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703562/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703568"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 14:04 UTC (Fri)
+                               by <b>Felix</b> (subscriber, #36445)
+                              [<a href="/Articles/703568/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Felix" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703568" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  So a spammer only needs to send a second mail to an address after some small amount of time has passed to get around greylisting?</font><br>
+<p>
+Basically yes (typically "small amount of time" = 10 minutes).<br>
+<p>
+<font class="QuotedText">&gt;  Is this just an uncommon enough anti-spam approach so spammers don't really care to work around it or is there some other reason why spammers don't adapt to this?</font><br>
+<p>
+Greylisting is widely used. AFAIK the theory is that spammers don't care about anything other than sending as many messages as possible because there are still more servers with bad spam filters than they would gain by circumventing the greylisting.<br>
+(This is mentioned also as a reason why spammers rarely clean up their address lists so these contain a lot of outdated information. So this also sometimes used to detect rogue mail senders - they have a much higer bounce rate.)<br>
+<p>
+Incidentally there is also the theory that bad grammar, typos and horrible layout are some kind of "filter" for (419-type) scammers: They want to be contacted only by stupid/naive victims because the initial spamming is cheap+automated but the follow-up mailing scam requires "precious" human resources (by the scammers) so they'll increase their efficiency by removing all the smart people who would likely notice the scam and won't pay anything.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703568/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor703614"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 16:11 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/703614/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703614" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Also worth noting that in spam economics, the entity paid to send mail is often paid a small amount per mail sent, a bonus per mail delivered, and a bigger bonus per mail acted on by the recipient.
+<p>It's thus in a spammer's interest to keep their lists large and dirty - they get paid enough to cover their costs for every mail sent, and the bonuses are just profit.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703614/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor703649"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2016 8:46 UTC (Sat)
+                               by <b>niner</b> (guest, #26151)
+                              [<a href="/Articles/703649/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="niner" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703649" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The postscreen HOWTO suggests that spammers try to maximize use of the time before a zombie's IP address shows up on DNSBLs. When you know you have minutes at best before your IP is wasted, there's no use in implementing some re-send mechanism.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703649/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor703627"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MailAvenger</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2016 18:50 UTC (Fri)
+                               by <b>philh</b> (subscriber, #14797)
+                              [<a href="/Articles/703627/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="philh" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703627" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      People running their own mail server would do well to glance at <a href="http://www.mailavenger.org/">MailAvenger</a><br><br>
+
+It acts as your SMTP listener. If it decides to accept a mail, it then simply passes it on to your real MTA, so it's very much focussed on the job of being rude to strangers on your behalf.<br><br>
+
+Since using it, I have no spam folder.  All that would have been dumped in my spam folder is now rejected at SMTP time.<br><br>
+
+The particularly relevant feature w.r.t. this discussion is that it does SYN packet analysis to have a guess at the OS of the remote mail client, which allows one to specify this sort of rule:
+<pre>
+	match -q "*Windows*" "$CLIENT_SYNOS" &amp;&amp; greylist
+</pre>
+If that looks like a snippet of shell, that's because it is shell &mdash; you get to write little scripts that allow it to decide what to do with each incoming mail.  In this case we're deciding to greylist only Windows clients.  That catches almost all of the bots that send you spam, and almost none of the real mail servers, so I get the full benefit of greylisting with almost none of the pain &mdash; real people can send me mail without any delay.<br><br>
+
+The treatment of mails can be tuned on a user by user basis, and even an address by address basis.  For instance if  <tt>phil-santander@hands.com</tt> starts to suddenly get vast amounts of spam, as it did (oops, looks like Santander leaks), then you just tell your bank a new address to use (and about their laughable security), and add a file containing the word <tt>reject</tt>, and the spam is gone.<br><br>
+
+Users get to set the complete policy using files under ~/.avenger/ so if you have users that wish to suck on the firehose of filth, that's entirely up to them.  No need for you to suffer with them.,<br><br>
+
+I first came across it in this <a href="http://www.scs.stanford.edu/~dm/home/papers/remove.pdf ">strangely persuasive (although NSFW) paper</a> ;-)
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703627/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703650"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2016 9:00 UTC (Sat)
+                               by <b>gioele</b> (subscriber, #61675)
+                              [<a href="/Articles/703650/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gioele" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703650" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What about storing the text of the emails in a separate "check in progress" folder?<br>
+<p>
+Here is a complete procedure:<br>
+<p>
+1a. If the sender is in a whitelist, the SMTP server just accepts the email.<br>
+1b. Otherwise,  the SMTP server receives the complete email, but at the end it signals a temporary error to the transmitter and writes  graylisting.<br>
+<p>
+2. The email is stored in a "check in progress" folder (=&gt; the email client can access it away, if needed).<br>
+<p>
+3. If the user selects the button "this is a good email", the email is moved to the right folder and the sender whitelisted.<br>
+<p>
+4a. If the email has been resent, it is moved to right folder and the sender put in a whitelist.<br>
+4b. If after X minutes the email has not been resent, it is moved to the spam folder.<br>
+<p>
+<p>
+This is one of those cases in which a closer integration between the SMTP server, the delivery service and the email clients could be beneficial.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703650/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703653"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2016 10:25 UTC (Sat)
+                               by <b>kay</b> (guest, #1362)
+                              [<a href="/Articles/703653/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kay" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703653" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IMHO is greylisting combined with spamassasin very effective.<br>
+Combined with heise.de RBL it catches almost all SPAM and Virus mails.<br>
+<p>
+<p>
+ SPAM statistics for 2016 (Jan 1 - Oct 15)<br>
+<p>
+ _rejected by blacklist: _58.9% _430832<br>
+ _________by greylist: _18.9% _138691<br>
+ ___domain unkonwn:  __7.3% __53451<br>
+ ______user unkonwn:  __2.1%__15657 (1160 users)<br>
+ _______other reason:  __0.4% __3122<br>
+<p>
+classified as VIRUS:  0.0% ____0<br>
+________BANNED:  0.0% ___103<br>
+___________SPAM:  3.3% _24279<br>
+__________CLEAN:  5.7% _41886 (delivered)<br>
+______not scanned:  1.1% __8318 (trusted, spamlovers, system)<br>
+_____________________========<br>
+________________Total: _731996<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703653/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor703661"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam reduction with greylisting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2016 18:56 UTC (Sat)
+                               by <b>ttonino</b> (guest, #4073)
+                              [<a href="/Articles/703661/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ttonino" />
+                <input type="hidden" name="return" value="/Articles/703059/#CommAnchor703661" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is a lot of strategies to follow here. For example use a DNS lookup for something like 'dynamic' or 'dsl' in the host name. I found that delaying the banner by 30 seconds for those addresses made some bots just give up.<br>
+<p>
+Similarly, greylisting could be applied to just those kinds of addresses. Some geo-IP knowledge can be applied as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/703661/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

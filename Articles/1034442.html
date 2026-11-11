@@ -1,0 +1,824 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Shadow-stack control in clone3() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Shadow-stack control in clone3()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Shadow stacks are a control-flow-integrity feature designed to defend against exploits that man [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1034605/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Shadow-stack control in clone3()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 26, 2025</br>
+           </div>
+Shadow stacks are a control-flow-integrity feature designed to defend
+against exploits that manipulate a thread's call stack.  The kernel first
+<a href="926649.html">gained support for hardware-implemented shadow
+stacks</a>, for the x86 architecture, in the 6.6 release; 64-bit Arm
+support followed in 6.13.  This feature does not give user space much
+control over the allocation of shadow stacks for new threads, though; a <a
+href="/ml/all/20250819-clone3-shadow-stack-v19-0-bc957075479b@kernel.org">patch
+series</a> from Mark Brown may, after many attempts, finally be about
+to change that situation.
+<p>
+As its name suggests, a shadow stack is a sort of copy of a thread's
+ordinary call stack, but its contents are limited to return addresses.  On
+a system with shadow-stack support, each function call will push the return
+address onto both the normal and shadow stacks.  On return from a function,
+the return addresses are popped from both stacks and compared; if they do
+not match, some sort of corruption has occurred and the thread in question
+is killed.
+<p>
+The shadow stack is marked specially in the system's page tables and is not
+writable from user space.  A shadow stack must also contain a special,
+hardware-generated token at the top; this token identifies it as a real
+shadow stack, and prevents multiple threads from using the same shadow
+stack.  The setup requirements mean that the creation of a shadow stack for
+a thread must be done by the kernel.
+<p>
+When the kernel goes to create a thread's shadow stack, there is an
+immediate question to be answered: how large should that stack be?  The
+creation of the initial shadow stack for a process can be influenced by the
+process itself, but that is not true for any threads that the process may
+create thereafter.  Whenever a new thread comes into existence, it is given
+a shadow stack that is the same size as its regular stack as the kernel's
+best guess for the right size.
+<p>
+That guess, of course, could be far from the mark.  While quite a bit of
+information — local variables and saved registers, for example — is pushed
+onto the call stack, the shadow stack only holds return addresses, so there
+is a good chance that an equally sized shadow stack will be far too large
+for the thread's needs.  If the process creates many threads, the amount of
+memory wasted by oversized shadow stacks could become significant.  There
+are also (less common) situations, described in the 2023 article, when an
+equally sized shadow stack could turn out to be too small.
+<p>
+Either way, there would be value in giving a process a voice in the sizing
+of shadow stacks for the threads it creates.  For some time now, Mark Brown
+has been working on the ability to control shadow-stack allocation when a
+thread is created with <a href="/Articles/792628/"><tt>clone3()</tt></a>;
+that work was <a href="953794.html">covered here</a> in 2023.  At
+that point, the patch set was in its fourth revision; it is now in its 19th
+iteration, a number of changes have been made, and Brown is expressing
+hopes that the series will soon be ready to merge.
+<p>
+Early versions of the series allowed user space to specify the address and
+size of the desired shadow stack, but that ran into opposition from other
+developers.  Subsequent attempts, which only allowed the size of the shadow
+stack to be specified, proved to be too limiting.  In the end, it was
+decided to just have the parent process create a shadow stack as it sees
+fit.  So, since version&nbsp;5, the process calling <tt>clone3()</tt> must
+first ask the kernel to create the shadow stack for the new thread to use
+with a call to <tt>map_shadow_stack()</tt>:
+<p>
+<pre>
+    sstack = map_shadow_stack(unsigned long addr, unsigned long size,
+    			      unsigned int flags);
+</pre>
+<p>
+The <tt>addr</tt> and <tt>size</tt> arguments describe where the newly
+created stack should be placed and how big it should be; setting
+<tt>addr</tt> to zero leaves the placement decision to the kernel.  The
+<tt>flags</tt> argument must be <tt>SHADOW_STACK_SET_TOKEN</tt> to cause
+the kernel place the special token at the top of the stack; otherwise the
+resulting shadow-stack mapping cannot be used for the new thread.  This
+system call will return the virtual address where the stack is actually
+mapped.
+<p>
+When the time comes to call <tt>clone3()</tt>, the new
+<tt>shadow_stack_token</tt> field in <a
+href="https://elixir.bootlin.com/linux/v6.16.1/source/include/uapi/linux/sched.h#L47"><tt>struct
+clone_args</tt></a> must be set to point to the shadow-stack token.  This
+requirement might be a bit unintuitive; the pointer is to the token,
+<i>not</i> to the base of the stack itself.  So code using this feature
+will look something like this:
+<p>
+<pre>
+    struct clone_args args;
+    void *ss_addr;
+
+    ss_addr = map_shadow_stack(0, 4096, SHADOW_STACK_SET_TOKEN);
+    args-&gt;shadow_stack_token = ss_addr + 4096 - sizeof(void *);
+    pid = clone3(&amp;args, sizeof(args));
+</pre>
+<p>
+This code allocates a single, 4096-byte shadow stack, letting the kernel
+choose where the stack should be placed; it then points
+<tt>args-&gt;shadow_stack_token</tt> at the token that the kernel will have
+stored at the top of the stack.  The thread created with the subsequent
+<tt>clone3()</tt> call will, if all goes well, be using the newly created
+shadow stack.  Error handling, obviously, has been omitted.
+<p>
+Brown said, in the cover letter: "<q>I think at this point everyone is OK
+with the ABI, and the x86 implementation has been tested so hopefully we
+are near to being able to get this merged?</q>"  So far, nobody has spoken
+up to disagree with that idea.  In the absence of surprises, this
+long-under-development addition to the <tt>clone3()</tt> API may finally be
+headed for the mainline.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Control-flow integrity</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">System calls/clone()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1034442/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1035182"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 16:41 UTC (Tue)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1035182/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035182" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+clone3() is frequently blocked using seccomp because seccomp cannot filter the strict used to pass parameters.  This should be fixed at some point, but until then, clone3() should not be used by ordinary applications.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035182/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035183"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 16:46 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1035183/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035183" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'll use it in mine, thanks. I'm not going to slow innovation for everyone because a few insist on using outdated security products <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035183/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035193"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 17:38 UTC (Tue)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/1035193/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lionel_Debroux" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035193" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Out of curiosity, what would you suggest using instead of, or maybe in addition to, seccomp, which is, AFAIK at least, neither niche - it's used in containers and various sandboxing runtimes - nor outdated, being the state of the art in that area of Linux sandboxing despite its shortcomings, one of which was mentioned in the post you're replying to ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035193/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 17:58 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1035196/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035196" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+eBPF LSMs come to mind. It's far better to enforce policy in the kernel at the later of objects and operations than at the interface to the kernel at the later of registers and function parameters.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 18:21 UTC (Tue)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/1035198/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lionel_Debroux" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035198" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Point taken. However, I'm not yet convinced about using eBPF for security purposes, given how less than stellar the security track record of the eBPF infrastructure has proven to be throughout the years, in terms of high-severity issues in the eBPF JIT or eBPF verifier. They rival the likes of unprivileged user namespaces and io_uring. Yet, most of the main distros force enable the BPF JIT, not leaving sysadmins a chance of easily administratively disabling it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035344"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2025 18:30 UTC (Wed)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1035344/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035344" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Okay, but progress isn't going to wait for your sense of comfort. Plenty of people have been using eBPF for a long time. You don't get to sit there and tell people not to use clone3 because you have a feeling.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035344/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035489"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">eBPF is root-only</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 28, 2025 13:22 UTC (Thu)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1035489/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035489" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+eBPF is limited to root.  For many use-cases, this is a dealbreaker.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035489/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1035241"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2025 9:23 UTC (Wed)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1035241/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035241" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IMHO quotemstr phrased it in a rather dismissive tone, but I think the idea is roughly correct. If you want to use seccomp, then that's your problem. You don't get to impose your compatibility requirements on everyone else, even if there is no better way of doing whatever you're trying to do.<br>
+<p>
+(That doesn't mean you just have to live with it, of course. You can ask the kernel folks nicely to make these things compatible, or to provide some suitable alternative, and maybe they'll do it. Or you can send them a patch yourself. What you cannot do is demand that the rest of userspace respect your requirements, just because that happens to be more convenient for you than the alternative.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035241/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1036837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 0:39 UTC (Fri)
+                               by <b>cypherpunks2</b> (guest, #152408)
+                              [<a href="/Articles/1036837/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cypherpunks2" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1036837" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You might be thinking of seccomp mode 1 which is outdated and virtually never used. Seccomp mode 2, which is based on BPF internally, is not and is increasingly being used for security and is continuously being improved. Just recently, the landlock LSM was created to augment seccomp's weaknesses (namely the difficulty of whitelisting paths).<br>
+<p>
+For pthreads, which uses clone3() by default and is the usual place you'll find them, if you blacklist it so it returns -ENOSYS then it will transparently fall back to clone2(), which you can filter more effectively. But yes, it's not an ideal situation since you'd lose the shadow stack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1035188"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 17:34 UTC (Tue)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1035188/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035188" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What's a case where you'd want to do argument filtering on clone3 and neither SECCOMP_RET_USER_NOTIF nor SECCOMP_RET_TRACE are workable?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035188/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035205"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 20:40 UTC (Tue)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1035205/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035205" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You cannot filter clone3 arguments with a SECCOMP_RET_USER_NOTIF or SECCOMP_RET_TRACE handler unless you can fully emulate the clone otherwise the struct pointer indirection will lead to a TOCTOU.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035205/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2025 3:34 UTC (Wed)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1035215/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035215" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Take the Syd sandbox as an example. It is an unprivileged user-space sandbox that uses both SECCOMP_RET_USER_NOTIF (default) and SECCOMP_RET_TRACE (can be opted-out). To ensure the guarantees provided by the sandbox, subnamespace creation must be disallowed. At this point clone3(2) becomes problematic because the second argument is a pointer to struct cl_args. If the sandbox reads this structure from sandbox process memory, check for unsafe flags and decide it is safe to proceed with a SECCOMP_USER_NOTIF_FLAG_CONTINUE or PTRACE_CONT respectively, there exists a time-window when a fellow thread (or a fellow process with process_vm_writev(2) or proc_pid_mem(5) access rights) can change the security-sensitive data in the structure before the Linux kernel reads this structure and acts on it. For more information on how easy this is to exploit, see <a href="https://gitlab.exherbo.org/sydbox/sydbox/-/blob/main/doc/toctou-or-gtfo.md">this article</a>. 
+<br></br>
+Therefore, there remains two options for the sandbox:
+
+<ol>
+<li>Deny clone3(2) with ENOSYS signaling libc to fallback to clone(2).</li>
+<li>Emulate clone3(2) completely on behalf of the sandbox process.</li>
+</ol>
+
+Option 1 is simple and therefore common practice. However, this means getting no support of added features which is an unfortunate consequence. Going forward, this situation is only going to escalate further as Linux keeps adding more system calls with security-sensitive data in arguments hidden from seccomp(2) behind pointer indirection.
+<br></br>
+Option 2 is the obvious solution to the problem. Two decades ago, when I first got interested in sandboxing, providing this option in unprivileged userspace was a pipe-dream. Most unprivileged userspace sandbox tools, such as limon, mbox, nsjail, subterfugue, sydbox and systrace, used ptrace(2), which is a debugging interface and was not designed with the goal to act as a security boundary. The sandbox developer had to choose between PTRACE_SYSEMU and PTRACE_SYSCALL. Both came with a noticable overhead. Considering the lack of selective filtering capabilities of PTRACE_O_TRACESECCOMP, stopping the sandbox process at each and every system call boundary, once on syscall-entry and once on syscall-exit, was a dealbreaker for most interested users. There was no PTRACE_O_EXITKILL either so it was difficult to ensure the sandbox process does not outlive the sandboxer. The ptrace(2) requests PTRACE_GET_SYSCALL_INFO, and the newer PTRACE_SET_SYSCALL_INFO were missing so editing sandbox process' system call number, return value, or arguments in a portable way was a major pain. Reading/writing sandbox process memory using process_vm_readv(2) and process_vm_writev(2) were missing. The remaining choice is proc_pid_mem(5) but again it is designed as a debug interface which does not honour the page protections of the sandbox process unlike process_vm_* so the sandboxer could be used as a confused deputy to leak or overwrite memory regions that were otherwise inaccessible to the sandbox process. Finally, ptrace(2) is easily detectable with an EPERM return on a ptrace(2) <a href="https://man.exherbo.org/syd.7.html#Enhanced_Handling_of_PTRACE_TRACEME">PTRACE_TRACEME</a> so most malware would not run under the sandbox, completely beating the purpose for malware analysts.
+<br></br>
+These were only the beginning of things to worry about. Tackling with the issue of TOCTOU in userspace was <a href="https://lwn.net/Articles/245630/">simply impossible</a>. Many helpful interfaces that allows the current Syd sandbox to (<a href="https://man.exherbo.org/syd.7.html#Threat_Model">attempt to</a>) act as a (TOCTOU-free) security boundary in unprivileged user-space today, such as pidfd_getfd(2), SECCOMP_IOCTL_NOTIF_ADDFD and openat2(2) with RESOLVE_BENEATH, RESOLVE_SYMLINKS and RESOLVE_MAGICLINKS were missing. The list goes on. Therefore, it is fair to say things have improved substantially. However, there're still some open ends with clone3(2) being one of them. Within the context of the Syd sandbox, the others are chdir(2), execve(2), and open(2) family system calls with the O_PATH flag. Syd cannot provide <a href="https://man.exherbo.org/syd.2.html#trace/allow_unsafe_open_cdev">safe access</a> to AMD GPUs either because unlike Nvidia GPUs, opening the /dev/kfd character device has per-process limitations preventing the use of SECCOMP_IOCTL_NOTIF_ADDFD with them. There's a <a href="https://bugzilla.kernel.org/show_bug.cgi?id=218501">feature request</a> on Linux kernel bugzilla about these issues. There may be other unprivileged userspace sandboxes out there with different requirements, but it's safe to say pidfds with their ability to duplicate sandbox process file descriptors using pidfd_getfd(2) cover most of the ground.
+<br></br>
+We need a solution to the clone3(2) filtering problem without hindering future system call innovation. Preventing addition of new system calls with pointer arguments is not feasible. Adding <a href="https://lwn.net/Articles/799557/">pointer indirection support</a> to seccomp(2) comes with its own problems wrt. security and portability. Support for multiple co-existing architectures in seccomp(2) filters is going to require per-architecture information about data structures used in system call arguments which can vary in unexpected ways for niche architectures such as x32 or mips.
+<br></br>
+Pointer indirection is not the only problem. In cases of filtering chdir(2) and execve(2), the lack of a reliable way to perform the action on behalf of the sandbox process prevents sandboxes using SECCOMP_RET_USER_NOTIF and SECCOMP_RET_USER_TRACE from emulating them safely. 
+<br></br>
+gVisor's <a href="https://gvisor.dev/blog/2023/04/28/systrap-release/">systrap</a> platform provides a solution to this problem with SECCOMP_RET_TRAP where the Sentry userspace kernel emulates almost everything, including the memory and process subsystems. When a process running under the gVisor sandbox calls execve(2) or mmap(2), these system calls are not going to reach the host Linux kernel and are directly handled by the Sentry user-space kernel. This is safe and stops attack vectors such as DirtyCoW, but it has issues on its own. All processes run in the same address space from the perspective of the Linux kernel. This means battle-tested defenses provided by the Linux kernel such as ASLR needs to be reimplemented. It also requires the sandbox to implement the illusion of an inter-process boundary in addition to a user-space-user/user-space-kernel boundary. Providing these isolation boundaries has noticable performance impact. <a href="https://is.gd/nanovisor">NanoVisor</a> is a gVisor fork which weakens these boundaries to reduce the performance overhead. Portability is an issue as well because hand-written assembly is hardly unavoidable. As a result, gVisor supports x86-64 and arm64 architectures only, whereas Syd works on x86-64, i586, x32, arm64, armv7, riscv64, loongarch64, powerpc64, powerpc64le, powerpc, s390x, s390 with multipersonality support and <a href="https://is.gd/syd_vs_gvisor">outperforms</a> gVisor in benchmarks.
+<br></br>
+In my humble opinion, a generic workable solution to the system call filtering problem is to have the Linux kernel provide process-guided versions of problematic system calls on a best-effort basis based on pidfds such as process_clone3, process_map_shadow_stack, process_chdir, and process_execve. The precedent for this are the system calls pidfd_getfd(2), pidfd_send_signal(2) and process_mrelease(2).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1035226"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2025 3:55 UTC (Wed)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/1035226/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035226" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I presented a fairly minimal solution for this that doesn't require seccomp to use eBPF at last years LPC[1]. Unfortunately, I haven't had time to finish this work yet -- I'm hoping to get some time in the coming months.<br>
+<p>
+[1]: <a href="https://www.youtube.com/watch?v=CHpLLR0CwSw">https://www.youtube.com/watch?v=CHpLLR0CwSw</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035226/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1036836"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">clone3() + seccomp = bad</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 0:29 UTC (Fri)
+                               by <b>cypherpunks2</b> (guest, #152408)
+                              [<a href="/Articles/1036836/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cypherpunks2" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1036836" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can filter it, in a way. If you have the struct in rodata and use seccomp to limit access to that memory range so that the permissions cannot be changed (such as with mprotect(), or a second VMA created over it using mmap() or something), you can whitelist the address and call it a day.<br>
+<p>
+This is how the Tor daemon's sandbox is able to whitelist things like paths that are passed to open().<br>
+<p>
+It's a bit of a hack, but it works in a pinch.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036836/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1035181"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Abstraction</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2025 16:46 UTC (Tue)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1035181/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035181" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One issue with the original clone(2) is that you had to know whether your stack grew upwards or downwards to be able to use it, as it took the actual stack pointer to use[^1], not a description of the mapping. This was fixed in the recent clone3(2), which takes separate stack and stack_size parameters so the kernel can abstract away that detail (implicitly using either stack or stack + stack_size for the stack pointer). By providing a pointer to the token directly, and the API to allocate the shadow stack giving you a pointer to the stack not the token, we are now reintroducing that problem. Is there a reason why that choice has been made, rather than either returning a pointer to the token (whether based on SHADOW_STACK_SET_TOKEN or some new flag) from map_shadow_stack(2) or taking a shadow_stack + shadow_stack_size argument pair in clone3(2)? Stacks that grow upwards may be a historical curiosity at this point (I don't foresee shadow stacks on PA-RISC!), but it would be nice to learn from the past and not unnecessarily repeat design decisions that have previously caused issues.<br>
+<p>
+[^1]: Actually not quite, it's the logical stack pointer to use; 64-bit SPARC applies a constant bias to its stack pointer to improve code generation, but the caller is not, if I recall correctly, required to do so for clone(2), the kernel will apply the bias itself.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035181/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035308"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Offset for stack pointer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2025 13:27 UTC (Wed)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/1035308/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035308" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On amd64 (x86_64), by OS and compiler convention there is also a "red zone" at [rsp - 128, rsp), also for the purpose of code optimization: the space may be used without requiring explicit instructions to allocate it.  This may be somewhat invisible because it is in the same direction as regular stack growth, but it still affects creation of threads, and even signal handling.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035308/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1035468"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Abstraction</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 28, 2025 11:12 UTC (Thu)
+                               by <b>broonie</b> (subscriber, #7078)
+                              [<a href="/Articles/1035468/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="broonie" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1035468" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The choice was made because one of the glibc developers requested it and nobody objected to the change, originally I'd implemented base+size like for regular stack. IIRC he felt that the size information wasn't relevant to the application. For shadow stacks there was a bit of ugliness because we have an optional top of stack marker above the token (on arm64, x86 doesn't implement it) so in clone3() we needed to probe two locations for the token. <br>
+<p>
+We could add a new flag to map_shadow_stack() to make it a bit more directly useful here as you suggest, that feels like another thing to go into the series of things to do when factoring some of this code out into common implementations now that we know that all the current architectures look very similar. The interface for that was locked in with the x86 implementation which didn't consider clone3() at all. It does feel out of scope for this series (and I'm very reluctant to introduce new changes that aren't absolutely required, this has already been going on for two years at this point for a bunch of reasons).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035468/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1036655"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Segmented stacks? Fibers? </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2025 5:46 UTC (Thu)
+                               by <b>Vorpal</b> (guest, #136011)
+                              [<a href="/Articles/1036655/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Vorpal" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1036655" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Excuse my ignorance, but how are shadow stacks supposed to be used if you use segmented stacks to deal with recursion (as some compilers do in their parsers, such as rustc)?<br>
+<p>
+And what about fibers / go routines etc, where user space is doing it's own thread scheduling?<br>
+<p>
+It seems the current implementation of shadow stacks is incompatible with both of these, unless I'm mistaken. Is the answer simply that you don't get to use those security features? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036655/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1036667"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why the need for the special flag?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2025 10:32 UTC (Thu)
+                               by <b>jtepe</b> (subscriber, #145026)
+                              [<a href="/Articles/1036667/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jtepe" />
+                <input type="hidden" name="return" value="/Articles/1034442/#CommAnchor1036667" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Pardon my ignorance, and it is totally possible I did not understand it correctly. From<br>
+<span class="QuotedText">&gt; A shadow stack must also contain a special, hardware-generated token at the top; this token identifies it as a real shadow stack, and prevents multiple threads from using the same shadow stack.</span><br>
+and<br>
+<span class="QuotedText">&gt; The flags argument must be SHADOW_STACK_SET_TOKEN to cause the kernel place the special token at the top of the stack; otherwise the resulting shadow-stack mapping cannot be used for the new thread.</span><br>
+I understand you'd always need the flag in call to map_shadow_stack.<br>
+<p>
+I only skimmed the patch series and did not find a reason for this. Why would I need to pass the flag explicitly, when not passing it results in garbage anyway? Seems to me, the sole purpose of the function is to allocate a shadow stack for the thread. Is there an alternative use for map_shadow_stack that I don't know of?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036667/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

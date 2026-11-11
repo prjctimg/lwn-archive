@@ -1,0 +1,251 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Hot-page migration and specific-purpose NUMA nodes [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Hot-page migration and specific-purpose NUMA nodes">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="For better or for worse, the NUMA node is the abstraction used by the kernel to keep track of d [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1046324/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Hot-page migration and specific-purpose NUMA nodes</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 17, 2025</br>
+           </div>
+For better or for worse, the NUMA node is the abstraction used by the
+kernel to keep track of different types of memory.  How that abstraction is
+used, though, is still an active area of development.  Two patch sets
+focused on this problem are currently under review; one addresses the
+perennial problem of promoting heavily used folios from slower to faster
+memory, while the other aims to improve the kernel's handling of nodes
+containing special memory installed for a specific purpose.
+<p>
+<h4>Hot-page tracking</h4>
+<p>
+Over the last several years, there has been an ongoing push to create
+systems with multiple classes (or "tiers") of memory.  While most memory
+might be ordinary RAM, a system could also be equipped with a small amount
+of <a href="https://en.wikipedia.org/wiki/High_Bandwidth_Memory">high
+bandwidth memory</a> and, perhaps, larger amounts of relatively slow
+memory.  In the absence of other concerns (such as a policy requiring
+low-price tenants to languish in slower memory), the system is generally
+best served by placing the most frequently accessed data in its fastest
+memory.
+<p>
+Actually placing data that way can be tricky, though.  The kernel can, with
+relative ease, detect memory that has not been accessed for a while; the
+data stored there can then be pushed down to slower memory.  Figuring out
+which data in slower memory should be moved to faster tiers is harder, but
+it is an important problem to solve; otherwise demotion to lower tiers
+could become a one-way trip.  Some types of hardware are beginning to gain
+features that can track frequency of access, but the kernel is not yet
+prepared to make the best use of those features.
+<p>
+Bharata B Rao has been working on a solution to this problem for a while;
+this work was <a href="1014220.html">covered here</a> in
+March 2025.  The <a
+href="/ml/all/20251110052343.208768-1-bharata@amd.com">latest version</a>
+of his patch series has evolved somewhat since then.  At its core, though,
+it remains a mechanism by which any kernel subsystem that has information
+about when a given page was last accessed can report that data to a central
+registry, which then uses the accumulated data to determine which pages
+(or, more correctly, which folios containing those pages) should be
+migrated to faster memory.
+<p>
+This new subsystem provides a call that can be used to report memory
+activity:
+<p>
+<pre>
+    int pghot_record_access(unsigned long pfn, int nid, int src,
+                            unsigned long time);
+</pre>
+<p>
+The <tt>pfn</tt> parameter should contain the page-frame number of the page
+that was accessed.  If the NUMA node from which the access originated is
+known, it should be passed in <tt>nid</tt>; otherwise the caller should
+pick a top-tier node to identify here.  The time of the access, if known,
+is passed in <tt>time</tt>.  The <tt>src</tt> parameter describes the
+source of this information — how the activity on the given page was
+detected.  It should be one of <tt>PGHOT_HW_HINTS</tt> (activity reported
+by the hardware), <tt>PGHOT_PGTABLE_SCAN</tt> (obtained by scanning page
+tables), or <tt>PGHOT_HINT_FAULT</tt> (a page fault).
+<p>
+The way this data is managed has changed in this version of the patch set,
+which now maintains a single <tt>long int</tt> value for each page being
+tracked.  That is a significant amount of overhead in a kernel where
+efforts are being made to squeeze every bit out of <tt>struct page</tt>,
+but it is significantly reduced from previous versions.  That integer value
+is split into four fields containing a NUMA node ID, an access count, the
+time of last report, and a "should be promoted" flag.
+<p>
+When a new report comes in, <tt>pghot_record_access()</tt> looks at the
+existing information for the indicated page.  If the NUMA node stored there
+differs from the node passed to this call, or if the time since the last
+reported access exceeds a threshold, old data will be discarded and the
+access count set to one, attributed to the indicated <tt>nid</tt>.
+Otherwise, the existing access count will be incremented (unless that would
+cause it to overflow).  If the access count exceeds another threshold
+(wired to two in this series), the sign bit will be set as an indicator
+that the page is hot and should be moved to a faster tier.
+<p>
+Also part of this series is a new kernel thread that occasionally scans the
+hotness data and attempts to promote the pages that have been marked as
+active.  There is a set of sysctl knobs that the administrator can use to
+control which types of hotness data should be accepted.  Another new kernel
+thread performs page-table scanning, noting which pages are accessed and
+reporting that information so that the hot pages can be promoted.
+<p>
+The benchmark results included with the series seem somewhat inconclusive,
+showing some improvements and some significant regressions.  This series
+might be converging on an approach that will pass muster, but there is
+still clearly work to be done.
+<p>
+<h4>Specific-purpose nodes</h4>
+<p>
+As a general rule, if a NUMA node presents memory to the system, that
+memory becomes freely available for the kernel, and eventually user space,
+to use as it will.  The list of nodes that a process can be allocated can
+be restricted with the kernel's <a
+href="https://man7.org/linux/man-pages/man2/set_mempolicy.2.html">memory-policy
+API</a> or the <a
+href="https://man7.org/linux/man-pages/man7/cpuset.7.html">cpuset
+mechanism</a>, but the default is to allocate memory globally.  That
+approach does not work well in the presence of memory that has special
+characteristics that make it unsuitable for general use.  Gregory Price is
+looking to address that problem with the concept of <a
+href="/ml/all/20251112192936.2574429-1-gourry@gourry.net">specific-purpose
+memory NUMA nodes</a>, which would host memory that is not generally
+available for use as system RAM.
+<p>
+As an example of the type of node he is planning for, he mentions a
+compressed-memory node.  This could be a <a
+href="https://en.wikipedia.org/wiki/Compute_Express_Link">CXL</a>-attached
+device that automatically compresses pages written to it, and decompresses
+them when they are read back.  It would work well as a sort of swap device
+but, since data stored there is essentially read-only, this memory is not
+suitable for use as ordinary system RAM.  This node could be marked as a
+specific-purpose node when it is added to the system; <a
+href="/ml/all/20251112192936.2574429-12-gourry@gourry.net">a modified
+version of zswap</a> could allocate pages from it and swap data there, but
+that node's memory would not be available for most allocation requests.
+<p>
+The implementation of this concept is simple and clearly not intended to be
+the complete solution.  When added to the system, a memory node can be
+marked as either "sysram" (ordinary memory) or "specific-purpose"; that
+designation cannot be changed during the life of the system.  The sysram
+nodes are collected into a list and used to satisfy normal allocation
+requests.  To obtain memory from a specific-purpose node, a kernel function
+must specify that node explicitly in its allocation request and provide the
+new <tt>__GFP_SPM_NODE</tt> allocation flag.  There is no way to directly
+allocate specific-purpose memory from user space.
+<p>
+That is about as far as the series goes; a few things are missing still.
+For example, while a node can be marked as specific-purpose, there is no
+way to indicated <i>which</i> of many possible purposes the memory is
+specific to.  The zswap implementation simply takes the first
+specific-purpose node it finds and assumes it will be of the right type.
+There has also not yet been effort put into implementing basic
+memory-management functions like reclaim and compaction on specific-purpose
+memory.
+<p>
+The purpose of this patch set is clearly to get a conversation started on
+how nonstandard types of memory should be handled in the kernel.  Price has
+<a href="https://lpc.events/event/19/contributions/2143/">a proposed
+session</a> at the upcoming <a href="https://lpc.events/">Linux Plumbers
+Conference</a> that will try to push some of these ideas forward.  Thus,
+further developments can presumably be expected in December.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Tiered-memory systems</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1046249/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1046982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory overhead of hot page tracking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2025 7:59 UTC (Wed)
+                               by <b>bharata</b> (subscriber, #7885)
+                              [<a href="/Articles/1046982/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bharata" />
+                <input type="hidden" name="return" value="/Articles/1046249/#CommAnchor1046982" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; ... which now maintains a single long int value for each page being tracked. That is a significant amount of overhead in a kernel where efforts are being made to squeeze every bit out of struct page, but it is significantly reduced from previous versions.</span><br>
+<p>
+One unsigned long for one page frame to track hotness but only allocated for lower tier nodes. And also not part of struct page but  allocated per section in mem_section.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

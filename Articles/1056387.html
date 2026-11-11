@@ -1,0 +1,431 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>API changes for the futex robust list [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="API changes for the futex robust list">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The robust futex kernel API is a way for a user-space program to ensure that the locks it holds [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1056418/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>API changes for the futex robust list</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>February 4, 2026</br>
+           <hr>
+<a href="../Archives/ConferenceIndex/index.html">LPC</a>
+</div>
+<p>
+The <a href="https://docs.kernel.org/locking/robust-futex-ABI.html">robust
+futex kernel API</a> is a way for a user-space program to ensure that the
+locks it holds are properly cleaned up when it exits.  But the API suffers
+from a number of different problems, as André Almeida described in a <a
+href="https://lpc.events/event/19/contributions/2108/">session</a> in the
+<a href="https://lpc.events/event/19/sessions/225/#20251213">"Gaming on
+Linux" microconference</a> at the 2025 Linux Plumbers Conference in Tokyo.
+He had some ideas for a new API that would solve many of those problems,
+which he wanted to discuss with attendees; there is a
+difficult-to-trigger race condition that he wanted to talk about too.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+"<q>Some years ago, I made a new API for futex</q>", Almeida said to start
+things off, "<q>so why not do a new API for robust list as well?</q>" The
+<a href="823513.html">new futex API</a> that he was referring to was
+merged for 5.16 in 2022 in the form of the <tt>futex_waitv()</tt> system
+call (<a
+href="https://www.kernel.org/doc/html/latest/userspace-api/futex2.html">documentation</a>). Some
+<a href="940944.html">further pieces of the futex2 API</a> were
+released with Linux 6.7 in 2024.
+</p>
+
+<a href="/Articles/1057093/">
+<img src="../_static/images/2026/lpc-almeida-sm.png" border=0 hspace=5 align="left"
+alt="[André Almeida]" title="André Almeida" width=222 height=280>
+</a>
+
+<p>
+The ABI for games on the <a
+href="https://store.steampowered.com/steamos">SteamOS distribution</a>,
+where much of the work in gaming on Linux is being done, is Windows on the x86
+architecture.  The games are mostly built for that ABI, but SteamOS also
+runs on Arm64, which leads to "<q>a lot of interesting challenges</q>".  It
+adds the <a href="https://fex-emu.com/">FEX emulator</a> to run x86
+binaries on the Arm64 processor in addition to the <a
+href="https://github.com/ValveSoftware/Proton?tab=readme-ov-file#introduction">Proton
+compatibility layer</a> that provides the Windows ABI.  That has
+implications for various kernel areas, including futexes, memory
+management, and filesystems.
+</p>
+
+<p>
+FEX is a just-in-time (JIT) compiler for turning x86 instructions, for both
+32 and 64 bits, into Arm64
+machine code.  As part of that, when it finds a <tt>syscall</tt>
+instruction, it needs to translate that to the Arm64 system call, but that
+does not work well for some x86-32 system calls.  The FEX project has a <a
+href="https://wiki.fex-emu.com/index.php/Development:32Bit_Syscall_Woes">wiki
+page describing the problematic calls</a>, one of which is <a
+href="https://www.man7.org/linux/man-pages/man2/set_robust_list.2.html"><tt>set_robust_list()</tt></a>. 
+</p>
+
+<p>
+<tt>set_robust_list()</tt> is used to avoid problems when a futex holder dies before releasing the
+lock, which will starve any other threads waiting on it.  So, when a thread
+takes a lock, it can add the lock to the robust list, which is a linked list
+maintained in user space.  The thread informs the kernel where the head of
+the list is using <tt>set_robust_list()</tt>.  The exit path for a thread in the kernel uses that
+information to wake all of the threads waiting for each futex on the list;
+it also adds the <tt>FUTEX_OWNER_DIED</tt> mark to each futex.  One other
+wrinkle that he mentioned is that a futex can be put into a "pending" field
+on the list head while an operation (taking or releasing the lock) is being
+done, but before the linked list has been updated, so
+that it can be cleaned up if a crash happens in that window.
+</p>
+
+<h4>Why?</h4>
+
+<p>
+A new API is needed for several reasons, he said.  The first is that,
+unlike x86, Arm64 does not have both 32- and 64-bit system calls, so
+emulating 32-bit applications is difficult—the "compat" system calls are
+missing.  For example, a 32-bit robust list cannot be handled by the 64-bit
+system call because it cannot parse the list due to the different pointer
+size.  There is a need for the new interface to allow user space to inform
+the kernel whether it is a 32- or 64-bit robust list so that the kernel can
+parse the list correctly.
+</p>
+
+<p>
+Another shortcoming of the existing interface is that only one robust list
+can be set for a thread, but FEX also wants to use robust futexes.  If the
+application uses them, FEX has to choose which one gets that access.  A
+new interface would provide a way to set multiple list heads for a thread.
+</p>
+
+<p>
+There is currently a limit of 2048 entries on a robust list that will be
+processed by the kernel, which is meant to avoid getting trapped in an
+infinite loop.  But that limit was never documented as part of the API, so
+user-space programs are unaware of it, which led to a <a
+href="https://sourceware.org/bugzilla/show_bug.cgi?id=19089">bug report</a>
+for the GNU C library.  With a new API, either the limit should be
+documented and exposed as part of the API or it should be made limitless
+using countermeasures against circular lists, he said.
+</p>
+
+<p>
+The final problem is "<q>much more interesting</q>" but "<q>kind of tricky
+to explain</q>"; it is a race condition that can occur when a futex is
+being unlocked.  The normal sequence for unlocking a robust futex is as
+follows:
+<ol class="spacylist">
+<li>The address of the futex is put into the pending slot of the robust
+list
+<li>The futex is removed from the robust list
+<li>The low-level unlock is done, which clears the futex and wakes any
+threads waiting on it
+<li>The pending slot is cleared
+</ol>
+Between steps three and four, though, another thread can decide to free the
+futex because it appears to be the only user of the futex. That thread could then allocate memory in
+the same location as the former futex.  Then the original thread, which is
+about to perform step four, dies, which causes the kernel to write
+<tt>FUTEX_OWNER_DIED</tt> in the futex, thus corrupting some random memory.
+It is difficult to reproduce, but it <a
+href="https://sourceware.org/bugzilla/show_bug.cgi?id=14485">does happen</a>.
+</p>
+
+<p>
+Almeida said that he is unsure how to address this.  Perhaps serializing
+the exit path with all of the <a
+href="https://www.man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt>
+and <tt>munmap()</tt></a> calls made by the thread is a possibility.
+Another idea might be to change the API around the pending field somehow to
+avoid the race.  The previous day he had participated in the <a
+href="https://lpc.events/event/19/sessions/229/#20251212">extensible
+scheduler class (sched_ext) microconference</a>, which got him thinking
+that perhaps a specialized scheduler could be written to reproduce the
+problem reliably; that would help in the fixing process and could be turned
+into a test case as well.
+</p>
+
+<h4>New API</h4>
+
+<p>
+The API he proposed in the session seems to have evolved somewhat since his
+<a
+href="/ml/all/20251122-tonyk-robust_futex-v6-0-05fea005a0fd@igalia.com/">v6
+patch set posting</a> in November 2025 (a few weeks before LPC).  It
+consists of two new system calls:
+<pre>
+    set_robust_list2(struct robust_list_head *head, unsigned int index,
+                     unsigned int cmd, unsigned int flags);
+                     
+    get_robust_list2(int pid, void **head_ptr,
+                     unsigned int index, unsigned int flags);
+</pre>
+The <tt>index</tt> argument is used to distinguish between different lists
+so that libraries and applications can have their own lists.  The
+<tt>cmd</tt> argument to <tt>set_robust_list2()</tt> can be <tt>CREATE_LIST_32</tt> (or 64) to
+create a list of the appropriate "bitness" using the <tt>head</tt> pointer;
+in that case, the call returns an unused index that is associated with the
+list.  A list can be overwritten using the <tt>SET_LIST_32</tt> (or 64)
+command by passing the index of interest.  The <tt>LIST_LIMIT</tt> command
+returns the number of lists supported for each task. (All of the command
+names will presumably have <tt>FUTEX_ROBUST_LIST_CMD_</tt> as part of their
+full name.)  <tt>get_robust_list2()</tt> will simply return the head of the
+robust list (in <tt>head_ptr</tt>) for a given <tt>pid</tt> and
+<tt>index</tt>.
+</p>
+
+<h4>Discussion</h4>
+
+<p>
+After that, Almeida opened the floor to questions and comments.  Liam
+Howlett noted that the exit path for robust lists requires a delay to the
+out-of-memory (OOM) handling in the kernel, so the race condition could be
+more easily reproduced by setting the OOM-handler delay to zero and
+triggering an OOM-kill of the task.  While that may be true, glibc
+maintainer Carlos O'Donell said, it does not really lead to a solution to
+the race, which both he and Rich Felker of the <a
+href="https://musl.libc.org/">musl libc project</a> have looked at.  If
+there is going to be a new API, it is a "<q>perfect opportunity</q>" to sit
+down and figure out a proper solution and also determine how existing C
+libraries can transition to the new interface over time.
+</p>
+
+<p>
+"<q>It gets worse</q>", Howlett said.  Tasks that are exiting can be frozen
+by the control-group subsystem, which means that the OOM handler has to
+wait potentially forever before it can clean things up.  That is another
+piece that should be unwound as part of the process of creating the new
+API, he said.
+</p>
+
+<p>
+O'Donell said that it made sense that users of the new API will need to be
+able to register the number of bits in the structure that is being shared
+with the kernel.  He asked if sizes other than 32
+or 64 bits should be considered, but Howlett pointed out that there is an
+unused <tt>flags</tt> argument in the proposed API, which could be used if
+needed. 
+</p>
+
+<p>
+The conversation turned back to the delay for the OOM handler, which no one
+seemed to fully understand.  O'Donell wondered if it was an attempt to fix
+the race condition that Almeida is concerned about when it arose in some
+other context.  Howlett said that he believed it was meant to hold off the
+OOM killer from freeing memory holding the locks before the exit-handling
+code could process the robust list. Sebastian Siewior said that he was not
+clear on why the delay was added, either, but would put it on his list to
+look into.
+</p>
+
+<p>
+There was some further discussion of why and how the OOM-killer delay came
+about, but the session ran out of time.  Interested readers may want to
+consult the <a href="https://www.youtube.com/watch?v=BV2DJoXLUrw">YouTube
+video</a> and <a
+href="https://lpc.events/event/19/contributions/2108/attachments/1947/4170/robust-futex.pdf">slides</a>
+from the talk.  Overall, participants seemed to agree that the new API was
+needed, and no real complaints about its proposed form were heard, but
+there are obviously still some details to be worked out before it can go
+upstream. 
+</p>
+
+<p>
+[ I would like to thank our travel sponsor, the Linux Foundation, for
+assistance with my travel to Tokyo for Linux Plumbers Conference. ]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Futex</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Linux Plumbers Conference/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1056387/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1057293"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">how about endianness swapping versions?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2026 19:00 UTC (Wed)
+                               by <b>pm215</b> (subscriber, #98099)
+                              [<a href="/Articles/1057293/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pm215" />
+                <input type="hidden" name="return" value="/Articles/1056387/#CommAnchor1057293" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't suppose we can get variants of CREATE_LIST_{32,64} that say "data structure is the opposite endianness to the kernel's natural one" ? :). QEMU linux-user mode also doesn't emulate set_robust_list because of the problem with the guest's idea of the data structure layout potentially not matching the kernel's, but we also have the case of "big endian guest on little endian host" and vice versa...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057293/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1057296"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cooperation between multiple userspace runtimes?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2026 19:53 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1057296/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1056387/#CommAnchor1057296" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Are there any efforts trying to figure out how to coordinate between multiple prospective users of the robust list? As far as I can tell, you can only have one per thread, and libc doesn't provide any way to integrate with theirs when using futex natively rather than via libc's locks.<br>
+<p>
+By contrast, as I understand it, a great deal of effort went into a userspace ABI that supports multiple users of rseq.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057296/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057297"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cooperation between multiple userspace runtimes?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2026 20:11 UTC (Wed)
+                               by <b>pm215</b> (subscriber, #98099)
+                              [<a href="/Articles/1057297/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pm215" />
+                <input type="hidden" name="return" value="/Articles/1056387/#CommAnchor1057297" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The new API seems to give multiple lists per thread, and the CREATE_LIST operation causes the kernel to return the index of some not currently used list, so I think that means different users don't need to cooperate -- the only restriction is that you can't have more than some fixed number (6? 8? 10?) of such independent users of a robust-list.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057297/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057299"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cooperation between multiple userspace runtimes?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2026 20:21 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1057299/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1056387/#CommAnchor1057299" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+...apparently I should read more closely, thank you. That's exactly what I was looking for, and that sounds perfect.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057299/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

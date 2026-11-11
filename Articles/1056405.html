@@ -1,0 +1,567 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Modernizing swapping: introducing the swap table [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Modernizing swapping: introducing the swap table">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's swap subsystem is a complex and often unloved beast.  It is also a critical compon [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1056418/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Modernizing swapping: introducing the swap table</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 2, 2026</br>
+           </div>
+The kernel's swap subsystem is a complex and often unloved beast.  It is
+also a critical component in the memory-management subsystem and has a
+significant impact on the performance of the system as a whole.  At the
+2025 Linux Storage, Filesystem, Memory-Management and BPF Summit, Kairui
+Song <a href="1016136.html">outlined a plan</a> to simplify and
+optimize the kernel's swap code.  A <a
+href="/ml/all/20250916160100.31545-1-ryncsn@gmail.com/">first installment
+of that work</a>, written with help from Chris Li, was merged for the 6.18
+release.  This article will catch up with the 6.18 work, setting the stage
+for a future look at the changes that are yet to be merged.
+<p>
+In a virtual-memory system, memory shortages must be addressed by
+reclaiming RAM and, if necessary, writing its contents to the appropriate
+persistent backing store.  For file-backed memory, the file itself is that
+backing store.  Anonymous memory — the memory that holds the variables and
+data structures used by a process — lacks that natural backing store,
+though.  That is where the swap subsystem comes in: it provides a place to
+write anonymous pages when the memory they occupy is needed for other uses.
+Swapping allows unused (or seldom-used) pages to be pushed out to slower
+storage, making the system's RAM available for data that is currently in
+use. 
+<p>
+<!-- middle-ad -->
+<h4>A quick swap-subsystem primer</h4>
+<p>
+A full description of the kernel's swap subsystem would be lengthy indeed;
+there is a lot of complexity, much of which has built up over time.  What
+follows is a partial, simplified overview of how the swap subsystem looked
+in the 6.17 kernel, which can then be used as a base for understanding the
+subsequent changes.
+<p>
+The swap subsystem uses one or more swap files, which can be either
+partitions on a storage device or ordinary files within a filesystem.
+Inside the kernel, active swap files are described by <a
+href="https://elixir.bootlin.com/linux/v6.17.13/source/include/linux/swap.h#L294"><tt>struct
+swap_info_struct</tt></a>, but are usually referred to using a simple
+integer index instead.  Each file is divided into page-sized slots; any
+given slot in the kernel's swap areas can be identified using the <a
+href="https://elixir.bootlin.com/linux/v6.17.13/source/include/linux/mm_types.h#L285"><tt>swp_entry_t</tt></a>
+type:
+<p>
+<pre>
+    typedef struct {
+	unsigned long val;
+    } swp_entry_t;
+</pre>
+<p>
+This <tt>long</tt> value is divided into two fields: the upper six bits are
+the index number of the swap file (which, for extra clarity, is called the
+"type" in the swap code), and the rest is the slot number within the file.
+There is <a
+href="https://elixir.bootlin.com/linux/v6.17.13/source/include/linux/swapops.h#L83">a
+set of simple functions</a> used to create swap entries and get the
+relevant information back out.
+<p>
+Note that the above describes the architecture-independent form of the swap
+entry; each architecture will also have an architecture-dependent version
+that is used in page-table entries.  Curious readers can look at <a
+href="https://elixir.bootlin.com/linux/v6.18.6/source/arch/x86/include/asm/pgtable_64.h#L183">the
+x86_64 macros</a> that convert between the two formats.  Within the swap
+subsystem itself, though, the architecture-independent version of the swap
+entry is used.
+<p>
+An overly simplified description of swapping would be something like: when
+the memory-management subsystem decides to reclaim an anonymous page, it
+selects a swap slot, writes the page's contents into that slot, then stores
+the associated swap entry in the page-table entry (using the
+architecture-dependent format) with the "present" bit
+cleared.  The next attempt to reference that page will result in a page
+fault; the kernel will see the swap entry, allocate a new page, read the
+contents from the swap file, then update the page-table entry accordingly.
+<p>
+The truth of the matter is that things are rather more complex than that.
+For example, writing a page to the swap file takes time, and the page
+itself cannot be reclaimed until the write is complete.  So, when the
+reclaim decision is made, the page is put into the swap cache, which is, in
+many ways, the analog of the page cache used for file-backed pages.  Saying
+that a page is in the swap cache really only means that a swap entry has
+been assigned; the page itself may or may not still be resident in RAM.  If
+a fault happens on that page while the writing process is underway, that
+page can be quickly reactivated, despite being in the swap cache.
+<p>
+All of this means that the swap subsystem has to keep track of the status
+of every page in the swap cache, and that status involves more than just
+the swap slot that was assigned.  To that end, in kernels prior to 6.18,
+the swap subsystem maintained an array called <a
+href="https://elixir.bootlin.com/linux/v6.17.13/source/mm/swap_state.c#L39"><tt>swapper_spaces</tt></a>
+that contained pointers to arrays of <a
+href="https://elixir.bootlin.com/linux/v6.17.13/source/include/linux/fs.h#L485"><tt>address_space</tt></a>
+structures.  That structure is used to maintain the mapping between an
+address space (the bytes of a file, or the slots of a swap file) and the
+storage that backs up that space.  It provides a set of operations that can
+be used to move pages between RAM and that backing store.  Using <tt>struct
+address_space</tt> means, among other things, that much of the code that
+works with the page cache can also operate with the swap cache.
+<p>
+Another reason to use <tt>struct address_space</tt> is the <a
+href="https://docs.kernel.org/core-api/xarray.html">XArray</a> data
+structure associated with it.  For a swap file, that data structure
+contains the current status of each slot in the file, which can be any of:
+<p>
+<ul class="spacylist">
+<li> The slot is empty.
+<li> There is a page assigned to the slot, but that page is also resident
+     in RAM; in that case, the XArray entry is a pointer to the page
+     (more precisely, the folio containing the page) itself.
+<li> There is a page assigned, but it exists only in the swap file.  In
+     that case, the entry contains "shadow" information used by the
+     memory-management system to detect pages that are quickly faulted in
+     after being swapped out.  (See <a href="495543.html">this 2012
+     article</a> for an overview of this mechanism).
+</ul>
+<p>
+For extra fun, there is not a single <tt>address_space</tt> structure and
+XArray for each swap file.  Instead, the file is divided into 64MB chunks,
+and a separate <tt>address_space</tt> structure is created for each.  This
+design helps to spread the management of swap entries across multiple
+XArrays, reducing contention and increasing scalability on larger systems
+where a lot of swapping is taking place.  The <tt>swapper_spaces</tt> entry
+for a swap file, thus, points to an array of <tt>address_space</tt>
+structures; a 1GB swap file, for example, would be managed with an array of
+16&nbsp;of these structures.
+
+<p>
+There is one more complication (for the purpose of this discussion — there
+are many others as well) in the management of swap slots.  Each swap device
+is also divided into a set of swap clusters, represented by <a
+href="https://elixir.bootlin.com/linux/v6.17.13/source/include/linux/swap.h#L238"><tt>struct
+swap_cluster_info</tt></a>; these clusters are usually 2MB in size.  Swap
+clusters make the management of swap files more scalable; each CPU in the
+system maintains a cache of swap clusters that have been assigned to it.
+The associated swap entries can then be managed entirely locally to the
+CPU, with cross-CPU access only needed when clusters must be allocated or
+freed.  Swap clusters reduce the amount of scanning of the global swap map
+needed to work with swap entries, but the appropriate XArray must still be
+used to obtain or modify the status of a given slot.
+<p>
+<h4>The swap table</h4>
+<p>
+With that background in place, it is possible to look at the changes made
+for 6.18.  They start with the understanding that the swap-subsystem code
+that deals with swap entries already has access to the swap clusters those
+entries belong to.  Keeping the status information with the clusters would
+allow the elimination of the XArrays, which can be replaced with simple C
+arrays of swap entries.  The smaller granularity of the swap clusters
+serves to further localize the management of swap entries, which should
+improve scalability.
+<p>
+So the phase-1 patch set augments the <tt>swap_cluster_info</tt> structure;
+the <a
+href="https://elixir.bootlin.com/linux/v6.19-rc5/source/mm/swap.h#L21">post-6.17
+version of that structure</a> contains a new array pointer:
+<p>
+<pre>
+    atomic_long_t __rcu *table;
+</pre>
+<p>
+The new <tt>table</tt> array, which is designed to occupy exactly one page
+on most architectures, is allocated dynamically, reducing the swap
+subsystem's memory use when the swap files are not full.  Each entry in the
+table is the same <tt>swp_entry_t</tt> value seen above, describing the
+status of one page in the swap cache.  The swap code has been
+reworked to use this new organization, with many of the internal APIs
+needing minimal or no changes.
+
+The arrays of <tt>address_space</tt> structures covering 64MB each are
+gone; the XArrays are no longer needed, and the address-space operations
+can be provided by a single structure, called <a
+href="https://elixir.bootlin.com/linux/v6.19-rc5/source/mm/swap.h#L201"><tt>swap_space</tt></a>.
+<p>
+In summary, where the kernel previously
+divided swap areas using two independent clustering mechanisms (the
+<tt>address_space</tt> structures and the swap clusters), now it only has
+one clustering scheme that increases the locality of many swap operations. 
+The end result, at this stage, is "<q>up to ~5-20% performance gain in
+throughput, RPS or build time for benchmark and workload tests</q>",
+according to Song.  This speed improvement is entirely due to the removal
+of the XArray lookups and the reduction in contention that comes from
+managing swap space in smaller chunks.
+<p>
+That is the state of affairs as of 6.18.  As significant as this change is,
+it is only the beginning of the project to simplify and improve the
+kernel's swap code.  The 6.19 kernel did not significantly advance this
+work, but there are two other installments under consideration, one of
+which is seemingly poised for the 7.0 release.  Those changes will be
+covered in the <a href="/Articles/1057102/">second part of this series</a>.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Swapping</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1056405/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1056951"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">heh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2026 17:40 UTC (Mon)
+                               by <b>mattdm</b> (subscriber, #18)
+                              [<a href="/Articles/1056951/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mattdm" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1056951" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"for extra clarity"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056951/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">heh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 1:13 UTC (Tue)
+                               by <b>csamuel</b> (<b>&#x272D; supporter &#x272D;</b>, #2624)
+                              [<a href="/Articles/1056972/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="csamuel" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1056972" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's a great article - I also liked "There is one more complication (for the purpose of this discussion — there are many others as well)".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1056975"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">heh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 8:32 UTC (Tue)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/1056975/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sdalley" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1056975" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"For extra fun" is delightful too...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056975/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1056974"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Squeezing out complexity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 4:18 UTC (Tue)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/1056974/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="raven667" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1056974" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I love a good refactor which thoroughly understands the problem and the implementation, then removes all the added complexity which accretes after many years of targeted low-risk changes, ripping out redundant layers and leaving with something faster and simpler than before which better fits the system around it that it supports.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056974/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056976"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Squeezing out complexity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 9:16 UTC (Tue)
+                               by <b>dottedmag</b> (subscriber, #18590)
+                              [<a href="/Articles/1056976/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dottedmag" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1056976" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even better when one realizes that the underlying hardware has changed, so multiple assumptions that were held at the beginning are no longer true: a double fun of software archeaology and design.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056976/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1056983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamic allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 14:12 UTC (Tue)
+                               by <b>MKesper</b> (subscriber, #38539)
+                              [<a href="/Articles/1056983/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MKesper" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1056983" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The new table array, which is designed to occupy exactly one page on most architectures, is allocated dynamically, reducing the swap subsystem's memory use when the swap files are not full. <br>
+<p>
+Could there be a situation where the array needs to be resized and there's no place left in RAM for that?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057041"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamic allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 14:21 UTC (Tue)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1057041/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1057041" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I had that same thought while reviewing the article! Jon's take was that if the system has already ended up in a state where it can't free even a single page of memory in order to make several more available, the situation is already probably pretty dire.<br>
+<p>
+In practice, if the system has swap configured, it's going to want to swap out some pages of memory before it tries unloading file-backed pages that are currently in use; therefore, if this mechanism does need another page urgently, it can bump a file-backed page, finish swapping out the anonymous pages, and then let the file-backed page get faulted back in.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057041/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057087"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Where is the decision to allocate a swap table made?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 16:04 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1057087/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1057087" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Do you know where the decision to allocate the table is made?
+<p>I'm wondering if the kernel is able to promise that it starts swapping (if there's swap configured) before it's down to its last clean or free page - so that it never actually gets into the situation where it can't allocate a page of physical memory to allow it to free up more by swapping, because in the worst case, it can do the file-backed page dance you describe.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057087/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057092"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Where is the decision to allocate a swap table made?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 17:13 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1057092/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1057092" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The kernel will start reclaim <i>long</i> before it gets to that last free page.  There are watermark levels that it tries to never go below.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057092/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1057114"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamic allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2026 23:24 UTC (Tue)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1057114/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1056405/#CommAnchor1057114" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel generally needs some memory available in order to tell a storage device to write something (even if the something to write is already in place and it's just writing out a dirty file-backed page in cache so that it can free it), so it's got memory reserved for that sort of thing. Presumably, resizing the array gets access to this reserved memory as well, so that it can expand some and swap out more than that so that the memory reservation is restored.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057114/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

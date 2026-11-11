@@ -1,0 +1,170 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Driver porting: mutual exclusion with seqlocks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Driver porting: mutual exclusion with seqlocks">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" This article is part of the LWN Porting Drivers to 2.6 series.   The 2.5.60 kernel added a new [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Driver porting: mutual exclusion with seqlocks</h1>
+<div class="Byline">[Posted February 14, 2003 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+<table class="tlr">
+<tr><td>This article is part of the LWN <a
+href="/Articles/driver-porting/">Porting Drivers to 2.6 series</a>.
+</td></tr></table>
+
+The 2.5.60 kernel added a new type of lock called a "seqlock."  Seqlocks
+are a specialized primitive intended for the following sort of situation:
+<p>
+<ul>
+<li> A small amount of data is to be protected.
+<li> That data is simple (no pointers), and is frequently accessed.
+<li> Access to the data does not create side effects.
+<li> It is important that writers not be starved for access.
+</ul>
+<p>
+The situation for which seqlocks were originally designed is to control
+access to system time variables - <tt>jiffies_64</tt> and <tt>xtime</tt>.
+Those variables are constantly being read, so that action should be fast.
+It is also important, however, that the update of those variables, which
+happens in the timer interrupt, not have to wait while the readers clear
+out. 
+<p>
+Seqlocks consist of a regular spinlock and an integer "sequence" count.
+They may be declared and initialized in two ways, as follows:
+<p>
+<pre>
+    #include &lt;linux/seqlock.h&gt;
+
+    seqlock_t lock1 = SEQLOCK_UNLOCKED;
+    seqlock_t lock2;
+
+    seqlock_init(&amp;lock2);
+</pre>
+<p>
+Writers must take out exclusive access before making changes to the
+protected data.  The usual series of events is something like:
+<p>
+<pre>
+    seqlock_t the_lock = SEQLOCK_UNLOCKED;
+    /* ... */
+
+    write_seqlock(&amp;the_lock);
+    /* Make changes here */
+    write_sequnlock(&amp;the_lock);
+</pre>
+<p>
+
+The call to <tt>write_seqlock()</tt> locks the spinlock and increments the
+sequence number.  When the work is done, <tt>write_sequnlock()</tt>
+increments the sequence number again, then releases the spinlock.
+<p>
+Read access to the data uses no locking at all; instead, the reader uses
+the lock's sequence number to detect access collisions with a writer and
+retry the read if necessary.  The code tends to look like:
+<p>
+<pre>
+    unsigned int seq;
+
+    do {
+        seq = read_seqbegin(&amp;the_lock);
+	/* Make a copy of the data of interest */
+    } while read_seqretry(&amp;the_lock, seq);
+</pre>
+<p>
+
+The call to <tt>read_seqretry()</tt> makes a couple of simple checks.  If
+the initial sequence number obtained from <tt>read_seqbegin()</tt> is odd,
+it means that a writer was in the middle of updating the data when the
+reader began reading.  If the initial number does not match the seqlock's
+sequence number at the end, then a writer showed up in the middle of the
+process.  Either way, the data obtained could be inconsistent, and the
+reader must go around and try again.  In the most common case, though, no
+collision will occur, and the reader gets very fast access with no locking
+or retries required. 
+<p>
+Of course, the usual variants on the locking primitives exist for exclusion
+of local interrupts or bottom halves; for reference, here's the full set:
+<p>
+<pre>
+    void write_seqlock(seqlock_t *sl);
+    void write_sequnlock(seqlock_t *sl);
+    int write_tryseqlock(seqlock_t *sl);
+    void write_seqlock_irqsave(seqlock_t *sl, long flags);
+    void write_sequnlock_irqrestore(seqlock_t *sl, long flags);
+    void write_seqlock_irq(seqlock_t *sl);
+    void write_sequnlock_irq(seqlock_t *sl);
+    void write_seqlock_bh(seqlock_t *sl);
+    void write_sequnlock_bh(seqlock_t *sl);
+
+    unsigned int read_seqbegin(seqlock_t *sl);
+    int read_seqretry(seqlock_t *sl, unsigned int iv);
+    unsigned int read_seqbegin_irqsave(seqlock_t *sl, long flags);
+    int read_seqretry_irqrestore(seqlock_t *sl, unsigned int iv, long flags);
+</pre><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Locking mechanisms/seqlocks</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/22818/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2003, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

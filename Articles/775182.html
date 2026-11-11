@@ -1,0 +1,977 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Handling the Kubernetes symbolic link vulnerability [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Handling the Kubernetes symbolic link vulnerability">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" A year-old bug in Kubernetes was the topic of a talk given by Michelle Au and Jan Šafránek at  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/774838/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Handling the Kubernetes symbolic link vulnerability</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>December 19, 2018</br>
+           <hr>
+<a href="../Archives/ConferenceByYear/index.html">KubeCon NA</a>
+</div>
+<p>
+A year-old bug in <a href="https://kubernetes.io/">Kubernetes</a> was the
+topic of a talk given by Michelle Au and Jan Šafránek at <a
+href="https://events.linuxfoundation.org/events/kubecon-cloudnativecon-north-america-2018/">KubeCon
++ CloudNativeCon North America</a>, which was held mid-December in
+Seattle.  In the talk, they looked at the details of the bug and the
+response from the Kubernetes <a
+href="https://github.com/kubernetes/sig-release/blob/master/security-release-process-documentation/security-release-process.md#product-security-team-pst">product 
+security team</a> (PST).  While the bug was fairly straightforward, it was
+surprisingly hard to fix.  The whole process also provided experience that
+will help improve vulnerability handling in the future.
+</p>
+
+<p>
+The Kubernetes project first became aware of the problem from a GitHub
+issue that was created on November&nbsp;30, 2017.  It gave full detail of the
+bug and was posted publicly.  That is <i>not</i> the proper channel for
+reporting Kubernetes security bugs, Au stressed.  Luckily, a security team
+member saw the bug report and cleared out all of the details, moving it to
+a private issue tracker.  There is a <a
+href="https://kubernetes.io/docs/reference/issues-security/security/">documented
+disclosure process</a> for the project that anyone finding a security
+problem should follow, she said.
+</p>
+
+<h4>Background</h4>
+
+<a href="/Articles/775236/">
+<img src="../_static/images/2018/kc-safranek-sm.jpg" border=0 hspace=5 align="right"
+alt="[Jan Šafránek]" title="Jan Šafránek" width=227 height=280>
+</a>
+
+<p>
+In order to understand the bug, some background on volumes in Kubernetes is
+needed, much of which can also be found in a <a
+href="https://kubernetes.io/blog/2018/04/04/fixing-subpath-volume-vulnerability/">blog 
+post</a> by Au and Šafránek.  They put up an example pod spec (which can be
+seen in the <a 
+href="https://schd.ws/hosted_files/kccna18/5f/KubeCon_2018_NA-Subpath.pdf">slides
+[PDF]</a>) that was using a volume.  When that pod gets scheduled to a
+node, the volume will be mounted so that containers in the pod can access
+it.  Each 
+container can specify where the volume will be mounted inside the
+container.
+A directory is created on the host filesystem where the volume is mounted.
+</p>
+
+<p>
+When the container starts, the <a
+href="https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/">kubelet</a>
+node manager
+needs to tell the container runtime about the volume; both the host
+filesystem path and the location in the container where it should be bind
+mounted are needed.  In addition, a container can specify a subdirectory of the
+location where the volume is mounted in the container using the <a href="https://kubernetes.io/docs/concepts/storage/volumes/#using-subpath"><tt>subPath</tt>
+directive</a>.  But <tt>subPath</tt> was subject to a classic symbolic-link
+race condition vulnerability.
+</p>
+
+<p>
+A container could symbolically link anything to a <tt>subPath</tt> name in
+its view of the volume.  A subsequent container that used the
+<tt>subPath</tt> name would be using a link controlled by the owner of the
+pod.  Those 
+links are resolved on the host, so linking the <tt>subPath</tt> name to
+<tt>/</tt> would provide access to the root directory on the <i>host</i>; game
+over.
+</p>
+
+<p>
+Šafránek demonstrated the flaw.  He showed that it allows access to the root
+directory of the host, which means that the whole node is compromised.  For
+example, it gives access to the Docker socket so an attacker can run
+anything in the containers, access any secrets used by the containers,
+and more.  All of that comes about because Kubernetes does not check for
+symbolic 
+links. 
+</p>
+
+<h4>Working out a solution</h4>
+
+<p>
+The problem was reported just before KubeCon Austin, so the PST
+brainstormed on solutions at that gathering.  The first,
+"naive", idea was simply to 
+resolve the full path, then validate that it still points inside the
+volume.  But there is a <a
+href="https://en.wikipedia.org/wiki/Time_of_check_to_time_of_use">time of
+check to time of use</a> (TOCTTOU) race condition in that scheme.  The user
+can modify the directories after the check but before they are handed to
+the container runtime.
+</p>
+
+<p>
+The next idea was to freeze the filesystem while validating the path and
+handing it to 
+the container runtime.  For Windows, <tt>CreateFile()</tt> can be used to
+lock each component of the path until after the runtime mounts it, but
+something different was needed for Linux.  Bind mounting the volume to some
+Kubernetes directory, outside of user control, and then handing that off is
+a safe 
+way to get it to the runtime, but it still leaves race conditions.  After
+any symbolic links are resolved and after the path has been validated to
+remain inside the volume are two points where a user could switch the path
+to contain a symbolic link.   
+</p>
+
+<p>
+The <tt>/proc</tt> filesystem contained a clue that was used for the actual
+solution that was implemented.  The links under <tt>/proc/PID/fd</tt> can
+reliably be used to bind mount a file descriptor corresponding to the final
+component of the <tt>subPath</tt>.  The volume directory is opened, then
+each component of the <tt>subPath</tt> is opened using <tt>openat()</tt>
+while disallowing following symbolic links and validating that the path is
+still within the volume.  The file descriptor file in <tt>/proc</tt> of the
+final component is then bind mounted to a safe location and handed off to
+the container runtime.  That eliminates the races and implements a scheme
+that is not dependent on the underlying filesystem type.  
+</p>
+
+<h4>Making the fix</h4>
+
+<p>
+It took a fair amount of time to get the fix out there; there were lots of
+end-to-end tests that needed to be developed and run on both Linux and
+Windows.  But, since Kubernetes is developed in the open, how could this fix be
+developed in secret?  The answer is that a separate repository,
+kubernetes-security, was used. Only the PST can normally access it, but the
+PST can
+give temporary access to those working on the fix.  Au and Šafránek lost their
+access after the fix was released; "we have no idea what's going on there
+now", Šafránek said.
+</p>
+
+<a href="/Articles/775235/">
+<img src="../_static/images/2018/kc-au-sm.jpg" border=0 hspace=5 align="left"
+alt="[Michelle Au]" title="Michelle Au" width=222 height=300>
+</a>
+
+<p>
+The development and testing process is similar to that of the open kubernetes
+repository, but the logs of tests and such for kubernetes-security go to a
+private bucket that only 
+Google employees can access.  Šafránek works for Red Hat in Europe, so sometimes
+he had to wait for Au, who works for Google in the US, to wake up so that
+he could find out what went wrong for a test run. 
+</p>
+
+<p>
+The flaw was disclosed to third-party Kubernetes vendors on the closed
+kubernetes-distributors-announce mailing list one week before it was publicly
+disclosed.  On March&nbsp;12, <a
+href="https://nvd.nist.gov/vuln/detail/CVE-2017-1002101">CVE-2017-1002101</a>
+was announced, which was roughly four months after it was reported.  Kubernetes
+1.7, 1.8, and 1.9 were updated and released on that day.  The timeline and
+more can be found in the public <a
+href="https://docs.google.com/document/d/1XpoBTLohci7HDyk1hrXg8hnENzbmLU6VymXDfoHo9NM">post-mortem
+document</a>.  
+</p>
+
+<p>
+Au went over some "best practices" for avoiding these kinds of problems.
+To start with, do not run containers as the root user; containers running
+as another user only have the same access as that user.  That
+can be enforced by using <a
+href="https://kubernetes.io/docs/concepts/policy/pod-security-policy/"><tt>PodSecurityPolicy</tt></a>,
+though containers will still run in the root group; the upcoming <a
+href="https://github.com/kubernetes/enhancements/issues/213"><tt>RunAsGroup</tt>
+feature</a> will address that shortcoming.  The security policy can also be
+used to restrict volume access, though that would not have helped for this
+particular vulnerability.
+</p>
+
+<p>
+Using sandboxed containers is something that is being investigated for
+future Kubernetes releases. Using <a
+href="https://github.com/google/gvisor">gVisor</a> or <a href="https://katacontainers.io/">Kata Containers</a> will provide another
+security boundary.  That is in keeping with a core principle that there
+should be at least two security barriers around untrusted code.  For this
+vulnerability, a sandbox could have prevented access to the host
+filesystem.  Au said she expects to see some movement on container
+sandboxes over the next 
+year or so. 
+</p>
+
+<p>
+She started her talk summary with a reminder to follow the project's security
+disclosure process.  She also suggested that Kubernetes and other projects be
+"extra cautious" when handling untrusted paths.  Symbolic-link races and
+TOCTTOU are well-known dangers in path handling.  In addition, she
+recommended setting restrictive security policies and using multiple
+security boundaries.
+</p>
+
+<p>
+In answer to a question, Au said that most of the four months was taken up
+by development and testing, some of which was slowed down by the
+end-of-year holiday break.  About two weeks were taken up with the actual
+release process.  When asked about what could improve for the next CVE, Šafránek
+said that getting access to the private logs is important; Au said that it
+is being worked on.  She also pointed to the post-mortem document as a good
+source for improvement ideas.
+</p>
+
+<p>
+[I would like to thank LWN's travel sponsor, The Linux Foundation, for
+assistance in traveling to Seattle for KubeCon NA.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Containers</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Vulnerability response</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">KubeCon NA/2018</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/775182/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor775252"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 19, 2018 21:33 UTC (Wed)
+                               by <b>jra</b> (subscriber, #55261)
+                              [<a href="/Articles/775252/">Link</a>] (19 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jra" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775252" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Over many years I've come to the conclusion that symlinks are a security nightmare whose utility is outweighed by the security problems they cause.<br>
+<p>
+At the very least Linux needs a flag bit that allows applications to tell syscalls to completely ignore symlinks and fail pathnames containing them. O_NOFOLLOW doesn't do what anyone wants it to do, unfortunately.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775252/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775258"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 19, 2018 22:02 UTC (Wed)
+                               by <b>nopsled</b> (guest, #129072)
+                              [<a href="/Articles/775258/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nopsled" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775258" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Now you know why Plan 9 never had them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775258/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor775289"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 11:58 UTC (Thu)
+                               by <b>domenpk</b> (guest, #12382)
+                              [<a href="/Articles/775289/">Link</a>] (16 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="domenpk" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775289" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A shout out to <br>
+<p>
+/proc/sys/fs/protected_symlinks<br>
+and <br>
+/proc/sys/fs/protected_hardlinks<br>
+<p>
+I wonder if any distro has this enabled by default.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775289/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775292"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 12:17 UTC (Thu)
+                               by <b>Trou.fr</b> (subscriber, #26289)
+                              [<a href="/Articles/775292/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Trou.fr" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775292" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Debian sid has '1' in both files.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775292/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor775293"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 12:20 UTC (Thu)
+                               by <b>zdzichu</b> (subscriber, #17118)
+                              [<a href="/Articles/775293/">Link</a>] (14 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zdzichu" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775293" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Every modern distro has it enabled, except fringe ones and the ones disabling it on purpose:<br>
+<a href="https://github.com/systemd/systemd/blob/master/sysctl.d/50-default.conf#L36">https://github.com/systemd/systemd/blob/master/sysctl.d/5...</a><br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775293/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775346"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 18:15 UTC (Thu)
+                               by <b>rweikusat2</b> (guest, #117920)
+                              [<a href="/Articles/775346/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rweikusat2" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775346" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Disabling useful system features because application authors can't be bothered^W"trusted" to avoid simple coding mistakes which have been publically known for an eternity isn't particularly "modern". That's nothing but "the BSD UNIX security gold standard" since some time in the late 1980s.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775346/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 19:49 UTC (Thu)
+                               by <b>jerojasro</b> (guest, #98169)
+                              [<a href="/Articles/775352/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jerojasro" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775352" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It might be useful, but if it is so easily misused, time and time and again, maybe it's not worth keeping.<br>
+<p>
+Your approach of demanding "complete avoidance of mistakes" from application authors does not work in the real world, as recurring security issues stemming from the same "feature" show. It's way easier to fix the environment and eradicate the issue in a single place, instead of educating tons of developers and expect them to remember and never make the same mistake again...<br>
+<p>
+(FWIW, I'm mostly paraphrasing/matching what I read at: <a href="https://rachelbythebay.com/w/2018/05/13/dates/">https://rachelbythebay.com/w/2018/05/13/dates/</a> )<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 19:59 UTC (Thu)
+                               by <b>rweikusat2</b> (guest, #117920)
+                              [<a href="/Articles/775353/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rweikusat2" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775353" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      This is not about "misuse" of anything, the underlying problem is called "a TOCTOU race", the pattern of that being
+<ol>
+<li> application A verifies that condition X holds
+<li> application B changes the state of the system such that X isn't true anymore
+<li> application A acts on the presumption that X is still true
+</ol>
+And I would indeed "demand" complete avoidance of that if I was in the position to demand anything here, as there's nothing particularly difficult about understanding that this approach is broken.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775360"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 22:23 UTC (Thu)
+                               by <b>jerojasro</b> (guest, #98169)
+                              [<a href="/Articles/775360/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jerojasro" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775360" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+you are correct, we should not let TOCTOU races slip past. Still, some of us do, for whatever reason, and it's better to just make that error possibility disappear, whenever possible, than struggle with every new person who doesn't have yet the instinct/skill to identify TOCTOU issues, wait to be bitten by yet-another instance of the same security issue, and say: "why did this happen, this is a TOCTOU race, there is nothing particularly difficult about understanding it".<br>
+<p>
+Yes, we should pay attention, learn our craft, be mindful. But even so, better to, as Rachel (the author of the article I posted) says, design the potential for error out of the system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775360/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775442"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2018 21:22 UTC (Fri)
+                               by <b>rweikusat2</b> (guest, #117920)
+                              [<a href="/Articles/775442/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rweikusat2" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775442" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's no possibility of such a thing "slipping past": The broken code has to be intentionally written in the broken way. And please note that I do mean intentionally here. More often than not, the reason why the broken code got written is probably "It'll work almost all of the time!".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775442/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor775368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2018 2:52 UTC (Fri)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/775368/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdeug" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775368" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Functional programming goes so far as to make changing the state of the system impossible to avoid such problems in multithreaded programs. In an environment without memory protection, every single &lt;b&gt;if&lt;/b&gt; statement offers a chance for a such a race. In an multiprocess environment, every single use of fstat offers a chance for such a race. If you want to demand complete avoidance for that, show me how you'd write du so that it accurately offers the size of a directory's contents at some snapshot in time. The only way I know how to write du in a way that would avoid that problem would be to lock the system while du is running, which is not something that an ordinary program can do.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775445"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2018 23:09 UTC (Fri)
+                               by <b>rweikusat2</b> (guest, #117920)
+                              [<a href="/Articles/775445/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rweikusat2" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775445" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+du does not suffer from this problem: It provides approximate disk usage information[*]. But it doesn't act on this information.<br>
+<p>
+BTW, the actual Kubernetes problem was even sillier than a TOCTOU race as the faulty code didn't even attempt to verify that the untrustworthy input it acted upon was valid.<br>
+<p>
+[*] Assuming the whole system was locked while it ran, the information would still only be approximate as it could (and likely would) change as soon as the system was again unlocked. Hence, there's no point in even trying as the result is unreliable either way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775445/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775455"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2018 6:32 UTC (Sat)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/775455/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdeug" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775455" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the context with which we are talking, du does not provide approximate disk usage information. An attacker could get it to return almost any value by shuffling files around behind its back. At least a locked version would not allow an attacker to move a file around behind du's back.<br>
+<p>
+If one doesn't act on provided information, it was useless to provide it. If one does act on it, in any way, there's a potential for a race condition. You said "And I would indeed "demand" complete avoidance of that if I was in the position to demand anything here, as there's nothing particularly difficult about understanding that this approach is broken." If the approach is broken and should be completely avoided, show me how to avoid it here, or argue that du, as well as virtually every other file tool* for any multiprocessing system, is inherently broken. Otherwise you've got to accept that complete avoidance is impractical. <br>
+<p>
+* For example, rm; an attacker could potentially watch for rm to be run, move the file out of the way, and move it back after rm ran. The timing would be hard, but it's at least theoretically possible. Should rm be avoided?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775455/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775639"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 27, 2018 19:41 UTC (Thu)
+                               by <b>rweikusat2</b> (guest, #117920)
+                              [<a href="/Articles/775639/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rweikusat2" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775639" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+du does provide approximate disk usage information. It (the program) doesn't act on this information, hence, it's not susceptible to a TOCTOU-based attack. What some kind of operator might or might not do based on approximate information provided by du is a different conversation but as operators aren't usually programmed, worrying about how to program them securely is ... eh ... a bit off.<br>
+(aka "a red herring"). Dito for rm.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775639/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775643"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 27, 2018 23:32 UTC (Thu)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/775643/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdeug" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775643" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Saying a filesystem is empty except for a few directories when it in fact had several GB of data in it before and during du's run is not "approximate".<br>
+<p>
+Operators are often programs, frequently written in shell. If they use rm or du, they are subject to these types of attack. Even when operators are human, the fact that they literally can not operate these programs without getting into these race conditions is a concern if this approach is clearly broken.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775643/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor775361"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 21:50 UTC (Thu)
+                               by <b>joncb</b> (guest, #128491)
+                              [<a href="/Articles/775361/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joncb" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775361" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But by that logic it's even more important that we remove malloc/free as soon as possible. One of the biggest categories of security vulnerabilities is variants on buffer overruns and we've been unsuccessfully trying to get programmers to deal with them correctly for well over 30 years.<br>
+<p>
+Symlinks are such an important part of operating system functionality that i'm not sure how much of linux software would still run if you removed it... including systemd.<br>
+<p>
+Having said that, improving the ergonomics of certain calls to turn them into pits of success instead of pits of failure seems like a valuable endeavor but i don't entirely know what that means from a practical standpoint. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775361/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775363"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 22:07 UTC (Thu)
+                               by <b>sheepgoesbaaa</b> (guest, #98005)
+                              [<a href="/Articles/775363/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sheepgoesbaaa" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775363" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"pits of success" is a keeper<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775363/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor775367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2018 0:56 UTC (Fri)
+                               by <b>jra</b> (subscriber, #55261)
+                              [<a href="/Articles/775367/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jra" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775367" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Problem is that application developers usually assume that pathnames they didn't create or modify themselves don't change on the fly underneath.<br>
+<p>
+And you know what - they're mostly right in normal use cases :-). Most "normal" programmers don't expect a resource to get altered outside of their own program.<br>
+<p>
+This is the core problem with people getting MT-programming right. Most people's minds just don't work that way (paranoia about resource modification between every possible access).<br>
+<p>
+This is why the handle-based approach got retrofitted into POSIX via the XXXat() interfaces to get around the problem with the normal interfaces. The problem was the old interfaces weren't removed, and so everyone mostly kept using them (they work, right!).<br>
+<p>
+Handle based pathname traversal (or chdir() into a parent directory to pin the inode) is the only way to fix a filesystem with arbitrary symlinks to make things safe, but almost no application code does that correctly (Samba didn't for the longest time, does now).<br>
+<p>
+If you have an interface that's really hard to use safely, I'm going to argue it's the interface that's the problem, not the application programmers.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor775654"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 28, 2018 6:23 UTC (Fri)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/775654/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775654" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; This is why the handle-based approach got retrofitted into POSIX via the XXXat() interfaces to get around the problem with the normal interfaces.</font><br>
+<p>
+Unfortunately just using *at(2) isn't really sufficient. You would need to do full path lookups (as in at least one openat(2) for each component of your path) in userspace with some pretty ugly checking (fstatat(2) or potentially readlink("/proc/self/fd/$foo")) in order to verify you haven't been thrown out of where you expect.<br>
+<p>
+This is is why I am working on adding O_BENEATH and similar openat(2) flags so the kernel will do the checks for you[1] (since the kernel can actually do checks somewhat-atomically within VFS). Hopefully it'll remove some of these really frustrating hurdles.<br>
+<p>
+[1]: <a href="767547.html">https://lwn.net/Articles/767547/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775654/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor775342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2018 17:41 UTC (Thu)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/775342/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor775342" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; At the very least Linux needs a flag bit that allows applications to tell syscalls to completely ignore symlinks and fail pathnames containing them. O_NOFOLLOW doesn't do what anyone wants it to do, unfortunately.</font><br>
+<p>
+This is precisely what I'm trying to do with the O_THISROOT patchset (which includes things like O_NOSYMLINKS and O_BENEATH) -- in fact these Kubernetes CVEs (and the fairly dodgy way they were fixed) inspired me to work on it (among other reasons).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/775342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor776177"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Handling the Kubernetes symbolic link vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2019 21:13 UTC (Mon)
+                               by <b>zoobab</b> (guest, #9945)
+                              [<a href="/Articles/776177/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zoobab" />
+                <input type="hidden" name="return" value="/Articles/775182/#CommAnchor776177" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"The Kubernetes project first became aware of the problem from a GitHub issue that was created on November 30, 2017. It gave full detail of the bug and was posted publicly. That is not the proper channel for reporting Kubernetes security bugs, Au stressed. Luckily, a security team member saw the bug report and cleared out all of the details, moving it to a private issue tracker. There is a documented disclosure process for the project that anyone finding a security problem should follow, she said."<br>
+<p>
+At least next time, post it publicly on a server where anybody else cannot intervene to censor it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/776177/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

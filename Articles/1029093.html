@@ -1,0 +1,248 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Scheduler medley: time-slice extension, sched_ext deadline servers, and LRU batching. [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Scheduler medley: time-slice extension, sched_ext deadline servers, and LRU batching.">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Decades after its creation, the Linux CPU scheduler remains an area of active development; it i [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1030296/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Scheduler medley: time-slice extension, sched_ext deadline servers, and LRU batching.</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 17, 2025</br>
+           </div>
+Decades after its creation, the Linux CPU scheduler remains an area
+of active development; it is difficult to find a time slice to cover every
+interesting scheduler change.  In an attempt to catch up, the time has come
+to round-robin through a few patches that have been circulating recently.
+The work at hand focuses on a new attempt at time-slice extension, the
+creation of a deadline server for sched_ext tasks, and keeping tasks on
+isolated CPUs from being surprised by LRU batching.
+<p>
+<h4>Time-slice extension</h4>
+<p>
+The kernel is able to ensure that it will not be preempted whenever that
+would be especially inconvenient, for itself or for a task that it is
+running.  User space, instead, has fewer options in that regard.  As a
+result, it is possible for a user-space thread to lose the CPU while
+holding a lock that another thread needs, delaying the latter
+unnecessarily.  Since lock-hold times are (or at least should be) short,
+delaying the preemption of a thread for a brief period while it holds a
+lock could improve the performance of the system overall.
+<p>
+Earlier this year, Steve Rostedt <a href="/Articles/1009509/">posted a
+patch series</a> adding the capability for a thread to indicate that it is
+running in a critical section by way of a special field in the <a
+href="https://elixir.bootlin.com/linux/v6.14-rc2/source/include/uapi/linux/rseq.h#L62"><tt>rseq</tt>
+structure</a> that is shared between the kernel and user space.  In
+Rostedt's implementation, a counter was used, and any non-zero value stored
+there would indicate that a critical section was being executed.  If the
+kernel encountered such a value at a time when it was planning to
+preempt that thread, it would, if possible, give that thread an additional
+50µs of running time.  The use of a counter was intended to support nested
+critical sections on the user-space side.  Entry into a critical section
+would increment the counter, while exiting would decrement it; when the
+counter reached zero, the task would be known not to be running in a
+critical section.
+<p>
+That patch set generated a fair amount of conversation and disagreement
+over how it should be implemented, with the end result that the work
+stalled and was never seriously considered for mainline inclusion.  At
+the same time as Rostedt was working on his patch, though, Prakash Sangappa
+had been working on <a
+href="/ml/all/20241113000126.967713-1-prakash.sangappa@oracle.com/">a
+similar patch</a>.  Unlike Rostedt, Sangappa has continued with this work;
+<a
+href="/ml/all/20250701003749.50525-1-prakash.sangappa@oracle.com">version&nbsp;6
+of his series</a> was posted at the beginning of July.
+<p>
+Sangappa initially did not use <tt>struct rseq</tt>, opting instead to
+create a separate memory region shared with user space.  That has changed
+over the evolution of the patch; the current version uses a one-bit flag in
+that structure.  The maximum deferral time in this series is 30µs, but
+there is also a sysctl knob that can be used to change that value or, by
+setting it to zero, to disable the feature entirely.  Otherwise, on the
+surface at least, the patch is similar to Rostedt's version.
+<p>
+Rostedt, though, had tied his mechanism to the relatively new <a
+href="994322.html">lazy preemption</a> scheduling mode; that decision
+had proved controversial.  Sangappa's patch, instead, applies to tasks
+running in any scheduling mode.  Thomas Gleixner <a
+href="/ml/all/87cyakmhdv.ffs@tglx/">complained</a> about that design,
+saying that it would allow a normal-priority task to delay a realtime task,
+which "<q>is fundamentally wrong</q>".  Gleixner said that preemption
+deferral should only happen in situations where lazy preemption would apply
+— when there is not a high-priority task waiting for the CPU.
+<p>
+Peter Zijlstra, though, <a
+href="/ml/all/20250701105653.GO1613376@noisy.programming.kicks-ass.net/">disagreed</a>,
+saying that the potential delay for a realtime task is less than what could
+already happen when an ordinary system call is made.  Additionally, he
+said, tying deferral to lazy preemption would prevent realtime threads from
+using it, but the feature might be just as useful for those threads.
+Gleixner <a href="/ml/all/87wm8skrzj.ffs@tglx/">acquiesced</a> to this
+point of view, but said that the feature needs a mechanism to enable or
+disable it on a per-process basis; Rostedt <a
+href="/ml/all/20250701104914.7bb80161@batman.local.home/">agreed</a> with
+that request.
+<p>
+Nobody seems to disagree with the fundamental objective of this patch
+series, though, so it is mostly a matter of getting agreement on the
+implementation.  It is hard to say how many more rounds will be required to
+reach that point, but eventually it seems that this feature should find its
+place in the mainline kernel.
+<p>
+<h4>Deadline servers for sched_ext</h4>
+<p>
+The <a href="922405.html">extensible scheduler class</a> (sched_ext)
+allows custom CPU schedulers to be loaded from user space as a set of BPF
+programs.  Those custom schedulers can implement whatever special algorithm
+is needed to ensure that a given workload runs efficiently, often
+optimizing the system in ways that the in-kernel scheduler is unable to
+achieve.  If, however, a realtime task runs for 100% of the CPU time,
+sched_ext tasks will be unable to run and all that work will have gone for
+nothing; the problem gets even worse if one of the blocked sched_ext tasks
+represents the system administrator trying to regain control.
+<p>
+The same problem applies to tasks running in the <tt>SCHED_NORMAL</tt>
+class, of course, and various attempts have been made to solve it over the
+years.  The current solution is <a href="934415.html">deadline
+servers</a>, special kernel processes that run in the deadline-scheduling
+class, which outranks even the normal realtime classes.  A deadline-server
+thread is configured to run for a maximum of 5% of the available CPU time;
+it uses that time to run <tt>SCHED_NORMAL</tt> tasks in the usual way.
+This mechanism ensures that a minimum of CPU time remains available for
+non-realtime tasks, but allows realtime tasks to use that time if there are
+no other requests for it.
+<p>
+The solution, as <a
+href="/ml/all/20250702232944.3221001-1-joelagnelf@nvidia.com">implemented
+by Joel Fernandes</a>, is to add a deadline server for sched_ext tasks too,
+ensuring that they are not crowded out of the CPU entirely.  Given that the
+infrastructure for deadline servers exists at this point, the amount of
+work required to effect this change is relatively small; still, six
+versions of the series have been posted so far.  That said, comments on the
+work seem to be winding down, so it may be getting close to ready.
+<p>
+<h4>LRU batching on isolated CPUs</h4>
+<p>
+There are some workloads that <i>really</i> do not want to be interrupted;
+they need 100% of the time on the CPU(s) where they have been placed.  The
+kernel supports those applications with its CPU-isolation feature.  When a
+CPU is isolated, all of the normal kernel housekeeping work, including
+interrupt handling, is moved to other CPUs.  The scheduler tick is
+disabled, and the designated task begins running there.  As long as that
+task does not make a system call, it should not have to compete with any
+other work for that CPU.
+<p>
+CPU isolation is rather poorly documented within the kernel; there is
+information to be found in <a href="816298.html">this 2020 LWN
+article</a> and <a
+href="https://www.suse.com/c/cpu-isolation-introduction-part-1/">this
+article series</a> on the SUSE blog.
+<p>
+Memory-management tasks, such as working through folios on the
+least-recently-used (LRU) lists, qualifies as the kind of work that should
+not be done on isolated CPUs.  But, as Frederic Weisbecker points out in <a
+href="/ml/all/20250703140717.25703-1-frederic@kernel.org">this patch
+series</a>, the isolation in current kernels is not yet perfect.
+Specifically, the memory-management subsystem maintains a set of per-CPU
+arrays of folios that have been marked for LRU processing.  Folios can be
+added to those arrays quickly, then processed at leisure when the kernel
+concludes that a good time has been reached.
+<p>
+In current kernels, though, one CPU can, at times, make that decision for
+another.  If the memory-management subsystem notices that there are folios
+in another CPU's arrays awaiting attention, it can remotely trigger that
+processing, even if the target CPU is running in the isolated mode.  That
+will result in the workload losing access to the CPU while the LRU arrays
+are drained, breaking the promise that had been made.
+<p>
+Normally, if the workload is running in user space, one would not expect
+folios to end up in the per-CPU arrays to begin with.  There can be problems
+with pages left over when the CPU enters the isolated mode, though.
+Additionally, even the most user-space-intensive task may need to make a
+system call every now and then, and those can end up queuing more folios
+for processing.
+<p>
+Weisbecker's solution is to stop the remote triggering of LRU processing on
+isolated CPUs.  Instead, a per-CPU flag will be set, and the target CPU
+will perform this processing on return from the next system call.  That
+will still delay the isolated workload, but that delay will happen when the
+task makes a system call and delays are already expected.  That should
+allow this work to be done at a time when it will not create problems for
+the isolated workload.
+<p>
+There have been some comments on the implementation that suggest the need
+for a least one more revision of this series.  Once this work goes in,
+though, the kernel will have the basic infrastructure for the deferral of
+work on isolated CPUs; it would not be surprising to see other kernel
+housekeeping work end up being moved into that structure as well.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/CPU isolation</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Extensible scheduler class</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Time-slice extension</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1029093/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

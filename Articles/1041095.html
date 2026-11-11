@@ -1,0 +1,489 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>DebugFS on Rust [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="DebugFS on Rust">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="  DebugFS is the kernel's anything-goes, no-rules interface: whenever a kernel developer needs  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1042222/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>DebugFS on Rust</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>October 22, 2025</br>
+           <hr>
+<a href="https://lwn.net/Articles/1039334/">Kangrejos</a>
+</div>
+<p>
+<a href="https://docs.kernel.org/filesystems/debugfs.html">
+DebugFS</a> is the kernel's anything-goes, no-rules interface: whenever a kernel
+developer needs quick access to internal details of the kernel to debug a
+problem, or to implement an experimental control interface,
+they can expose them via DebugFS. This is possible because DebugFS is not subject
+to the normal rules for user-space-interface stability, nor to the rules about
+exposing sensitive kernel information. Supporting DebugFS in Rust drivers is an
+important step toward being able to debug real drivers on real hardware. Matthew
+Maurer spoke at
+<a href="https://kangrejos.com/">
+Kangrejos&nbsp;2025</a> about his recently merged
+<a href="/ml/all/20250904-debugfs-rust-v11-0-7d12a165685a@google.com/">
+DebugFS bindings for Rust</a>.
+</p>
+
+<p>
+Maurer began with an overview of DebugFS, including the things that make
+implementing a Rust API tricky. DebugFS files should outlive the private data
+that they allow access to, in case someone holds a file descriptor open after
+the underlying object has gone away. Also, DebugFS directory entries can be removed
+at any time, or will be automatically removed when
+the parent directory entry is destroyed. "<q>That will come
+back to haunt us.</q>" Finally, DebugFS directories have to be manually
+torn down; they aren't scoped to an individual kernel module.
+</p>
+
+<a href="/Articles/1041591/">
+<img src="../_static/images/2025/matthew-maurer-kangrejos-small.png" class="lthumb"
+alt="[Matthew Maurer]" title="Matthew Maurer" />
+</a>
+
+<p>
+All of this comes together to make a set of lifetime constraints that's difficult to
+faithfully model in Rust. At first, Maurer thought to implement a DebugFS file
+as a weak reference-counted pointer to a Rust trait object. That doesn't work
+for several reasons, including the fact that DebugFS files don't have a
+destruction callback. Also, DebugFS gives files one word of
+private data — normally used as a pointer to the object they are concerned with — but
+Rust pointers to trait objects are two words wide (one pointer to the object,
+and one to its virtual method table).
+</p>
+
+<p>
+These problems aren't insurmountable — Maurer could have just added an
+additional pointer indirection — but that wouldn't be elegant. He wanted to find a
+solution that naturally fits with the lifecycle of a DebugFS directory entry,
+while only having one word of private data and minimal overhead. The
+design that Maurer ended up proposing was to have the directory entries
+reference-counted such that they are not destroyed until all of their child objects
+have been dropped, and the directory itself has been dropped. To accomplish
+this, two different interfaces would be exposed to Rust: a simple one for
+DebugFS directories with simple lifetimes, as well as a more complex, general one.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+The simpler API, which Maurer called the "File API", has the DebugFS file
+actually own its associated data. Exposing some existing Rust data is as simple
+as wrapping it in a <tt>debugfs::File&lt;T&gt;</tt>; by default, the read and
+write operations for the file will convert the value to or from a string and
+read or update it as appropriate. The programmer can attach their own callbacks,
+instead, to implement custom behaviors. The downside is that there
+is no way to have multiple files reference the same data (without some internal
+reference-counted pointer), and it's not possible to conditionally provide a
+file based on whether some run-time value is true or false.
+</p>
+
+<p>
+The more complex API, the "Scope API", allows multiple files to refer to the
+same data, to refer to multiple separate structures in any combination, to create files
+conditionally, etc. In turn, it can't delete individual subdirectories or files
+— the whole DebugFS directory needs to be released at once.
+</p>
+
+<p>
+Maurer went through
+<a href="/ml/all/20250904-debugfs-rust-v11-5-7d12a165685a@google.com/">
+examples</a> of how to use each API; while a bit complex, the
+use of the file API could be substantially simplified if Rust
+<a href="1039073.html">
+gains built-in
+in-place initialization</a>. Neither API was terribly surprising — but the
+obscure contortions (read: cool hacks) required to make them work efficiently
+were considerably more interesting.
+</p>
+
+<h4>Pointer smuggling</h4>
+
+<p>
+As previously mentioned, DebugFS provides only a single word of private data for
+file structures, which is ordinarily a pointer to the underlying data for the
+DebugFS file, a property that Maurer wanted to preserve.
+But part of the utility of DebugFS is that the developer can override the
+file operations with arbitrary functions; that makes it easy to trigger
+actions in a driver in response to reads or writes to a DebugFS
+file. It would be possible to do this by making the user of DebugFS fill out a
+<a href="https://elixir.bootlin.com/linux/v6.17.1/source/include/linux/fs.h#L2155">
+<tt>struct file_operations</tt></a>, but Maurer wanted a less verbose API.
+The ergonomic way to encode this in the Rust APIs is to allow the
+programmer to attach a function or closure to the <tt>debugfs::File</tt> object.
+Somehow, those function pointers need to make their way into
+the <tt>file_operations</tt> structure used by DebugFS. But Maurer also
+didn't want the API to need to allocate space for the structure at run time — he
+wanted the appropriate structure to be generated statically, at compile time,
+making the entire Rust DebugFS interface allocation-free.
+</p>
+
+<p>
+Maurer's solution relies on the fact that, in Rust, every function and closure
+has its own unique type at compile time. This is done because it makes it easier
+for <s>LLVM</s> the Rust compiler to apply certain optimizations — a call through Rust function pointer can often be
+lowered to a direct jump or a jump through a dispatch table, instead of a call
+through an actual pointer. This makes Rust function types unique zero-sized
+types: there is no actual data associated with them, because the type is enough
+for the compiler to determine the address of the function.
+</p>
+
+<p>
+The <tt>*_callback_file()</tt> functions in his new API, which take callbacks to implement
+the read and write operations on a file, don't actually store the provided
+function pointers anywhere.
+Instead, the type of the callback is passed as a generic argument to the code
+that fills out instances of the <tt>file_operations</tt> structure. When the Rust code
+is monomorphized during compilation, a different <tt>file_operations</tt> structure
+is generated for each file that uses a different set of callbacks.
+The generic code turns the type
+of the function back into a pointer to the actual function itself, and calls it.
+Since the conversion is done at compile time, the pointer to the callback never actually
+has to be stored anywhere outside the <tt>file_operations</tt> structure at run time.
+This trick effectively "smuggles" the function pointer through the type system,
+which lets Maurer pass off the work of constructing all of the needed
+<tt>file_operations</tt> structures to the compiler's monomorphization
+implementation and avoid allocating.
+</p>
+
+<p>
+The reaction to this explanation was mixed. While everyone present agreed that
+it was clever, and permitted writing a nice API, there was some sentiment that
+it might be <em>too</em> clever. Gary Guo pointed out one potential problem with
+the (unsafe) code that Maurer wrote to turn a function type back into an actual function
+pointer: while it was correct for function types, attempting to use it with
+other zero-sized types could cause undefined behavior, because it didn't ensure
+that internal invariants of the type are checked.
+</p>
+
+<p>
+There are some zero-sized types where the actual address of the value is
+important, Guo explained. For example, a programmer could create a zero-sized
+type representing that the data at a particular address is readable. Alice Ryhl
+suggested restricting the function to only operate on types that implement the
+<tt>Copy</tt> trait, since they can't have invariants that rely on having a
+stable address. Maurer replied that he wasn't worried in this case, because the
+function was intended as an internal implementation detail of the DebugFS
+interface, but agreed that in the general case requiring the type to implement
+the <tt>Copy</tt> trait
+would make sense.
+One of the assembled developers asked Pierre-Emmanuel Patry whether he
+anticipated supporting code like this to be a problem for gccrs; he did not
+think that it would impose any additional burden, since some parts of the
+standard library already rely on the behavior of function types.
+</p>
+
+<p>
+Andreas Hindborg asked for more details on why smuggling a pointer through the
+type system like this was permitted — specifically, why Maurer had claimed that
+the type needed to be "inhabited" for the trick to work. Zero-sized types can
+either have one valid value (the typical case), or no valid values, Maurer
+explained. So, if someone tried to use his trick to create a pointer to a type
+that exists, but where constructing a value of the type is impossible, they
+could break Rust's type system — which is why the helper function is <tt>unsafe</tt>.
+</p>
+
+<p>
+Hindborg asked whether the pointer-smuggling trick was documented anywhere.
+Maurer replied: "<q>It's well documented in the <em>code</em></q>", to general
+laughter. Guo asked whether they could just change the DebugFS C structure to
+have two pointers, and avoid this whole workaround. Maurer passed the question
+off to Greg Kroah-Hartman, who answered that he didn't think they could, because
+it would impact the layout of the inode structure, which is
+widely used outside DebugFS. In his opinion, this was a case of "<q>you
+optimized for fun</q>" — the equivalent C code just allocates and eats the cost
+of an additional pointer indirection. But he didn't think there was anything
+wrong with odd techniques being used here; in many ways, it's what DebugFS is
+there for.
+</p>
+
+<p>
+Ultimately, the pointer-smuggling solution did remain in the final patch set
+that was merged for the 6.18 kernel. The trick is unlikely to be adapted
+for use in wider contexts in the kernel's Rust bindings, though.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/Rust</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Kangrejos/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1041095/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1042963"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So do they just leak on module unload?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2025 7:26 UTC (Thu)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1042963/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1041095/#CommAnchor1042963" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Finally, DebugFS directories have to be manually torn down; they aren't scoped to an individual kernel module.</span><br>
+<p>
+So what happens on module unload here? Do they just leak if the module doesn't implement cleanup? Can the same module clean them up if it is loaded again? Or a newer version of that module during development where the programmer initially forgets to implement cleanup?<br>
+<p>
+Honestly, this seems like the exact kind of sloppy design common in C that Rust ownership is supposed to make harder to do accidentally.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1042963/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1043028"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So do they just leak on module unload?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2025 13:15 UTC (Thu)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1043028/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1041095/#CommAnchor1043028" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I understand it, they're tied to a specific directory name, not to a module. So any part of the kernel that asks to unload that directory will unload them. Therefore yes: a newer version of the same module can tear down old entries if it wants to.<br>
+<p>
+On the Rust side of things, the files can persist until the File object is dropped or the scoped directory handle is dropped, depending on which API you use. Unless the driver takes special action to ensure those things leak, they should normally be dropped on module unload. So Rust drivers, at least, don't need to worry about that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043028/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1043104"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rust functions are a bit more complicated than described</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2025 21:17 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1043104/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1041095/#CommAnchor1043104" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Maurer's solution relies on the fact that, in Rust, every function and closure has its own unique type at compile time. This is done because it makes it easier for LLVM to apply certain optimizations — a call through Rust function pointer can often be lowered to a direct jump or a jump through a dispatch table, instead of a call through an actual pointer. This makes Rust function types unique zero-sized types: there is no actual data associated with them, because the type is enough for the compiler to determine the address of the function.</span><br>
+<p>
+Just to clarify things a bit, Rust actually has three different families of types that are relevant here:<br>
+<p>
+* Function pointers (written as fn(...) -&gt; ..., note the lowercase "f") - These are roughly equivalent to C function pointers, with the proviso that the pointee must be a safe function, or else the type must be prefixed with unsafe. In practice, these are not commonly used in Rust, because most contexts where you need them are better served by trait objects (dyn Trait, the Rust equivalent of C++ virtual method dispatch).<br>
+* Function item types - The type of a bare function name. For example, if foo() is declared somewhere in scope, then the expression "foo" has a function item type. These are zero-sized types as the article describes, but to be clear, LLVM does not "optimize" them. Instead, rustc emits a direct call to the underlying function at each call site (resolved during monomorphization, if necessary), and LLVM never even knows that we did any indirection in the first place.<br>
+* Closure types - For closures that do not capture anything, these are largely equivalent to function item types (the closure is emitted as if it was a top-level function, and callsites are emitted as direct calls). For capturing closures, these are anonymous structs that hold all the captured values, the closure is modified to take this struct as a hidden argument, and the callsites are again emitted as direct calls.<br>
+<p>
+Function item types and closure types are unnameable within the Rust type system - that is, while you can write the name foo as the only value of the foo function item type, you cannot write the name of that type (e.g. in a function signature). To use these types, they must be bound to a generic parameter, and you must then indicate to the Rust compiler that said parameter is callable using the Fn traits (note capital "F"):<br>
+<p>
+* FnOnce(...) -&gt; ... is implemented for everything callable (all types mentioned above), but it only allows you to call it once (because the underlying type might be a closure that consumes a captured value, and can't be called again). This takes a receiver type of self, which would normally indicate that it must have a size known at compile time. But in a mad anomaly, there is a blanket Box&lt;T: FnOnce + ?Sized&gt; implementation, which somehow(???) moves an unsized object out of the Box and passes it through to the FnOnce trait as if this restriction did not exist.[1] So you can have an unsized FnOnce if it lives on the heap, at least (and I guess the standard library can just decide it doesn't want to follow the language's usual rules if they prove inconvenient).<br>
+* FnMut(...) -&gt; ... is implemented for everything that you can call more than once, but requires you to have &amp;mut to the callable (because it might be a closure that mutates one of its captured values). Unlike FnOnce, neither this trait nor Fn take a self receiver by value, so there's no issue with unsized types here.<br>
+* Fn(...) -&gt; ... is implemented for all callables that don't mutate or consume state, including all function item types, closures that don't mutate their captures, and (safe) function pointers, as well as (shared) references to all of the above.<br>
+<p>
+If the generic parameter is bound to a function item type or closure type, then in order for monomorphization to work, rustc must consider both the callsite and the callee's source code at the same time. That in turn implies that monomorphization has the opportunity to inline these calls, although I'm not sure whether rustc makes that decision by itself or somehow involves LLVM in the process. This can be done cross-crate, even when LTO is disabled, because (as mentioned) monomorphization has an overriding need to look at the source code anyway.<br>
+<p>
+(There are also async functions, but those are mostly just syntactic sugar for regular functions that happen to return impl Future, and then all the really complicated stuff happens elsewhere in the type system.)<br>
+<p>
+[1]: <a href="https://doc.rust-lang.org/src/alloc/boxed.rs.html#1967">https://doc.rust-lang.org/src/alloc/boxed.rs.html#1967</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043104/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1043130"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rust functions are a bit more complicated than described</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2025 22:20 UTC (Thu)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1043130/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1041095/#CommAnchor1043130" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thank you; that's a helpful clarification. I knew about the distinction between function pointers and function types, but I had misremembered which part of the compiler used the type information to emit static calls. I'll add a correction.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043130/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1043353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rust functions are a bit more complicated than described</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2025 14:31 UTC (Sun)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/1043353/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbonzini" />
+                <input type="hidden" name="return" value="/Articles/1041095/#CommAnchor1043353" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For what it's worth, the same function type "rematerialization" is quite pervasive in QEMU's experimental Rust bindings.<br>
+<p>
+The Rust wrappers for QEMU callbacks take the target Rust function as a type parameter, and a utility trait is added to Fn that causes a compiler error if that function is not zero-sized (<a href="https://lists.nongnu.org/archive/html/qemu-rust/2024-12/msg00090.html">https://lists.nongnu.org/archive/html/qemu-rust/2024-12/m...</a>).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1043353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1047839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rust functions are a bit more complicated than described</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 25, 2025 9:55 UTC (Tue)
+                               by <b>ras</b> (subscriber, #33059)
+                              [<a href="/Articles/1047839/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ras" />
+                <input type="hidden" name="return" value="/Articles/1041095/#CommAnchor1047839" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; But in a mad anomaly, there is a blanket Box&lt;T: FnOnce + ?Sized&gt; implementation</span><br>
+<p>
+I hadn't noticed FnOnce talking self rather than &amp;mut self.  But Box&lt;T: FnOnce + ?Sized&gt; has the same sort of twisted logic Box&lt;[u8]&gt; uses.   In both cases, there will never be an actual instance of the unsized type.  The instance had to be sized, because Box has to pass its size to the memory allocator.  You can't call Box::&lt;[u8]&gt;::new() for that reason.<br>
+<p>
+A variable of type Box&lt;[u8]&gt; will always hold an instance whose type was Box&lt;[u8; N]&gt;, which is a sized type.  The [u8; N] value was put into the memory allocated by the Box by the compiler intrinsic box_new(), and it knows to store N along with the array.  Later the &amp;**self somehow constructs an slice from the information stored by box_new().  There is some magic going in in the &amp;**, because how did it know the value it is dereferencing was created by box_new()?  But apart from that it seems pedestrian.<br>
+<p>
+Similarly, the variable may have type Box&lt;T: FnOnce + ?Sized&gt;, but the thing stored in the box isn't ?Sized - it has a very definite size, and just like the &amp;**self, FnOnce::call_once() could know what it was, if it cared.  I don't think the rules about self being sized are being bent too much, at least not more than &amp;**self bends them.<br>
+<p>
+The quirk I did notice is a Box is defined as tuple of length 2, viz: Box&lt;...&gt;(Unique&lt;T&gt;, Allocator). So presumably &amp;**self in deref() is being interpreted as &amp;**self.0.  I don't know why &amp;**self is acceptable.  Allocation will be a zero sized type, but if I use a ZST in that way I'm still not allowed to write to dereference the tuple with * in my code.<br>
+<p>
+It's all very magic.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1047839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

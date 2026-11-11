@@ -1,0 +1,480 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Extending the time-slice-extension discussion [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Extending the time-slice-extension discussion">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Time-slice extension is a proposed scheduler feature that would allow a user-space process to r [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1038644/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Extending the time-slice-extension discussion</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 18, 2025</br>
+           </div>
+Time-slice extension is a proposed scheduler feature that would allow a
+user-space process to request to not be preempted for a short period while
+it executes a critical section.  It is an idea that has been circulating
+for years, but efforts to implement it <a href="/Articles/1009509/">became
+more serious</a> in February of this year.  The latest developer to make an
+attempt at time-slice extension is Thomas Gleixner, who has posted <a
+href="/ml/all/20250908225709.144709889@linutronix.de">a new patch set</a>
+with a reworked API.  Chances are good that this implementation is close to
+what will actually be adopted by the kernel.
+<p>
+Imagine a user-space thread that holds a (user-space) spinlock; if that
+thread is preempted by another thread which subsequently attempts to
+acquire that same lock, the preempting thread will spin indefinitely,
+having displaced the thread that could release the lock.  That is not a
+path toward optimal performance.  If, though, the lock-holding thread could
+ask to not be preempted while holding the lock, this scenario could be
+avoided; time-slice extension is meant to at least give that thread a
+chance to run long enough to finish its work before being kicked out of the
+CPU.
+<p>
+The February implementation of this work was by Steve Rostedt; after that
+work bogged down, an implementation by Prakash Sangappa <a
+href="/Articles/1029093/">was considered</a> for a while, but also ran into
+disagreements over its API and implementation details.  Gleixner's work is
+an attempt to create a version that will pass muster.  To get there, he
+first had to <a href="1033955.html">rework the restartable sequences
+implementation</a> to address a number of problems he found there; <a
+href="/ml/all/20250908212737.353775467@linutronix.de">a new version of that
+series</a> was posted on September&nbsp;8.
+<p>
+In this version of the time-slice-extension API, a process must explicitly
+enable the feature before attempting to use it.  That is done with a new <a
+href="https://man7.org/linux/man-pages/man2/prctl.2.html"><tt>prctl()</tt></a>
+command named <tt>PR_RSEQ_SLICE_EXTENSION_SET</tt>.  This requirement
+serves two purposes: it allows the kernel to avoid some overhead for the
+(presumed) majority of processes that do not use time-slice extension, and
+a process that <i>can</i> use the feature will get an indication of
+whether the kernel actually supports it.  There is also a new
+<tt>PR_RSEQ_SLICE_EXTENSION_GET</tt> command to query whether the feature
+is currently enabled for the calling process.
+<p>
+Like most of its predecessors, Gleixner's implementation uses the
+restartable sequences infrastructure, including its block of memory shared
+between user space and the kernel, in the implementation of the new
+feature.  This time around, though, the <a
+href="https://elixir.bootlin.com/linux/v6.16.7/source/include/uapi/linux/rseq.h#L56"><tt>rseq</tt>
+structure</a> stored in that block is given a new field:
+<p>
+<pre>
+    __u32 slice_ctrl;
+</pre>
+<p>
+To request a time-slice extension, a thread sets the
+<tt>RSEQ_SLICE_EXT_REQUEST</tt> bit in that field; a simple assignment is
+sufficient, there is no need for any special atomic operations.  If that
+thread is then interrupted, the kernel will handle whatever task caused the
+interruption; before returning to user space, the kernel checks whether
+anything has happened that would normally cause the current thread to be
+scheduled out.  If the thread is marked for rescheduling, it would normally
+lose access to the CPU; if, however, the request bit is set in
+<tt>slice_ctrl</tt>, the conditions are right, and the kernel is in a good
+mood, it will consider giving that thread just a bit more time before the
+eviction happens.
+<p>
+<div class="tlr">
+<b>About that timer</b>: the setting of the 30µs high-resolution timer is
+one of the most expensive parts of implementing this feature, since it
+requires reprogramming the hardware.  The kernel reduces that overhead by
+looking at the amount of time left in the thread's time slice; if it
+exceeds the grant period, the timer will not be set.
+</div>
+
+Whether the conditions are right depends on a few things, including the
+reason why rescheduling the process is called for; the kernel is unlikely
+to grant an extension if a high-priority realtime process needs the CPU,
+for example.  Whether or not the extension is allowed, the kernel will
+clear the <tt>RSEQ_SLICE_EXT_REQUEST</tt> bit in <tt>slice_ctrl</tt> to
+inform the thread that it was interrupted.  If the kernel does decide to
+grant the extension, it will, before returning to user space, set the
+<tt>RSEQ_SLICE_EXT_GRANTED</tt> bit in <tt>slice_ctrl</tt> and set a timer
+for (by default)&nbsp;30µs.
+<p>
+The user-space thread should run its critical section and, at completion,
+check the request bit with an atomic test-and-clear operation.  If that bit
+had already been cleared by the kernel, the thread will know that an
+interrupt has happened.  In that case, it must check for
+<tt>RSEQ_SLICE_EXT_GRANTED</tt> to see whether it is running on borrowed
+time; if so, it must immediately call the new <tt>rseq_slice_yield()</tt>
+system call to tell the kernel that the critical section is complete.  That
+call is likely to result in the rescheduling of the thread.
+<p>
+There are a few things that a potential user of this feature should be
+aware of.  One is that the extension grant can be revoked if the kernel
+changes its mind; that will happen unconditionally if the thread is
+interrupted again while running under the extension grant.  In that case,
+the <tt>RSEQ_SLICE_EXT_GRANTED</tt> bit will be cleared, and the thread
+does not have to call <tt>rseq_slice_yield()</tt>.  If the thread runs its
+critical section to completion, though, some care must be taken to not run
+afoul of the kernel's rules.  The <tt>rseq_slice_yield()</tt> call is not
+optional; if the kernel's 30µs timer expires before that call is made, the
+grant will be ended and the thread rescheduled.  A more severe fate awaits
+any thread that makes any system call other than
+<tt>rseq_slice_yield()</tt> while running with an extension grant; that
+thread will be terminated immediately.
+<p>
+Rostedt's February version only worked if the scheduler was running in the
+<a href="994322.html">lazy preemption</a> mode; that limitation was
+controversial at the time.  Gleixner's implementation does not have that
+limitation and, in fact, will explicitly not work as well when lazy
+preemption is in use, especially on realtime kernels, where preemption can
+happen anywhere in the kernel and not just at the point of return to user
+space.  Implementing time-slice extension in that environment would add to
+the overhead of the feature, whether it is in use or not.  In the earlier
+discussions, there had been talk of making time-slice extension available
+to realtime processes as well, but that is not a part of this series.
+
+<p>
+The API for this feature may not yet be entirely set in stone.  Mathieu
+Desnoyers had <a
+href="/ml/all/a65dfd2c-b435-4d83-89d0-abc8002db7c7@efficios.com">a couple
+of requests</a>, the first of which was to allow the user-space critical
+sections to be nested, so that a second critical section could be entered
+while already running within a critical section.  That would require
+turning the <tt>RSEQ_SLICE_EXT_REQUEST</tt> into a counter informing the
+kernel of just how many nested critical sections were being executed at any
+given time.  Gleixner <a href="/ml/all/874it6qzd0.ffs@tglx">pondered the
+request</a> for a bit before concluding that nesting should be implemented
+in user space, if at all.
+<p>
+The second request was to allow <i>any</i> system call to signal an end to
+the critical section, rather than killing the thread.  Otherwise, he said,
+the feature would see far fewer users: "<q>Handling syscall within granted
+extension by killing the process will likely reserve this feature to the
+niche use-cases</q>".  Gleixner rejected that reasoning, saying: "<q>Having
+this used only by people who actually know what they are doing is actually
+the preferred outcome</q>".  Even so, he had previously <a
+href="/ml/all/87a52zr5sv.ffs@tglx">said</a> that he would be willing to
+consider allowing any system call as a way to end the critical section, but
+that it would require changing the system-call entry code in a way that he
+feared might not be acceptable to the scheduler developers (who have not
+yet expressed an opinion on the subject).
+<p>
+While there may be discussion about the details for a while, it seems
+likely that the eventual API for time-slice extension will be fairly close
+to what has been described here.  The feature could perhaps be ready to
+merging within a couple of development cycles.  This being the kernel
+community, though, there is always a chance that somebody will make a
+request to extend the discussion beyond its natural end.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.0</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Time-slice extension</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1038235/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1038742"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prctl</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2025 7:19 UTC (Fri)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/1038742/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magfr" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1038742" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another feature that the mandatory call to prctl adds is that it gives security modules a good place to say no. <br>
+Having prctl return EPERM is far more likely to be handled gracefully by the application than never getting the timer extension.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038742/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1038744"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No atomic operations?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2025 8:24 UTC (Fri)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/1038744/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="matthias" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1038744" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; To request a time-slice extension, a thread sets the RSEQ_SLICE_EXT_REQUEST bit in that field; a simple assignment is sufficient, there is no need for any special atomic operations.</span><br>
+<p>
+How can this work with a simple assignment? Without any memory barriers, the CPU as well as the compiler is free to reorder the write (e.g. do the write after the critical section). Maybe you do not need atomic instructions, but at least some kind of memory barrier has to be there. Or am I missing something?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038744/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1038754"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No atomic operations?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2025 10:26 UTC (Fri)
+                               by <b>kkdwivedi</b> (guest, #130744)
+                              [<a href="/Articles/1038754/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kkdwivedi" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1038754" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You would just need a compiler barrier at most to ensure the write is done before you do anything that depends on the time slice extension, since the set bit is observed on the same CPU, so program order is guaranteed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038754/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1038763"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No atomic operations?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2025 11:31 UTC (Fri)
+                               by <b>tglx</b> (subscriber, #31301)
+                              [<a href="/Articles/1038763/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tglx" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1038763" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You need a compiler barrier after the store so the compiler cannot reorder.<br>
+<p>
+On the CPU the ordering is only required against an interrupt. The context switch in the CPU on interrupt acts as a sufficient barrier. That means the outstanding write is drained before the slice extension code can read.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038763/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1038889"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Proxy Execution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 20, 2025 9:50 UTC (Sat)
+                               by <b>mmechri</b> (subscriber, #95694)
+                              [<a href="/Articles/1038889/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mmechri" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1038889" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the write-up.<br>
+<p>
+How does this compare to/interact with the ongoing work on Proxy Execution?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038889/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1038966"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Proxy Execution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2025 20:25 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1038966/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1038966" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's totally different. Proxy Execution is "that CPU is holding the lock we need; send this work over there for that CPU to do when it drops the lock" (on the basis that it is cache line hot). This is "I am holding the lock, let me just finish what I'm doing and I'll release it".<br>
+<p>
+I suppose it'll make Proxy Execution less useful, which is probably a good thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038966/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1038993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Proxy Execution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2025 9:46 UTC (Mon)
+                               by <b>mmechri</b> (subscriber, #95694)
+                              [<a href="/Articles/1038993/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mmechri" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1038993" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Proxy Execution is "that CPU is holding the lock we need; send this work over there for that CPU to do when it drops the lock" (on the basis that it is cache line hot). </span><br>
+<p>
+That is not my understanding of Proxy Execution. Rather, I understand it as “That task holds the lock I need, so I’m going to donate to it some of my CPU time so it hopefully releases the lock sooner”.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1040651"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">if the spin lock is spin_lock_irqsave/spin_lock_irqsave in the thread, how to preempt this thread?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2025 0:42 UTC (Fri)
+                               by <b>yanjun.zhu</b> (guest, #173290)
+                              [<a href="/Articles/1040651/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="yanjun.zhu" />
+                <input type="hidden" name="return" value="/Articles/1038235/#CommAnchor1040651" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Then the snippet should be safe? Honestly I can not get how to preempt if both interrupt and preempt are disabled.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1040651/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

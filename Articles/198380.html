@@ -1,0 +1,179 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Guest page hinting [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Guest page hinting">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Paravirtualized systems are operating systems unto themselves - they look like independent syst [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/197729/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Guest page hinting</h1>
+<div class="Byline">[Posted September 6, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Paravirtualized systems are operating systems unto themselves - they look
+like independent systems to the greatest extent possible.  In the end,
+however, a paravirtualized system is still running under a host, and must
+interact with that host.  A recent set of patches (entitled "<a
+href="/Articles/198384/">guest page hinting</a>") shows how running
+paravirtualized systems in a fully independent mode can hurt performance -
+and the sorts of tricks which can be required to make things run more
+efficiently.
+<p>
+Consider, for example, a short-lived application which runs on a guest
+system.  That application may dirty a number of pages, then exit, its job
+finished.  The guest system knows that the dirty pages are no longer in
+use, and can be recycled.  From the host's point of view, however, the only
+thing known is that the pages are dirty.  So the host will, if needs to
+reclaim those pages, carefully write their (useless) data out to swap
+first.  This is a wasted effort which would be nice to avoid.
+<p>
+The hinting patches add a couple of low-level primitives for use by guest
+operating systems: <tt>set_page_unused()</tt> and
+<tt>set_page_stable()</tt>.  The former marks a page as being unneeded by
+the guest, while the latter marks the page as being in active use.  The
+s/390 architecture (which is the main target for this patch set currently)
+can implement these states through a pair of page flags which the guest can
+set, making the operations fast.  Once pages have been marked as unused,
+the host system can reclaim them with no further effort, making the whole
+virtual memory subsystem more efficient.
+<p>
+The next step is to consider page cache pages.  These pages will contain
+data from a file found on a storage device somewhere, meaning that they can
+be recreated from the source if need be.  That, in turn, means that the
+host could discard them in response to memory pressure.  But, once again,
+the host knows nothing about the 
+guests' page caches.  So the hinting patches add another state, called
+"volatile," to mark pages with backing store.  When the host is feeling
+memory pressure, it is 
+free to discard volatile pages without saving their contents
+first.  It must, however, make sure that the guest system knows that
+this action has taken place so that the page can be removed from the
+guest's page cache.  In the current patch set, this notification only works
+for s/390 machines, however.
+<p>
+
+Pages which have been locked into memory pose an extra challenge here -
+they can be part of the page cache, but they still shouldn't be taken away
+by the host system.  So such pages cannot be marked as "volatile."  The
+problem is that figuring out if a page is locked is harder than it might
+seem; it can involve scanning a list of virtual memory area (VMA)
+structures, which is slow.  So the hinting patches add a new flag to the
+<tt>address_space</tt> structure to note that somebody has locked pages
+from that address space in memory.  When the flag is set, those pages are
+not marked as being volatile.
+<p>
+
+The swap cache also benefits from some hinting work - once the guest has written
+a page to swap, that page has good backing store and can be grabbed by the
+host system.  The approach taken is similar to that used with the page
+cache, though there are a few extra details to take care of.  For example,
+the guest must take care to have the page marked stable (and deal with its
+potentially having been discarded by the host) before freeing the
+associated entry in the swap area.
+<p>
+
+Attentive readers may have noticed that these patches are heavily oriented
+toward the s/390 architecture.  IBM has, of course, been doing
+virtualization for a very long time, so it is not surprising that some
+relatively advanced virtualization patches are coming from that direction -
+or that IBM's architectures are designed with virtualization in mind.
+Other paravirtualization projects will encounter many of the same issues,
+however, and may well benefit from this work.  So the next stage for this
+patch set should be consideration by other projects and possible work to
+make the hinting features more generally applicable.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Virtualization</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Virtualization</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/198380/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor199483"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">It gets even worse</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2006 9:16 UTC (Thu)
+                               by <b>rvdheij</b> (guest, #40507)
+                              [<a href="/Articles/199483/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rvdheij" />
+                <input type="hidden" name="return" value="/Articles/198380/#CommAnchor199483" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; So the host will, if needs to reclaim those pages, carefully </font><br>
+<font class="QuotedText">&gt; write their (useless) data out to swap first. This is a wasted</font><br>
+<font class="QuotedText">&gt; effort which would be nice to avoid.</font><br>
+<p>
+Now imagine after that some other short-lived application runs on the guest. The guest has no trouble to identify which pages to re-use (they're still no longer in use). But as soon as the guest touches the page, the host will first go and reclaim the original contents from its paging devices. And while writing out the page could be seen as just a "waste" from the guest's point of view, bringing the page back in actually delays the guest.<br>
+Needless to say that two stacked LRU mechanisms increase chances of this happening.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/199483/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

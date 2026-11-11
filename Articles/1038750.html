@@ -1,0 +1,490 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Linting Rust code in the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Linting Rust code in the kernel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="  Klint is a Rust compiler extension  developed by Gary Guo to run some kernel-specific lint ru [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1039530/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Linting Rust code in the kernel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>September 30, 2025</br>
+           <hr>
+<a href="https://lwn.net/Articles/1039334/">Kangrejos</a>
+</div>
+<p>
+<a href="https://github.com/Rust-for-Linux/klint?tab=readme-ov-file#klint">
+Klint</a> is a Rust compiler extension
+<a href="951550.html">
+developed by Gary Guo</a> to run some
+kernel-specific lint rules, which may also be useful for embedded system
+development. He spoke about his
+recent work on the project at
+<a href="https://kangrejos.com/">
+Kangrejos 2025</a>. The next day, Alejandra González
+led a discussion about Rust's normal linter,
+<a href="https://doc.rust-lang.org/stable/clippy/index.html">
+Clippy</a>. The two tools offer complementary approaches to analyzing Rust
+kernel code, although both need some additional direction and support from
+kernel developers to reach their full potential.
+</p>
+
+<h4>Klint</h4>
+
+<p>
+Klint was started in 2021 to find places where Rust code in the kernel was
+ignoring allocation errors. That is no longer necessary — the
+<a href="https://rust-for-linux.com/">
+Rust for
+Linux project</a> ended up rewriting the allocation interfaces to make ignoring
+allocation failures more difficult — but klint still has a few other
+useful checks. Mainly, klint is used to check that code does not sleep while
+holding a spinlock. 
+</p>
+
+<p>
+The last two years have mostly been maintenance, and not much new development, Guo
+said. But he did still have some updates to share. The simplest change is adding
+a shorthand for common klint annotations:
+</p>
+
+<pre>
+    #[klint::preempt_count(expect = 1..)]
+    // can now be written
+    #[klint::atomic_context_only]
+</pre>
+
+<p>
+Other improvements are tied to the way that klint works. Clippy
+mainly focuses on "local" lint rules: suggestions that usually only
+involve a handful of lines of code, often contained in a single function. In
+contrast, klint focuses on kernel-specific properties of the entire program. To
+manage that, klint hooks into the Rust compiler's unstable internal APIs to
+access the
+<a href="https://rustc-dev-guide.rust-lang.org/mir/index.html">
+mid-level intermediate representation</a> (MIR).
+</p>
+
+<!-- middle-ad -->
+
+<p>
+This means that some of the improvements to klint are really just improvements
+to the Rust compiler's MIR optimizations. For example, klint now understands
+that the following function is actually permitted, where it couldn't before:
+</p>
+
+<pre>
+    #[klint::atomic_context]
+    fn foo(x: Option&lt;SleepOnDrop&gt;) -&gt; Option&lt;SleepOnDrop&gt; {
+        if let Some(v) = x {
+            Some(v)
+        } else {
+            None
+        }
+    }
+</pre>
+
+<p>
+    The <tt>SleepOnDrop</tt> type is a hypothetical example type that must
+	sleep in order to release resources when it is freed, which
+	means that it cannot be freed in an atomic context. <tt>Option</tt> is
+	Rust's built in way to indicate something that may be null, so
+	a value of type <tt>Option&lt;SleepOnDrop&gt;</tt> is either <tt>None</tt> (in which
+	case it does not actually contain a value of type SleepOnDrop),
+	or it is <tt>Some(v)</tt>. The <tt>if let</tt> syntax matches <tt>x</tt> against
+	the pattern <tt>Some(v)</tt>, binding the name <tt>v</tt> to the <tt>SleepOnDrop</tt>
+	value inside <tt>x</tt> whenever one is present. The else clause applies
+	when <tt>x</tt> is <tt>None</tt>. Put together, the function is just an elaborate
+	way to write the identity function: it returns whatever
+	argument is passed to it.
+</p>
+
+<p>
+	The tricky part comes from Rust's semantics around
+	automatically cleaning up variables when they go out of scope.
+	If a value is pattern-matched (as in the first branch), the
+	responsibility for freeing the underlying memory passes on to
+	whatever part of the program takes ownership of the pieces. In
+	this case, the <tt>Option</tt>'s tag (<tt>Some</tt> or <tt>None</tt>) gets implicitly
+	dropped (which does nothing, because the tag is just a number),
+	and the value gets handed to the code inside the if-let block,
+	which re-wraps it in an <tt>Option</tt> and returns it to the caller. At
+	no point is the <tt>SleepOnDrop</tt> value dropped, so there is no sleep.
+	In the else branch, on the other hand, <tt>x</tt> <em>hasn't</em> been
+	pattern-matched, and it isn't returned to the caller or stored
+	anywhere, so Rust requires it to be dropped. This calls the
+	<tt>drop()</tt> method for <tt>Option&lt;SleepOnDrop&gt;</tt> ... but because <tt>x</tt> is
+	<tt>None</tt>, there is no actual <tt>SleepOnDrop</tt> value to be dropped, so it
+	still doesn't sleep.
+</p>
+
+<p>
+	To a human programmer, it is obvious that no sleep occurs, and
+	that the whole function ought to be optimized into "<tt>return x;</tt>".
+	The Rust compiler does actually optimize this whole thing into
+	"<tt>return x;</tt>", but it does so at a later phase of the
+	optimization pipeline than klint runs. Previously, the compiler
+	did not provide enough information to klint to see that this
+	optimization would definitely occur, so as far as klint was
+	concerned, the call to <tt>drop()</tt> in the else branch might have
+	dropped a value of type <tt>SleepOnDrop</tt>, and therefore slept in an
+	atomic context. Recently, the compiler started providing enough
+	information for klint to make the correct inference here,
+	although there are some closely related examples that still
+	pose problems.
+</p>
+
+
+<p>
+Guo presented another example of some code with moderately complex
+control flow where a human programmer could easily see that a lock was unlocked
+on every code path, but klint's automatic analysis wasn't able to make that same
+determination.
+</p>
+
+<!-- a href="/Articles/1039345">
+<img src="../_static/images/2025/gary-guo-kangrejos-small.png" class="lthumb"
+alt="[Gary Guo]" title="Gary Guo" />
+</a -->
+
+<p>
+Despite these limitations, klint does find
+<a href="https://android-review.googlesource.com/c/kernel/common/+/3723545">
+real bugs</a>. Unfortunately, it also sometimes finds a "<q>not a bug</q>", Guo
+said. In particular, it highlighted a place in Android's
+<a href="953116.html">
+Rust Binder</a> drivers where the
+code might have slept in an atomic context if a reference count hit zero,
+except that the code path was unreachable because the function in question was only
+called while other references to the resource were held. So, the code wasn't
+technically capable of misbehaving, but it was still something that could be
+cleaned up a bit, Guo explained.
+</p>
+
+<p>
+Another new klint feature is better errors for the kernel's
+<a href="https://rust.docs.kernel.org/kernel/macro.build_assert.html">
+<tt>build_assert!()</tt> macro</a>. Rust code in the kernel can use a few
+different kinds of asserts.
+<a href="https://rust.docs.kernel.org/kernel/macro.static_assert.html">
+<tt>static_assert!()</tt></a> is similar to C11's
+static assertions, and triggers an error at compile time. <tt>assert!()</tt>
+does the same thing at run time. But occasionally there are conditions that can
+only be checked after the code has already been
+<a href="https://en.wikipedia.org/wiki/Monomorphization">
+monomorphized</a> for various
+reasons. Rather than make those run-time checks, kernel developers can use
+<tt>build_assert!()</tt> to make those asserts fail during linking if they are
+violated.
+</p>
+
+<p>
+The way <tt>build_assert!()</tt> works is by conditionally referencing an
+undefined symbol. If the compiler's optimizer can't prove that the condition is
+false, the reference to the undefined symbol will remain in the generated object
+code, and the linker will complain when producing the final binary. Since this
+relies on the optimizer, it can sometimes produce false positives; but it may
+still be better than a run-time check in a hot loop.
+The error message produced by the linker is somewhat cryptic; klint now supports
+using DWARF debug information to provide an actual stack trace when a call to
+<tt>build_assert!()</tt> fails.
+</p>
+
+<p>
+Andreas Hindborg asked how much time this new feature adds to the build process.
+Guo explained that it was quite minimal, especially because it was only
+triggered when the build failed. Tyler Mandry asked whether Guo was concerned
+with the brittle nature of <tt>build_assert!()</tt>. Guo didn't really see a way
+around it; he said that if it did start breaking consistently, the project would likely file
+a bug against LLVM. Despite that, he did say to prefer <tt>static_assert!()</tt>
+to <tt>build_assert!()</tt> where possible.
+</p>
+
+<p>
+Benno Lossin asked about the possibility of integrating klint into the build
+system, to provide the better error messages for all Rust for Linux programmers.
+"<q>I definitely want to make that happen,</q>" Guo agreed. There are some
+problems with doing so, though: klint depends heavily on the internal
+details of the Rust compiler, which means that it really needs to be developed
+out of tree to keep up.
+</p>
+
+<p>
+Overall, people were generally approving of the improvements to klint, small as
+they may be. Unsurprisingly, the kinds of people who become involved in Rust for
+Linux are excited about the possibilities of having the computer validate the
+correctness of their kernel code.
+</p>
+
+<h4>Clippy</h4>
+
+<p>
+Clippy is the more typical way to find potential problems with Rust code.
+While originally designed for
+user-space Rust code, many of its lint rules apply to kernel code as well. González
+is a member of the Rust project's Clippy team, currently focusing on improving
+the performance of the program. She opened her session with a quick update on
+current work, before asking a number of questions about what the attending
+kernel developers wanted to see from Clippy in the future.
+</p>
+
+<p>
+Clippy can be configured with a <tt>clippy.toml</tt> configuration file; that
+feature has been unstable for several years, to permit
+experimentation with the format of different options, but in practice the
+configuration file format hasn't changed much in that time. The project is
+working on stabilizing the format so that the Rust for Linux project can make
+use of it without worry.
+</p>
+
+<a href="/Articles/1039346">
+<img src="https://static.lwn.net/images/2025/alejandra-gonzález-kangrejos-small.png" class="lthumb"
+alt="[Alejandra González]" title="Alejandra González" />
+</a>
+
+<p>
+That's part of a general push to prioritize work that benefits Rust for Linux,
+González said. Rust's contributors care deeply about its success, and if Rust
+for Linux succeeds then it shows that Rust can be used in existing complex,
+low-level C programs — so, transitively, the people working on Clippy want Rust
+for Linux to succeed too.
+</p>
+
+<p>
+González's work on making Clippy faster doesn't relate directly to that, but the
+amount of Rust code in the kernel is growing. Miguel Ojeda, one of the
+conference organizers, had previously shared a graph showing an exponential increase in the
+amount of Rust code in the kernel with a doubling period of approximately 18
+months.
+If that keeps up, Clippy performance will be important, so González is trying to
+stay ahead of the problem. Currently, Clippy is about 40%-60% faster than this
+time last year, she said. Her first question for the attendees was whether
+Clippy performance was currently a problem for them.
+</p>
+
+<p>
+Alice Ryhl said that she develops with Clippy enabled all of the time, and
+she hasn't had any problems with it so far. Performance is important to her since
+she runs Clippy constantly, but probably not worth prioritizing over other
+things. Ojeda agreed, saying that Linus Torvalds cares a lot about not having
+false positives in kernel linting tools; since Ojeda enforces Clippy-clean
+builds in stable kernels, focusing on ensuring that Clippy remains completely
+reliable is more important.
+</p>
+
+<p>
+He also asked whether González might want him to turn on
+Clippy-warnings-as-errors in the Rust continuous-integration infrastructure
+(which already tests kernel builds) to catch behavior changes. González agreed
+that would probably be a good idea.
+</p>
+
+<p>
+Mandry asked what Clippy lint rules were enabled in the kernel. <s>The answer is
+that
+the kernel currently uses Clippy's defaults, with the exception of a tweak to
+recognize the kernel's
+<a href="https://rust.docs.kernel.org/kernel/macro.dbg.html">
+<tt>dbg!()</tt> macro</a>.</s> The kernel mostly uses Clippy's defaults, but
+additionally enables rules related to safety and documentation comments, among
+others. [Thanks to Ojeda for the correction.] That is a reasonable choice because
+the default Clippy lint rules are usually the most sensible and generally do
+not have false positives. González asked whether the
+kernel could benefit from extending some particular category of lint rules. Daniel
+Almeida asked for a check that could warn when code referred to a type in an
+unnecessarily verbose way. For example, if a function is already imported
+elsewhere in the module, he would want to be warned about places that refer to
+it by its full import path. That's a kind of comment that he often runs into in
+reviews of his own code.
+</p>
+
+<p>
+González agreed that Clippy could do that. Ojeda and Lossin briefly discussed
+whether that request was already covered by one of the feature requests that the
+Rust for Linux project had filed with the Clippy team; the eventual conclusion
+was that some big requests should be broken up into smaller pieces so that the
+volunteers who contribute to Clippy find them more approachable. With that
+change, Almeida's request may soon be granted.
+</p>
+
+<p>
+González asked whether there were features in other linters for other languages
+that people might like to see integrated into Clippy. "<q>Oof. I could come up
+with things, yeah,</q>" Ojeda replied, before demurring due to lack of time.
+González asked anyone with an idea to send her an email. Her next question was
+about whether anyone was writing tooling that depended on the format of Clippy's
+command-line interface output; the general answer was no — and that if the Clippy developers wanted to improve
+an error message, they should definitely do that rather than trying to keep the
+format exactly the same. Similarly, the assembled developers were not interested
+in reducing Clippy's verbosity. Since the build is usually Clippy-clean, it's
+better to have a long, explanatory error than to make the developer go hunting
+down auxiliary information.
+</p>
+
+<p>
+González finished up by once again asking people to reach out to her, and
+reaffirming her personal commitment to supporting Rust for Linux's use of
+Clippy.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/Rust</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Kangrejos/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1038750/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1040317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">standard test output formats</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2025 12:14 UTC (Wed)
+                               by <b>danielkza</b> (subscriber, #66161)
+                              [<a href="/Articles/1040317/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="danielkza" />
+                <input type="hidden" name="return" value="/Articles/1038750/#CommAnchor1040317" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Her next question was about whether anyone was writing tooling that depended on the format of Clippy's command-line interface output;</span><br>
+<p>
+While far from my favourites, any tooling meaning to integrate with linters/static checkers would be wise to so via known formats like Checkstyle or Junit XML.  <br>
+<p>
+I couldn't actually find a clear answer on whether that is possible with Clippy.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1040317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1040320"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">standard test output formats</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2025 12:22 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1040320/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1038750/#CommAnchor1040320" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+rustc and clippy both have a machine-parseable json output format.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1040320/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1040801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">standard test output formats</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2025 18:53 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1040801/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1038750/#CommAnchor1040801" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, people probably should do that. But plenty of folks are just passing raw compiler output into e.g. vim -q (see [1]) or a similar tool. This is a case of Hyrum's Law - every observable behavior of a system will be depended on by somebody, whether it is contractual or not.<br>
+<p>
+[1]: <a href="https://vimhelp.org/quickfix.txt.html#quickfix">https://vimhelp.org/quickfix.txt.html#quickfix</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1040801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

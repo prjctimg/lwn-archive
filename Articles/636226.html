@@ -1,0 +1,278 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>User-space page fault handling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="User-space page fault handling">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Andrea Arcangeli's userfaultfd() patch set has been in development for a couple of years now; i [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/635612/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>User-space page fault handling</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 11, 2015</br>
+           <hr>
+<a href="/Articles/lsfmm2015/">LSFMM 2015</a>
+</div>
+Andrea Arcangeli's <a href="/Articles/615086/"><tt>userfaultfd()</tt></a>
+patch set has been in development for a couple of years now; it has the
+look of one of those large memory-management changes that takes forever to
+find its way into the mainline.  The good news in this case was announced
+at the beginning of this session in the memory-management track of the 2015
+Linux Storage, Filesystem, and Memory Management Summit: there is now the
+beginning of an agreement with Linus that the patches are in reasonable
+shape.  So we may see this code merged relatively soon.
+<p>
+The <tt>userfaultfd()</tt> patch set, in short, allows for the handling of
+page faults in user space.  This seemingly crazy feature was originally
+designed for the migration of virtual machines running under KVM.  The
+running guest can move to a new host while leaving its memory behind,
+
+<a href="/Articles/636228/"><img
+src="../_static/images/conf/2015/lsfmm/AndreaArcangeli-sm.jpg" width=200 height=250
+alt="[Andrea Arcangeli]" title="Andrea Arcangeli" hspace=3 vspace=2
+border=0 align="left"></a>
+
+speeding the migration.  When that guest starts faulting in the missing
+pages, the user-space mechanism can pull them across the net and store them
+in the guest's address space.  The result is quick migration without the
+need to put any sort of page-migration protocol into the kernel.
+<p>
+Andrea was asked whether the kernel, rather than implementing the
+file-descriptor-based notification mechanism, could just use
+<tt>SIGBUS</tt> signals 
+to indicate an access to a missing page.  That will not work in this case,
+though.  It would require massively increasing the number of virtual memory
+areas (VMAs) maintained in the kernel for the process, could cause system
+calls to fail, and doesn't handle the case of in-kernel page faults
+resulting from <tt>get_user_pages()</tt> calls.  What's really needed is
+for a page fault to simply block the faulting process while a separate
+user-space process (the "monitor") is notified to deal with the issue.
+<p>
+Pavel Emelyanov stood up to talk about his use case for this feature, which
+is the live migration of containers using the <a
+href="http://criu.org/Main_Page">checkpoint-restore in user space (CRIU)</a>
+mechanism.  While the KVM-based use case involves having the monitor
+running as a separate thread in the same process, the CRIU case requires
+that the monitor be running in a different process entirely.  This can be
+managed by sending the file descriptor obtained from <tt>userfaultfd()</tt>
+over a socket to the monitor process.
+<p>
+There are, Pavel said, a few issues that come up when
+<tt>userfaultfd()</tt> is used in this mode.  The user-space fault handling
+doesn't follow a <tt>fork()</tt> (it remains attached to the parent process
+only), so faults in the child process will just
+be resolved with zero-filled pages.  If the target process moves a VMA in
+its virtual address space with <tt>mremap()</tt>, the monitor will see the
+new virtual addresses and be confused by them.  And, after a fork, existing
+memory goes into the copy-on-write mode, making it impossible to populate
+pages in both processes.  The conversation did not really get into possible
+solutions for these problems, though.
+<p>
+Andrea talked a bit about the <tt>userfaultfd()</tt> API, which has evolved
+in the past months.  There is now a set of <tt>ioctl()</tt> calls for
+performing the requisite operations.  The <tt>UFFDIO_REGISTER</tt> call is
+used to tell the kernel about a range of virtual addresses for which faults
+will be handled in user space.  Currently the system only deals with
+page-not-present faults.  There are plans, though, to deal with
+write-protect faults as well.  That would enable the tracking of dirtied
+pages which, in turn, would allow live snapshotting of processes or the
+active migration of pages back to a "memory node" elsewhere on the network.
+<p>
+With regard to the potential live-snapshotting feature, most of the needed
+mechanism is already there.  There is one little problem in that, should
+the target modify a page that is currently resident on the swap device, the
+resulting swap-in fault will make the page writable.  So
+<tt>userfaultfd()</tt> will miss the write operation and the page will not
+be copied.  Some changes to the swap code will be needed to add a
+write-protect bit to swap entries before this feature will work properly.
+<p>
+Earlier versions of the patch introduced a <tt>remap_anon_pages()</tt>
+system call that would be used to slot new pages into the target process's
+address space.  In the current version, that operation has been turned into
+another <tt>ioctl()</tt> operation.  Actually, there is more than one;
+there are now options to either copy a page into the target process or to
+remap the page directly.  Zero-copy operation has a certain naive appeal,
+but it turns out that the associated translation lookaside buffer (TLB)
+flush is more expensive than simply copying the data.  So the remap option
+is of limited use and unlikely to make it upstream.
+<p>
+Andrew Lutomirski worried that this feature was adding "weird semantics" to
+memory management.  Might it be better, he said, to set up
+<tt>userfaultfd()</tt> as a sort of device that could then be mapped into
+memory with <tt>mmap()</tt>?  That would isolate the special-case code and
+not change how "normal memory" behaves.  The problem is that doing things
+this way would cause the affected memory range to lose access to many other
+useful memory-management features, including swapping, transparent huge
+pages, and more.  It would, Pavel said, put "weird VMAs" into a process
+that really just "wants to live its own life" after migration.
+<p>
+As the discussion headed toward a close, Andrea suggested that
+<tt>userfaultfd()</tt> could perhaps be used to implement the
+long-requested "<a href="../Kernel/Index/index.html">volatile
+ranges</a>"  feature.  First, though, there is a need to finalize the API
+for this feature and get it merged; it is currently blocking the addition
+of the post-copy migration feature to KVM.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">remap_anon_pages()</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">userfaultfd()</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2015</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/636226/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor636404"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 7:57 UTC (Thu)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/636404/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="meyert" />
+                <input type="hidden" name="return" value="/Articles/636226/#CommAnchor636404" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if this could be used in UML? I guess it would be faster instead of relying on signal handling as its done currently for the "user mode processes"?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636404/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor636477"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Seemingly crazy...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 14:54 UTC (Thu)
+                               by <b>kschendel</b> (subscriber, #20465)
+                              [<a href="/Articles/636477/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kschendel" />
+                <input type="hidden" name="return" value="/Articles/636226/#CommAnchor636477" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I had to chuckle at the "seemingly crazy feature" phrase.<br>
+<p>
+When TOPS-10 first came out with paging (as opposed to swapping), the page fault handler was a bit of code mapped into the user address space and run in user mode.  The kernel ("monitor" in TOP-10-ese) had system calls to do vm-y things, but no monitor mode page fault handler.  I worked in a DEC-10 shop at the time and I remember looking at the new release with a couple other guys, all of us going "Huh???  Why???".<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636477/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor657102"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Seemingly crazy...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2015 9:04 UTC (Fri)
+                               by <b>jem</b> (subscriber, #24231)
+                              [<a href="/Articles/657102/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jem" />
+                <input type="hidden" name="return" value="/Articles/636226/#CommAnchor657102" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This reminds me of the old password checking flaw in TOPS-20. The "login" (or equivalent) system was passed a user space buffer as parameter, from which it read the password one character at a time. Once it got an incorrect character, it stopped and returned "incorrect password". The trick was to place the password at a page boundary, so that one part of it was at the end of page N and the next part continued at the start of page N+1. If you got a page fault, you knew that the characters on page N were correct. This significantly reduced the amount of work to crack the password by brute force.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/657102/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

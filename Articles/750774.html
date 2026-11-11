@@ -1,0 +1,213 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>wait_var_event() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="wait_var_event()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the trickiest aspects to concurrency in the kernel is waiting for a specific event to ta [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/750429/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>wait_var_event()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 3, 2018</br>
+           </div>
+One of the trickiest aspects to concurrency in the kernel is waiting for a
+specific event to take place.  There is a wide variety of possible events,
+including a process exiting, the last reference to a data structure going
+away, a device completing an operation, or a timeout occurring.
+Waiting is surprisingly hard to get right — race conditions abound to trap
+the unwary — so the kernel has
+accumulated a 
+large set of <tt>wait_event_*()</tt> macros to make the task easier.  An
+attempt to add a new one, though, has led to the generalization of specific
+types of waits for 4.17.
+<p>
+As an example of how specialized these wait macros have become, consider
+<tt>wait_on_atomic_t()</tt>:
+<p>
+<pre>
+    int wait_on_atomic_t(atomic_t *val, wait_atomic_t_action_f action,
+    			 unsigned mode);
+</pre>
+<p>
+The purpose of this function is to wait until the <tt>atomic_t</tt>
+variable pointed to by <tt>val</tt> drops to zero.  The function that
+actually puts the current process to sleep is <tt>action()</tt> (usually
+<a
+href="https://elixir.bootlin.com/linux/latest/source/kernel/sched/wait_bit.c#L223"><tt>atomic_t_wait()</tt></a>,
+but some callers have special needs), and the 
+<tt>mode</tt> argument is the state the task should sleep in.  Any code
+that decrements this variable should make a call to:
+<p>
+<pre>
+    void wake_up_atomic_t(atomic_t *val);
+</pre>
+<p>
+This function will check the value of <tt>*val</tt> and wake any waiting
+tasks if that value is zero.
+<p>
+<tt>wait_on_atomic_t()</tt> is a useful function, with around twenty
+callers in the 4.16 kernel.  But, inevitably, somebody needed to wait for
+an <tt>atomic_t</tt> variable to reach one instead of zero.  That somebody
+was Dan Williams, who <a href="/Articles/750776/">posted a patch</a> adding
+a new function called
+<tt>wait_on_atomic_one()</tt> for that purpose.  Peter Zijlstra, perhaps
+fearing the eventual addition of <tt>wait_on_atomic_two()</tt> and
+<tt>wait_on_atomic_42()</tt>, decided to <a href="/Articles/749666/">come
+up with a better solution</a> to the problem.
+<p>
+<h4>wait_var_event()</h4>
+<p>
+The result is a new API designed to solve the problem of waiting
+for something to happen with a given variable:
+<p>
+<pre>
+    int wait_var_event(void *var, test);
+    void wake_up_var(void *var);
+</pre>
+<p>
+A call to <tt>wait_var_event()</tt> will wait until <tt>test</tt> evaluates
+to a true value.  It can be used to replace a call to
+<tt>wait_on_atomic_t()</tt> in this way:
+<p>
+<pre>
+    wait_var_event(&amp;atomic_var, !atomic_read(&amp;atomic_var));
+</pre>
+<p>
+On the wake side, <tt>wake_up_var()</tt> does not test the value of the
+variable as <tt>wake_up_atomic_t()</tt> does, so code that looks like:
+<p>
+<pre>
+    atomic_dec(&amp;atomic_var);
+    wake_up_atomic_t(&amp;atomic_var);
+</pre>
+<p>
+needs to be changed to look like this:
+<p>
+<pre>
+    if (atomic_dec_and_test(&amp;atomic_var))
+        wake_up_var(&amp;atomic_var);
+</pre>
+<p>
+This mechanism can be used to implement <tt>wait_on_atomic_one()</tt> in a
+fairly straightforward manner.  It can also wait on any type of variable,
+not just <tt>atomic_t</tt> if the need arises.  Zijlstra's patch replaces a
+number of <tt>wait_on_atomic_t()</tt> calls in the kernel; work to replace
+the rest has been done since this patch series was posted.
+<p>
+<h4>Under the hood</h4>
+<p>
+A look at the <tt>wait_var_event()</tt> interface is likely to raise a
+couple of questions.  One of those is why this macro needs a pointer to
+the variable involved if it is not actually checking the value of that
+variable or, indeed, does not even know what the type of the variable is.
+Developers experienced with the kernel's scheduling mechanism 
+know that a wait requires placing an entry on a wait queue, but there is no
+such queue in evidence here.  The answer to both of those questions lies in
+how <tt>wait_var_event()</tt> is implemented.
+<p>
+<tt>wait_var_event()</tt> is a macro that, naturally, defers the actual
+work to <tt>__wait_var_event()</tt>.  That macro supplies some defaults —
+the wait is done in the <tt>TASK_UNINTERRUPTIBLE</tt> state, using
+<tt>schedule()</tt>, in a non-exclusive mode — and then calls, inevitably,
+<tt>___wait_var_event()</tt> to do the real work.  To paraphrase Randall
+Davis, it's one thing to have a kernel macro, and quite another to have a
+double-underscore macro, but a developer with a triple-underscore macro is
+truly blessed.
+<p>
+Down in triple-underscore territory, the macro uses the kernel's <a
+href="https://elixir.bootlin.com/linux/v4.16/source/kernel/sched/wait_bit.c">bit
+waitqueue</a> mechanism.  Allocating a wait queue, making it available to
+the code on the wakeup side, and tracking wait-queue entries is a bit
+cumbersome.  For 
+a wait operation on a single variable that may never be repeated, it
+represents a fair amount of overhead.  The bit
+waitqueue code implements a set of shared waitqueues intended to make life
+easier and more efficient for this kind of case.
+<p>
+The reason that <tt>wait_var_event()</tt> needs a pointer to the variable
+is that this address is used to identify the wait queue that will be used
+to wait for events.  The address is hashed, reduced to eight bits, and used
+to index into an array of 256 wait queues; the waiting process will then
+wait on the indicated queue.  A call to <tt>wake_up_var()</tt> will go
+through the same process to find the correct wait queue, then wake any
+tasks there that are waiting on the same variable address.
+<p>
+There is a bit of a tradeoff inherent in this mechanism: the shared wait
+queues will save memory and the overhead of managing a rather larger number
+of single-use wait queues, but it will also have to scan (and pass over)
+any other entries that happened to end up in the same wait queue.  With
+luck, there will not be very many of those, so this mechanism should be
+much more efficient overall.
+<p>
+There is, of course, the usual set of variants —
+<tt>wait_var_event_timeout()</tt>, <tt>wait_var_event_killable()</tt>,
+etc.  This new functionality, along with a conversion of all
+<tt>wait_on_atomic_t()</tt> users and the removal of that function, has
+been merged for the 4.17 release.  It may be a small change to an obscure
+core-kernel 
+detail, but it is also a good example of how these APIs evolve over time.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/750774/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

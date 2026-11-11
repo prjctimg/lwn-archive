@@ -1,0 +1,175 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>NFS performance [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="NFS performance">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" On day two of the 2015 Linux Storage, Filesystem, and Memory Management Summit, Chuck Lever le [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/637396/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>NFS performance</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>March 23, 2015</br>
+           <hr>
+<a href="/Articles/lsfmm2015/">LSFMM 2015</a>
+</div>
+<p>
+On day two of the 2015 Linux Storage, Filesystem, and Memory Management
+Summit, Chuck Lever led a discussion on NFS performance.  There are some
+bottlenecks to look at, and suggestions were made on ways to avoid
+some of them. 
+</p>
+
+<p>
+The <tt>transport_lock</tt> is a spinlock used by the Remote Procedure Call
+(RPC) layer.  It is a bit like the Big Kernel Lock (BKL), Lever said, in
+that it protects all of the transport data on a per-socket basis.
+It is used as a queueing mechanism to prevent RPCs from interleaving on the
+wire.  He is looking for ways to break up that lock, much as the
+BKL-removal work did with the BKL.
+</p>
+
+<a href="/Articles/637438/">
+<img src="../_static/images/2015/lsf-lever-sm.jpg" border=0 hspace=5 align="right"
+alt="[Chuck Lever]" title="Chuck Lever" width=214 height=280>
+</a>
+
+<p>
+Currently, a thread is woken up to copy the received data, but it might
+make more 
+sense to do that work in software interrupt (softirq) context, Jeff Layton
+said.  That is how 
+remote DMA (RDMA) does things, Lever said.  Layton said you could start by
+simply doing copies out of the socket buffer from the softirq, but
+eventually using 
+<tt>splice()</tt> might provide even better performance.
+</p>
+
+<p>
+Lever said that there is also a proposal to make incoming data be
+page-aligned.  Andreas Gruenbacher said that the idea was to use large network
+frames and to receive them into page-aligned buffers.
+
+<p>
+Dave Chinner said
+that will require the sending side to be aware of that setting so that it
+can form 
+its TCP packets in large frames.  Bruce Fields said that the networking
+developers 
+didn't like the change. Chinner said that he was not surprised, as
+messing with segment boundaries is always tricky.
+Gruenbacher noted that it required using the new huge frames to get enough
+data into one packet, as doing page-aligned receives on small packets will
+just waste space.
+</p>
+
+<p>
+One of the two data copies that are currently being done could be saved if
+the softirq code changed to look inside the RPC packets, Fields said.  By
+figuring out 
+what the packet contains, the RPC code could route it to the right place,
+sometimes 
+using <tt>splice()</tt>.  Lever said that RDMA solves the copying problem
+nicely, but that it is a niche use case and likely to remain that way.
+</p>
+
+<p>
+Another area of performance improvement is to use NFS compounds, which
+allow multiple read and write operations in a single NFS transaction.
+Lever said that Fields has been working on support for that as part of the
+NFS 4.2 support in Linux.
+</p>
+
+<p>
+In addition, Lever said, there is a new operation in 4.2 called
+<tt>READ_PLUS</tt> that will assist when clients are reading sparse files.
+That operation allows the server to report the holes optimally.  There was
+concern that rematerializing the holes on the client might be expensive,
+but that turned out not to be the case.
+</p>
+
+<p>
+Fields said that he used <tt>SEEK_HOLE</tt> and <tt>SEEK_DATA</tt> flags to
+<tt>lseek()</tt> to add the holes to the files on the client side.  But
+Chinner cautioned that there is no way of atomically finding holes and
+returning data beyond them, as it will always race with other operations
+that are happening on the file.
+
+<p>
+Lever said that <a
+href="http://docs.oracle.com/cd/E19253-01/816-4555/rfsrefer-140/index.html">NFS
+delegations</a>, which are a kind of file lock, would be required from the
+server when the <tt>READ_PLUS</tt> operation is used.  That will only be
+granted by the server if no one has the file open for writing.  However,
+delegation is not enabled on all NFS servers.
+And that is where the conversation kind of trailed off.
+</p>
+
+<p>
+[I would like to thank the Linux Foundation for travel support to Boston
+for the summit.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/NFS</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2015</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/637211/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

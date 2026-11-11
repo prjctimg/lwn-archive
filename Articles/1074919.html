@@ -1,0 +1,278 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Caching for extended attributes [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Caching for extended attributes">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Extended attributes (xattrs) provide a way to attach key/value metadata to inodes—files, direct [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1074951/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Caching for extended attributes</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>June 2, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+<p>
+<a href="https://man7.org/linux/man-pages/man7/xattr.7.html">Extended
+attributes</a> (xattrs) provide a way to attach <span class="nobreak">key/value</span> metadata to
+inodes—files, directories, and the like—in a filesystem.  As with many
+Linux filesystems, the <a
+href="https://docs.kernel.org/filesystems/fuse/">FUSE filesystem</a>
+supports xattrs.  In a filesystem-track session at the 2026 <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a>, FUSE maintainer Miklos
+Szeredi led a discussion about caching xattrs in kernel memory; he would
+like to create some common infrastructure that could be used by FUSE and
+shared with other filesystems.
+</p>
+
+<p>
+He began by listing the existing xattr-cache implementations in the kernel.
+There is a <a
+href="https://elixir.bootlin.com/linux/v7.0.10/source/include/linux/xattr.h#L107"><tt>simple_xattr</tt></a>
+cache that is used by tmpfs, pidfs, and kernfs; it uses a hash table to
+store the data
+but it does not allow any shrinking.  The <a
+href="https://elixir.bootlin.com/linux/v7.0.10/source/fs/nfs/nfs42xattr.c#L19"><tt>nfs4_xattr_cache</tt></a> also
+uses a hash table to store the xattrs; it does
+allow shrinking.  The <a href="https://elixir.bootlin.com/linux/v7.0.10/source/fs/mbcache.c#L11"><tt>mb_cache</tt></a> is used by ext2 and ext4 to
+deduplicate xattrs and is not a general-use xattr cache.  Meanwhile, the <a
+href="https://docs.kernel.org/next/filesystems/ext4/eainode.html">EA
+inode</a> feature is used by ext4 to store large xattrs that do not fit
+into the inode.  Ted Ts'o cautioned that the EA inode was not intended as a
+cache at all, just as a way to store large xattrs, though it could perhaps
+be used as one.
+Amir Goldstein pointed out that the XFS buffer cache effectively acts as an
+xattr cache, which Szeredi acknowledged.
+</p>
+
+<a href="/Articles/1075406/">
+<img src="../_static/images/2026/lsfmb-szeredi-sm.png" border=0 hspace=5
+align="right" alt="[Miklos Szeredi]" title="Miklos Szeredi" width=200 height=280>
+</a>
+
+<p>
+If there is to be a common implementation of the cache, it should probably
+use a hash table, Szeredi said.  The basic idea of consolidating the two main xattr-cache
+implementations (<tt>simple_xattr</tt> and <tt>nfs4_xattr_cache</tt>) into
+a common code base that could then be used for FUSE seemed good
+to attendees.   Currently FUSE requires a round-trip through user space to
+retrieve xattrs, so caching those that are used frequently will help its
+performance. 
+</p>
+
+<p>
+He went through some of the requirements for the shared xattr cache,
+including having low overhead for storing only a few xattrs and even lower
+overhead when not storing any.  There is a need to be able to reclaim
+memory, especially that taken up by large xattr values; the NFS xattr cache
+has a complicated mechanism to do so already, he said.
+</p>
+
+<p>
+Brauner asked about access-control list (ACL) caching, which is already
+done for filesystems.  The <a href="https://elixir.bootlin.com/linux/v7.0.10/source/include/linux/fs.h#L771"><tt>i_acl</tt> field</a> in the <a href="https://elixir.bootlin.com/linux/v7.0.10/source/include/linux/fs.h#L761"><tt>inode</tt>
+structure</a> is used for that, he said, and wondered if that caching would also be part of
+this new shared scheme.   Szeredi pointed out that <tt>i_acl</tt> is
+not a cache, it is simply an entry for the ACL for the inode; its use would
+be unaffected by the shared xattr cache.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Continuing on, Szeredi said that the xattr cache might globally deduplicate
+the keys and values in order to save memory.  One use case for that, Ts'o
+said, is ACLs for Windows that are stored as xattrs; they can be
+"<q>gargantuan</q>", and are generally shared by every file in a directory.
+Deduplicating those would save substantial amounts of memory; that is also
+true for POSIX ACLs, he said.
+</p>
+
+<p>
+Brauner asked what was meant by "global" and wondered if Szeredi meant per
+superblock.  Szeredi said he was not yet sure about the granularity of the
+deduplication. Ts'o recommended doing it on a per-superblock basis in part because that
+would ease memory accounting for control groups; the xattr-cache use for a
+particular control group could be charged correctly.
+</p>
+
+<p>
+There are some policy questions that go along with the cache, Ts'o said.
+Administrators may want to limit the size of xattrs that are added to the
+cache.  For example, caching large xattrs, rather than more important ones
+like the <tt>security.*</tt> xattrs, may not be desired.  Szeredi thought
+that restricting the cache to only store certain types of xattrs might be a
+way to do that.
+</p>
+
+<p>
+There was also some hard-to-follow discussion on the implementation, but the
+overall feeling in the room was positive toward the idea.
+There
+were no objections to trying to find some common ground, rather than adding
+yet another xattr cache specifically for FUSE.
+</p>
+
+<p>
+[I would like to apologize for any errors here. The acoustics in the room were problematic for both hearing and recording. Misunderstanding and misidentification may have resulted.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/Extended attributes</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1074919/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1076030"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Symlinks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2026 23:39 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1076030/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1074919/#CommAnchor1076030" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While we're at it, might it be possible to lift the prohibition of unprivileged application of xattrs to symbolic links and sockets? A configuration management project of mine has been complicated by the hard-coded restriction prohibiting it. Can we at least make it an LSM hook, not hard-coded policy?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076030/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076183"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">user xattrs for sockets </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2026 15:36 UTC (Wed)
+                               by <b>mokki</b> (subscriber, #33200)
+                              [<a href="/Articles/1076183/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mokki" />
+                <input type="hidden" name="return" value="/Articles/1074919/#CommAnchor1076183" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Next kernel 7.1 added support for the sockets part<br>
+<p>
+<a href="https://lore.kernel.org/lkml/20260410-vfs-xattr-v71-9b287a50d751@brauner/">https://lore.kernel.org/lkml/20260410-vfs-xattr-v71-9b287...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076183/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1076038"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">devpts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2026 11:58 UTC (Wed)
+                               by <b>skissane</b> (subscriber, #38675)
+                              [<a href="/Articles/1076038/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="skissane" />
+                <input type="hidden" name="return" value="/Articles/1074919/#CommAnchor1076038" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Slightly off-topic, does devpts support xattrs? If not, I wonder if anyone could add it?<br>
+<p>
+Programs often find out info about the terminal using environment variables, but they can’t be changed after a process starts. Using xattrs on the pty, the terminal emulator could inform processes of settings changes without those processes having to restart<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076038/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

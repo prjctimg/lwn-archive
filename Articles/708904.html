@@ -1,0 +1,2541 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Adopting DNSSEC [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Adopting DNSSEC">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Domain Name System (DNS) is an amazing technological achievement, but it suffers from a his [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/708474/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Adopting DNSSEC</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="GAByline">
+           <p>December 14, 2016</p>
+           <p>This article was contributed by Tom Yates</p>
+           </div>
+<p>
+The Domain Name System (DNS) is an amazing technological achievement,
+but it suffers from a historical excess of trust, which makes it
+possible for people who rely on it to be lied to.  The <a
+href="https://en.wikipedia.org/wiki/Domain_Name_System_Security_Extensions">
+DNS Security Extensions</a> (formally DNSSEC-bis, more usually just
+DNSSEC) are a mechanism for including robust trust information within
+the DNS.  Here we discuss briefly what DNSSEC does, how it does it,
+and how (and whether) you can use it to secure your domains.
+
+
+<h4>The problem</h4>
+
+<p>
+DNS is the distributed system that maps domain
+names to IP addresses; it is one the largest distributed databases in
+the world.  However, its design dates back to an earlier era when
+there was more trust around; specifically, information propagated by
+the DNS is often cached, while only being validated by checking the IP address
+of the supplier.
+
+<p>
+There are at least two problems with this.  First, just because a DNS
+packet comes from the configured resolver is not necessarily a good
+reason to assume the content is trustworthy.  And second, because much
+DNS information is propagated via UDP, which makes spoofing sender
+IP addresses trivial, a DNS packet claiming to be from the
+configured resolver's 
+IP address may not actually come from that resolver.
+
+<p>
+The fascinating field of security research has unearthed many ingenious
+attacks against cryptographic protocols, such as <a href="https://en.wikipedia.org/wiki/Power_analysis">power analysis</a>, which are elegant and effective but
+unlikely to be seen in quantity in the wild anytime soon.
+DNS spoofing, though, is widespread; it's easy to do, and lots of
+people are doing it, for all sorts of reasons.
+
+<p>
+In March 2014, <a
+href="https://www.theguardian.com/world/2014/mar/21/turkey-blocks-twitter-prime-minister">
+Turkey blocked access to Twitter</a> after recordings damaging
+to the Turkish government were leaked there.  The country did this by
+instructing Turkish ISPs to return wrong IP address information
+when <tt>twitter.com</tt> domains were resolved, so that DNS would instead
+return IP
+addresses that took users to a government web page announcing the block.
+Turks quickly discovered that setting their DNS servers to foreign
+recursing resolvers such as Google's would bypass the block, and some
+went a step further by spray-painting the IP addresses of Google's DNS
+servers on public buildings.  Other governments engage in similar
+practices on a routine basis.
+
+
+<h4>The solution</h4>
+
+<p>
+It's been slow in coming, but DNSSEC is now pretty much here.  It
+enables cryptographic signatures to be distributed in the DNS alongside
+existing information, so that resolvers that care about such things can
+ask for it; they can also rely upon the answers they get.  This is done
+by defining a few new DNS Resource Record (RR) types:
+
+<ul class="spacylist">
+
+ <li><b><tt>RRSIG</tt></b>: This one's the workhorse; it's a signature for an
+RR, made with the appropriate key pair.  To
+verify the authenticity of some RR that has just been queried, whether it was
+an <tt>A</tt> record, an <tt>MX</tt>, a <tt>CNAME</tt>, or some other
+record, the accompanying <tt>RRSIG</tt> is the starting point.
+
+ <li><b><tt>DNSKEY</tt></b>: This asserts one of the keys (yes, plural, we'll come to
+that) for a particular zone or subzone.  This is something given out
+to the world for your own zone(s), much like an SSH server announcing
+its own public key on connection.
+
+ <li><b><tt>DS</tt></b>: This is how trust is distributed.  It's a fingerprint
+for the primary <tt>DNSKEY</tt> record, generated by the zone's parent
+(usually, the registrar) and distributed as part of the <a
+href="https://en.wikipedia.org/wiki/Domain_Name_System#Circular_dependencies_and_glue_records">glue</a>.
+Like 
+any other RR, it also comes with an <tt>RRSIG</tt> record, also
+generated by the zone's parent.  This is how people can trust your
+<tt>DNSKEY</tt> records when you return them in response to a query.  Its
+existence also 
+functions as a flag that DNSSEC extensions should be checked by a
+capable resolver for queries in the zone in question.
+
+ <li><b><tt>NSEC3</tt></b>: It is as important to sign your negative responses
+as your positive ones, otherwise any attacker could simply sit there
+returning faked <tt>NXDOMAIN</tt> responses for queries about all your
+hostnames.  <tt>NSEC3</tt> provably says that no such RR exists, in such
+a way as to cover a <a href="https://tools.ietf.org/html/rfc5155">range of
+possible name queries</a> without enabling a brute-force
+search of the namespace.
+
+</ul>
+
+The chain of trust ends up with the public key that is used to sign the DNS root.
+This is the DNSSEC equivalent of your browser's CA bundle, and it should
+already be known to any resolver that intends to do DNSSEC.
+
+
+<h4>Can I use it?  Should I?  How do I?</h4>
+
+Not all top-level domains (TLDs) currently implement DNSSEC.  <a
+href="https://en.wikipedia.org/wiki/List_of_Internet_top-level_domains">Wikipedia's
+list of TLDs</a> includes information on which do and do not support
+DNSSEC, but it's pretty widely supported, and if you're not doing
+registration in some obscure country-code TLD just to get a cute domain
+name, you probably can deploy DNSSEC.
+
+<p>
+The following shows how I enabled DNSSEC on
+<tt>teaparty.me.uk</tt> by following a procedure which was developed from
+<a href="https://www.nlnetlabs.nl/publications/dnssec_howto/">NLNetLabs'
+excellent HOWTO</a>, to whose authors I am grateful.  You will need to
+be using a BIND implementation that is DNSSEC-capable, but I'm using
+BIND 9.8.2 on CentOS 6, which is pretty old, and it works fine.
+
+<p>
+First, you have to generate your zone keys.  Second, you have to
+include your keys in your zone file and sign your zone.  Finally, you have to
+generate your <tt>DS</tt> record, and propagate it through your
+registrar.
+
+<p>
+So, first off, generate the keys.  They come in two types:
+a key-signing key (KSK), which is used only to sign other keys, and
+a zone-signing key (ZSK), which is used to sign all the other RRs.
+These do not have to be different keys, but best practice is to use a
+different KSK and ZSK.  Key lengths
+ and algorithm choices are a matter for
+you to decide.  Also, the choice between <tt>/dev/random</tt>
+and <tt>/dev/urandom</tt> is yours to make; my server has a hardware
+random-number generator (RNG)
+attached, without 
+which this process might have taken some time.  Note also that I do this in the
+<em>parent</em> of the directory that holds the zone files themselves,
+as I find it convenient to keep the keys there.
+
+<pre>
+    [root@lory dns]# dnssec-keygen -r/dev/random -f KSK -a RSASHA1 -b 2048 teaparty.me.uk
+    Generating key pair...............................+++ ..........................+++ 
+    Kteaparty.me.uk.+005+02104
+    [root@lory dns]# dnssec-keygen -r/dev/random        -a RSASHA1 -b 2048 teaparty.me.uk
+    Generating key pair.....+++ .................+++ 
+    Kteaparty.me.uk.+005+60996
+</pre>
+
+Here, the <tt>-b</tt> chooses the key length and the <tt>-a</tt> is used to
+choose the cryptographic algorithm to be used.
+The last line of the output in each case is the base name of the
+key files, one ending <tt>.key</tt> and the other ending in
+<tt>.private</tt>, which have just been created in the working
+directory.  The filename includes the zone name, the algorithm type (<a
+href="https://tools.ietf.org/html/rfc4034#appendix-A.1">005=RSA/SHA-1</a>),
+and a five-digit random key identifier
+which helps detect key rollovers (about which <a
+href="https://www.nlnetlabs.nl/publications/dnssec_howto/#x1-400005">more
+may be found here</a>).  Now, let's extract the meat, that being the
+new keys, from those <tt>.key</tt> files we just created:
+
+<pre>
+    [root@lory dns]# grep DNSKEY *teaparty.me.uk*.key
+    Kteaparty.me.uk.+005+02104.key:teaparty.me.uk. IN DNSKEY 257 3 5 AwEAAdCM/LeSga8...
+    Kteaparty.me.uk.+005+60996.key:teaparty.me.uk. IN DNSKEY 256 3 5 AwEAAcQxmpGFwWw...
+</pre>
+
+The keys in the above output have been truncated to avoid filling
+your screen with gibberish.  Note the leading 256 and 257 in the
+<tt>DNSKEY</tt> RRs: an even number indicates a ZSK and an odd number,
+a KSK.  Your KSK is your zone's primary key, from which we will later
+derive your <tt>DS</tt> record.
+
+<p>
+Next up is to put the two <tt>DNSKEY</tt> RRs into your
+zone file, then sign it with the keys you have just created.  Signing is
+accomplished with the <tt>dnssec-signzone</tt> command:
+
+<pre>
+    [root@lory ~]# cd /var/named/chroot/var/dns/primary/
+    [root@lory primary]# /usr/sbin/dnssec-signzone -o teaparty.me.uk \
+        -f teaparty.me.uk.signed -K .. -k Kteaparty.me.uk.+005+02104.key \
+	-e +3024000 -N unixtime teaparty.me.uk Kteaparty.me.uk.+005+60996.key
+    dnssec-signzone: warning: teaparty.me.uk:8: no TTL specified; using SOA MINTTL instead
+    Verifying the zone using the following algorithms: RSASHA1.
+    Zone signing complete:
+    Algorithm: RSASHA1: KSKs: 1 active, 0 stand-by, 0 revoked
+			ZSKs: 1 active, 0 stand-by, 0 revoked
+    teaparty.me.uk.signed
+</pre>
+
+First, I changed into the directory where the zone file is (in whose
+parent, you will recall, the keys are kept).  Then I signed the zone;
+important flags include:
+
+<ul class="spacylist">
+ <li><tt>-o</tt> specifies the zone origin (domain name); this can be
+inferred from the filename, but I prefer to keep it explicit.
+ <li><tt>-f</tt> specifies the file that will contain the signed zone; I
+will need to alter my <tt>named.conf</tt> file so that the zone is taken
+from this signed file in future.
+ <li><tt>-K</tt> specifies where to find key files.
+ <li><tt>-k</tt> specifies the file containing the KSK.
+ <li><tt>-e</tt> specifies the date until which I wish the
+signatures to remain valid.  +3024000s is now + 35 days, which is designed to
+let me automate this signing with <tt>cron</tt> on the first of every
+month without the signatures ever expiring, even if the leap second people at <a
+href="https://www.iers.org/IERS/EN/Home/home_node.html">the IERS</a>
+decide to put quite a lot of extra seconds onto the end of any given
+month.
+ <li><tt>-N</tt> specifies that the zone serial number (SN) in the new,
+signed zone file will be Unix time.  I could use <tt>-N&nbsp;keep</tt> to
+preserve the SN from the input unsigned, zone file, but I prefer this.
+</ul>
+
+Finally, the two arguments are the name of the zone file (which for me is
+simply the name of the zone), and the ZSK filename.
+
+<p>
+The last step is to generate your <tt>DS</tt> record from your KSK.  This
+has already been done by signing the zone; you will notice in the
+zone file directory a file called, in my case, 
+<tt>dsset-teaparty.me.uk.</tt>.  This contains a couple of potential
+<tt>DS</tt> records that differ only in the digest type being used ("1"
+versus "2") and thus also in the digest of the key itself:
+
+<pre>
+    [root@lory primary]# cat dsset-teaparty.me.uk.
+    teaparty.me.uk.         IN DS 2104 5 1 1E8AB98D...
+    teaparty.me.uk.         IN DS 2104 5 2 440A7FA1... 6F8640BE
+</pre>
+
+This can also be done manually with the <tt>dnssec-dsfromkey</tt>
+command, which can be fed either the zone file or the KSK file.
+Although <a href="https://tools.ietf.org/html/rfc4034">RFC 4034</a>
+says that having a <tt>DS</tt> record with digest type&nbsp;1 (SHA-1) is
+mandatory, <a href="https://www.rfc-editor.org/rfc/rfc4509.txt">RFC
+4509</a> defines the digest type&nbsp;2 (SHA256) digest, and specifies that
+digest type&nbsp;1 should be ignored if type&nbsp;2 is present, in keeping with
+the move away from SHA-1.  Most people seem to publish only the SHA-256
+(digest type&nbsp;2) record, and this works well for me.
+
+<p>
+So I will give the digest type&nbsp;2 record to my registrar through
+whatever mechanism it has decided is appropriate.  For registrations
+in <tt>.uk</tt> I do it through Nominet's website, being a registrar
+myself; alternatively, one would go through one's registrar.   For
+<tt>.com/.net/.org</tt> domains, which I register through an old friend,
+I email the DS record to him under cover of PGP, and he passes it up the
+chain of registrars until it gets to someone who can put it into the
+proper TLD zone file.
+
+<h4>And is it working?</h4>
+
+You can check for DNSSEC capability in your normal resolution
+chain by using <tt>dig&nbsp;+trace</tt>.  Try:
+<pre>
+    $ dig&nbsp;+trace www.google.com
+</pre>
+If you
+see a bunch of <tt>RRSIG</tt> and <tt>DS</tt> records being returned in
+the chain along with the more usual <tt>A</tt> and <tt>NS</tt> records,
+you're DNSSEC-capable.  If your normal resolution chain isn't capable,
+try:
+<pre>
+    $ dig&nbsp;+trace www.google.com&nbsp;@8.8.8.8
+</pre>
+That will show whether your
+client is 
+capable and so configured.  You'll need a DNSSEC-capable resolver to go
+any further.
+
+<p>
+If I take a DNSSEC-capable resolver, such as Fedora 24's, using a
+capable resolution chain such as Google's public servers, and I ask for
+explicit signature checks, I should get confirmation that all is well:
+
+<pre>
+    $ dig&nbsp;+sigchase test.teaparty.me.uk&nbsp;@8.8.8.8
+    ...
+    ;; Ok this DNSKEY is a Trusted Key, DNSSEC validation is ok: SUCCESS
+</pre>
+
+If I alter the <tt>RRSIG</tt> on my <tt>A</tt> record by one byte,
+increment the zone's SN, reload the zone, and repeat the test, I should
+get indication of a problem, ending with:
+
+<pre>
+    ;; Impossible to verify the Non-existence, the NSEC RRset can't be validated: FAILED 
+</pre>
+
+<p>
+The usual sources of error are cut-and-paste failings,
+publishing a <tt>DS</tt> record without a signed zone (recall that the
+presence of the record is the indicator that a zone should be signed),
+or major clock skew in your DNS server.  The latter can cause problems
+because TTLs in DNSSEC RRs are <em>absolute</em> timestamps, unlike the
+<em>relative</em> TTLs of pre-DNSSEC RRs; if clocks are badly wrong,
+RRs that are already out-of-date can be propagated, and these will fail
+to validate.
+
+<p>
+So in summary, DNSSEC isn't complex; honestly, it's not.  It's fiddly,
+to be sure; many small parts have to be assembled in the right order.
+But once this is done, it just works, to the net benefit of all.  If you
+are in charge of any DNS infrastructure, and you haven't come to grips
+with this already, now might be a good time for you to tackle DNSSEC.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">DNSSEC</a></td></tr>
+            <tr><td><a href="../Archives/GuestIndex/index.html">GuestArticles</a></td><td><a href="../Archives/GuestIndex/index.html">Yates, Tom</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/708904/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor709210"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 14, 2016 21:14 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/709210/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709210" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The nigh-incomprehensible horror show which you brushed over, of course, is key rollover. About a quarter of the article you linked to is devoted to it, everyone seems to have to hack up their own scripts to do it, and if you get it wrong the first you know of it is that nobody using a DNSSEC-capable resolver can resolve your names properly, possibly for a while, possibly forever. (And, of course, because DNS is a system with distributed caching, nodes furthest from you that reference your zone fairly rarely are most likely to see the problem. *You* most likely won't see it, but random DNS-capable queriers will -- and won't be able to email you about it because your DNS is broken -- and even if they could, unless they're networking people they won't have any idea what's wrong or who to email anyway. Good thing you have that gmail account -- at least the DNS experts can get through. :) )<br>
+<p>
+I do wonder what proportion of DNSSEC-related failures are due to malicious actors and what proportion are due to the key rollover disaster area. I suspect the vast majority are rollover problems. Oh and don't forget that glibc's resolver is not DNSSEC-capable (so you need to run a local forwarder that is), and has no way to tell clients about DNSSEC-related failures in any case (it generally fakes them as being nameserver problems, but even that is not consistent); even if it could, the applications have no idea what to do about such failures.<br>
+<p>
+DNS spoofing and cache poisoning by hostile actors is a serious problem with DNS, indeed -- but whether DNSSEC makes it better when widely deployed, or just makes the DNS ridiculously unreliable, is something that is not yet clear.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709210/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709263"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 10:50 UTC (Thu)
+                               by <b>madhatter</b> (subscriber, #4665)
+                              [<a href="/Articles/709263/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="madhatter" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709263" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I completely agree with you that key rollover is nasty, but it's also not mandatory.  It's best-crypto-practice, to be sure, but how often do you re-key your SSH servers, and how much more traffic flows under cover of those keys?  It's perfectly possible to adopt DNSSEC without also binding yourself to rolling your keys over, so the desire not to get to grips with that shouldn't be a bar to DNSSEC adoption.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709263/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor710331"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 30, 2016 11:39 UTC (Fri)
+                               by <b>ahla</b> (guest, #108052)
+                              [<a href="/Articles/710331/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ahla" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor710331" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+BIND does automatic keyrollover for ZSK. KSK are rolled over not that often and it's rather unproblematic because you double sign and check the results. Only when the new key works correctly you invalidate the old one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/710331/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor709208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 14, 2016 21:28 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/709208/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709208" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Good article, I had a hard time finding something this digestible when I first set it up, hopefully it'll save others a few hours of searching.</p>
+<p>As mentioned, it needs re-signing periodically. The default is a nasty, arbitrary 30 days which has caught me off guard more than once, so I put this in my daily cron:</p>
+<pre>#!/bin/sh -eu
+PATH="/usr/sbin:/usr/bin"
+domain=$1
+
+# Only take action if the secure zone file is missing or stale:
+cd /var/bind/pri/
+test -f "${domain}.zone"
+test -n "$(find "${domain}.zone.signed" -mtime -25)" &amp;&amp; exit 0
+
+rndc freeze $domain
+dnssec-signzone -3 $(openssl rand 8 -hex) \
+  -A -N date -o $domain -t ${domain}.zone
+rndc thaw $domain</pre>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709227"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 0:18 UTC (Thu)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/709227/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smurf" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709227" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can compare dates directly, which makes more sense than abusing "find".<br>
+<p>
+$ date -r /some/file +%s<br>
+1481680702<br>
+$ date -d "25 days ago" +%s<br>
+1479600938<br>
+<p>
+Thus:<br>
+test $(date -r "${domain}.zone.signed" +%s) -gt $(date -d "25 days ago" +%s) &amp;&amp; exit 0<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709227/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709365"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 17:37 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/709365/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709365" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not abuse: it's deliberately testing that the file is new enough _and_ that it hasn't been removed; make's rebuild semantics but with a date offset. Yours would work but print two errors for the latter case.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709365/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709484"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 17:33 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/709484/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smurf" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709484" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+True. So add 'test ! -e "$file" ||' in front.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709484/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor709436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 13:02 UTC (Fri)
+                               by <b>itvirta</b> (guest, #49997)
+                              [<a href="/Articles/709436/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="itvirta" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709436" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Using `find` also needs only one fork+exec instead of two, and `find -mtime` is likely to be more portable than GNU-style `date -r`.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor709213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 14, 2016 21:30 UTC (Wed)
+                               by <b>edmonds42</b> (guest, #42670)
+                              [<a href="/Articles/709213/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edmonds42" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709213" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Was hoping for an LWN-style thinkpiece on the lack of adoption of DNSSEC instead of yet another DNSSEC and BIND howto.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 14, 2016 21:57 UTC (Wed)
+                               by <b>edmonds42</b> (guest, #42670)
+                              [<a href="/Articles/709214/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edmonds42" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709214" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As far as the howto goes though:<br>
+<p>
+- BIND 9.8.2 is pretty ancient, even if the version shipped in CentOS gets backported bug fixes from the upstream vendor. You leave a lot of features on the table by not using a release from the 9.9, 9.10, or 9.11 series.<br>
+<p>
+- Please don't deploy SHA-1. You mention hashed authenticated denial-of-existence using NSEC3 records, but then you sign your zone with RSASHA1, which doesn't support NSEC3. You probably want to sign with a slightly more modern algorithm like RSASHA256 or ECDSAP256SHA256. At some point ED25519/ED448 will be added to DNSSEC. See <a href="https://tools.ietf.org/html/draft-wouters-sury-dnsop-algorithm-update">https://tools.ietf.org/html/draft-wouters-sury-dnsop-algo...</a> for current thinking on DNSSEC algorithm usage.<br>
+<p>
+- Please don't use cron to re-sign zones. You use dnssec-signzone to sign your zone initially but leave out that it requires periodic re-signing. If you upgraded to BIND 9.9+ you could use a more modern style of BIND zone signing ("auto-dnssec maintain" + "inline-signing yes") that automatically re-signs zones while keeping the automatically maintained DNSSEC RRs separate from the manually maintained DNS zone. This style is good if you want to keep your zone files (but not the DNSSEC RRs) in git. See: <a href="https://kb.isc.org/article/AA-00626/0/Inline-Signing-in-ISC-BIND-9.9.0-Examples.html">https://kb.isc.org/article/AA-00626/0/Inline-Signing-in-I...</a>.<br>
+<p>
+- dig's +sigchase mode isn't particularly great. ISC recommends the new "delv" tool in BIND 9.10+, since it uses the same DNSSEC validation code that BIND uses. See: <a href="https://kb.isc.org/article/AA-01152/0/Eleven-twelve-dig-and-delv%3A-BIND-9.10.html">https://kb.isc.org/article/AA-01152/0/Eleven-twelve-dig-a...</a>.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor709217"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 14, 2016 21:53 UTC (Wed)
+                               by <b>bwelling</b> (subscriber, #13189)
+                              [<a href="/Articles/709217/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bwelling" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709217" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The list of new record types mentions the NSEC3 record, but not the NSEC record, but signed zone uses NSEC, not NSEC3 (as seen in the error).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709217/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor709218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 14, 2016 22:12 UTC (Wed)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/709218/">Link</a>] (20 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kjp" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709218" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The article sure isn't selling me on the *need* for this.  Wouldn't the twitter example (downgrade attack) be solved by HSTS?  After that, it's just a normal DOS / censorship attack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709221"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 14, 2016 22:31 UTC (Wed)
+                               by <b>mtaht</b> (guest, #11087)
+                              [<a href="/Articles/709221/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mtaht" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709221" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wanted to note that dnssec has to happen all the way to the edges.<br>
+<p>
+dnsmasq gained support for it finally - 3 years worth of debugging - a year or two back.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709221/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor709232"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 4:03 UTC (Thu)
+                               by <b>magila</b> (guest, #49627)
+                              [<a href="/Articles/709232/">Link</a>] (18 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magila" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709232" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A better example of the problem DNSSEC solves is the hacking of Diginotar and subsequent issuance of fraudulent certs for various popular domains. DNSSEC solves the well-known problem of all CAs being able to issue certs for any domain. More generally, the set of trusted parties with DNSSEC is a strict subset of the trusted parties with the CA system. With CA certs you trust:<br>
+<p>
+1. Whoever supplied your list of CAs.<br>
+2. All certificate authorities.<br>
+3. The domain registrar and TLD owner.<br>
+<p>
+The last one only applies if you trust domain validated certs, which of course everyone does. There are various band-aids you can layer on top of this like key pinning, but fundamentally this is who your trusted parties are. With DNSSEC+DANE on the other hand, you trust:<br>
+<p>
+1. Whoever supplied your list of TLD keys.<br>
+2. The domain registrar and TLD owner.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709232/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709245"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 7:52 UTC (Thu)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/709245/">Link</a>] (17 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alonz" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709245" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Unfortunately DNSSEC + DANE has been shown to be impractical in practice: see <a href="https://www.imperialviolet.org/2015/01/17/notdane.html">this writeup</a> for the reasons.
+<p>
+And with the advent of mechanisms like Certificate Transparency, which remove almost all need for trust at all, I suspect DNSSEC has become useless already. It is fixing yesteryear's problems using yesterday's solutions, and its assumptions (especially regarding trust) simply do not scale to today's Internet. And with the encroaching Internet-of-Things apocalypse, and billions of new devices dynamically connecting to the network and offering their services, the security afforded by DNSSEC will become even more irrelevant.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709245/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709248"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 8:47 UTC (Thu)
+                               by <b>robbe</b> (guest, #16131)
+                              [<a href="/Articles/709248/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="robbe" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709248" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not all the world is http(s). Take smtp, for example. Woefully insecure without dnssec. ssh? Escape the TOFU with dnssec.<br>
+<p>
+Even if we stay with https, where CAs should give us something equivalent to dnssec. Ever wondered what „domain-validated“ means?<br>
+<p>
+Not to say that dnssec is not full of problems… way overengineered (second system, anyone?); bad tool support; unhelpful documentation; targeted at large dns providers, not the „little guy“; no thought given to privacy at all.<br>
+<p>
+Yes, dnssec won’t magically make your lightbulb or your car secure. Neither will it feed the hungry, nor end any war. That doesn’t make it irrelevant, though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709248/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 9:54 UTC (Thu)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/709253/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alonz" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709253" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      There is no (technical) reason that I can see for SMTP servers not to support certificate transparency. Maybe I should attempt an integration myself&hellip;<p>
+The SSH case I actually see as a counter-example: sure, on first connection you may have slightly more trust due to DNSSEC&nbsp;&ndash; but on every connection after that, SSH's own security mechanisms are generally sufficient (and quick), while DNSSEC would impose extra communication costs on every single connection.
+<p>
+As for security&mdash;the security for &ldquo;domain-validated&rdquo; certificates is precisely the same level as what DNSSEC offers. Except with LetsEncrypt and similar services, you can now get this same level of security with (way far) less hassle than with DNSSEC.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709280"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 15:13 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/709280/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709280" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't understand how you can consider the security of DV to be "precisely the same level" as DNSSEC<br>
+<p>
+Today, on paper, DV means whatever a CA thinks it means. So far as we know none of them have completely ridiculous criteria, but keep in mind that we've discovered nonsense such as "Oh, they had proof of control for www.example.com so we presumed that meant they controlled example.com as well" is widespread, and until it was revealed nobody knew that's how it was working.<br>
+<p>
+In a future Ballot 169 world (Ballot 169 is the 169th ballot of the CA/B forum, an informal gathering of Certificate Authorities and trust store owners which writes the Baseline Requirements, which all the major trust stores require CAs to obey, it is currently in limbo due to hilarious patent-related legal wrangling) the rules will be written down so that you can see what is and isn't a "validation" under DV<br>
+<p>
+So far, assuming Ballot 169 survives in full, an applicant is entitled to a DV certificate for some DNS name from a CA if any of:<br>
+<p>
+* A guy we're pretty sure is an actual Real Lawyer™ swore they (the applicant) own the domain name<br>
+* A guy we're pretty sure works for the domain registrar says they own the domain name<br>
+* We (the CA) are the domain registrar and we think they own the domain name.<br>
+* We Faxed the person listed in WHOIS for that domain and they sent back a Fax saying it's fine<br>
+* We sent an email to an email address listed in WHOIS for that domain and they pushed a button on a web form to say it's fine<br>
+* We did a DNS lookup for a magic TXT entry created by the applicant with that domain name, it matches what we expected<br>
+* We did an HTTP (port 80) GET of a text file with a magic file path created by the applicant, it matches what we expected<br>
+* We did a TLS connection on port 22 (good luck with that), 25, 443 or 115 (no, I don't know either, I tried moaning) and used SNI to ask for the certificate for a crazy invalid name, the certificate presented matched what we expected.<br>
+<p>
+Now, maybe I'm just too paranoid, but most of those don't feel anywhere close to the security from DNSSEC. Only the DNS one comes close, and only when, in fact, it was secured using DNSSEC. And keep in mind Ballot 169 is considered a _major tightening_ of the security of DV. Some Certificate Authorites feel it went too far!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709280/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709758"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2016 20:43 UTC (Tue)
+                               by <b>Lennie</b> (subscriber, #49641)
+                              [<a href="/Articles/709758/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lennie" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709758" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, at least they are tightening up DV.<br>
+<p>
+Are they going to improve EV as well ? I think EV has CT as a requirement now, right ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709758/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709771"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">EV</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2016 1:34 UTC (Wed)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/709771/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709771" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is not, so far as I know, any activity to "improve" EV from the CA/B forum. Was there some particular problem you feel needs addressing?<br>
+<p>
+In terms of the trust stores, rather than CA/B...<br>
+<p>
+Google's Chrome treats EV certificates as non-EV unless SCTs are supplied (which means the certificate was logged) in accordance with their announced CT policy. At some point (currently scheduled for October 2017) Chrome will care about SCTs in all new certificates.<br>
+<p>
+Nobody else of any significance has a browser which implements CT, although Mozilla expects to ship one in 2017.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709771/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor709254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 10:47 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/709254/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709254" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Certificate Transparency emphatically does _not_ remove the need for trust. What it does is permit a sorely needed trust-but-verify model in which we are, if we perform the verification steps dutifully as a culture, able to justify our trust in the CAs and in the CT system itself on a continuing basis.<br>
+<p>
+A trustworthy CA will log all issued certificates (in practice, all Web PKI certificates, but IMNSHO all the other PKIs we might care about here aren't worth much) and interested parties can verify that the logs are consistent and every certificate seen was logged.<br>
+<p>
+Much of the system only exists as design, not as implementation, or not as working implementation that's out in the wild with millions of certificates and billions of end users. What we have today are the following components:<br>
+<p>
+* CT logs, implementing the current RFC 6962, to be replaced by 6962-bis once it exists<br>
+* CT monitors (but not auditors, outside of a lab) surfacing things from the logs to people who care<br>
+* Many popular CAs logging to at least one log<br>
+* SCT verification enabled tentatively in Chrome for EV certificates only<br>
+<p>
+In the near-ish future (2017) we expect to have<br>
+<p>
+* All Web PKI participating CAs logging to several logs<br>
+* SCT verification required in Chrome, maybe Firefox, with Safari and possibly even Edge announced<br>
+* At least one production CT monitor ensuring that, from where it is at least, the CT system integrity checks out<br>
+<p>
+That still leaves to be done<br>
+<p>
+* Gossip technology, ensuring all clients are seeing a consistent CT log world, anybody who can at least sometimes see the Internet is seeing the _same_ Internet with the same trustworthy CAs in it.<br>
+<p>
+_Because_ the CAs are mostly trustworthy what we see today is already useful. But as the recent StartCom/ Wosign incident demonstrated a CA can still just assert that they're trustworthy and intentionally deceive us without penalty, at least until they get caught. Keep in mind that this incident implicated not only two CAs (well, actually one CA, but part of their deceit was in continuing the fiction that StartCom was an independent company) but a Famous Brand Professional Services company, EY Hong Kong, and a major payment services company (Tyro, in Australia). There is plenty of distrust to go around.<br>
+<p>
+Now, what value _does_ DNSSEC give us? Well funny thing, the only way the Web PKI got this big was via DV, Domain Validation. And DV is a really sketchy validation technique, subject to all manner of MITM and other problems _unless_ you have some way to at least know the DNS records are accurate. What do we have that lets us know the DNS records are accurate? DNSSEC. Sure enough one of the largest (probably straight up the largest but it's hard to tell) users of DV on today's Internet does check DNSSEC during their DV process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709457"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 15:30 UTC (Fri)
+                               by <b>bandrami</b> (guest, #94229)
+                              [<a href="/Articles/709457/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bandrami" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709457" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And I still think this is the wrong threat model in general. The number of servers I access where I trust the alleged server more than I would trust someone pretending to be that server is vanishingly small: work on validating that vanishingly small corpus (yes, everybody's vanishingly small corpus is different, so it's going to be a moderate corpus) and stop making security tools get in the way of preventing passive attacks on the rest.<br>
+<p>
+Take LWN. I'm reading it over TLS right now, meaning I know nobody has read or modified the traffic in transit between the web server and me. Thanks to PKI, I also have an assurance from RapidSSL that this server is in fact lwn.net, for some definition of "is in fact" that RapidSSL considered appropriate. But even if RapidSSL verified LWN that doesn't particularly help me: I have no actual reason to trust lwn.net more than I would trust someone else pretending to be lwn.net.<br>
+<p>
+Over the course of almost two decades now, I've probably encountered thousands of TLS/SSL errors, 100% of which have been "Type I" errors. I have never, ever, had TLS catch someone in the course of trying to MiTM me. I have had it, over and over again, make it time consuming and expensive to provide the defense against passive attacks that I actually care about more.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709457/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709483"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 17:37 UTC (Fri)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/709483/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nybble41" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709483" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I have no actual reason to trust lwn.net more than I would trust someone else pretending to be lwn.net.</font><br>
+<p>
+You really think you have no more reason to trust a long-standing member of the Linux community that you've interacted with on many previous occasions without incident vs. an anonymous attacker pretending to be lwn.net? The mere fact that they're pretending to be someone else suggests that the interloper does not have your best interests in mind. If you didn't trust lwn.net more than the attacker there would be no reason to go to the trouble of assuming their name.<br>
+<p>
+Keep in mind that TLS protects more than just the visible content of the page; it also guards against third-party JavaScript attacks and other hidden exploits. It is not at all uncommon for "trusted" intermediaries such as ISPs to inject tracking data into requests (such as the unique advertising IDs injected into unencrypted HTTP headers by popular mobile network providers), or even insert scripts or other content into the pages returned to the browser. Even when these changes are not actively malicious, they can interfere with correct operation or introduce new vulnerabilities. The only protection we have against such changes is properly authenticated TLS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709483/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709487"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 18:32 UTC (Fri)
+                               by <b>bandrami</b> (guest, #94229)
+                              [<a href="/Articles/709487/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bandrami" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709487" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; You really think you have no more reason to trust a long-standing member of the Linux community that you've interacted with on many previous occasions without incident vs. an anonymous attacker pretending to be lwn.net?</font><br>
+<p>
+Correct.<br>
+<p>
+<font class="QuotedText">&gt; The mere fact that they're pretending to be someone else suggests that the interloper does not have your best interests in mind.</font><br>
+<p>
+Nor do I think LWN has my best interests in mind. (Nothing against them, I just also have no reason to trust them.)<br>
+<p>
+<font class="QuotedText">&gt;  If you didn't trust lwn.net more than the attacker there would be no reason to go to the trouble of assuming their name.</font><br>
+<p>
+Exactly, which is why a third party's verification of the domain isn't terribly useful to me. (I can't remember how I paid my subscription; if I was entering my info on a page hosted on LWN then obviously I cared for that session, but in general I don't.) This may also relate to how, as I've mentioned, of the several thousand TLS errors I've seen in my career, none of them have ever been an attempt at a MiTM. <br>
+<p>
+<font class="QuotedText">&gt;  it also guards against third-party JavaScript attacks and other hidden exploits</font><br>
+<p>
+Both of which LWN might supply, too, and my browser settings make that assumption (e.g. I don't in general enable javascript to begin with)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709487/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709495"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 19:29 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/709495/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709495" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; none of them have ever been an attempt at a MiTM.</font><br>
+<p>
+You've never even attempted to use Wifi provided at hotels, malls, airports, coffee shops, or the like? They MITM everything all the time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709495/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 19:37 UTC (Fri)
+                               by <b>bandrami</b> (guest, #94229)
+                              [<a href="/Articles/709497/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bandrami" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709497" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; You've never even attempted to use Wifi provided at hotels, malls, airports, coffee shops, or the like?</font><br>
+<p>
+$DEITY no. That's like eating an unwrapped sandwich you happen to find somewhere. 4G plans are cheap. (Yes, then you're at the mercy of your cell carrier for the same dangers, but that's one actor rather than multiple ones so an easier risk to mitigate.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709504"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 19:55 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/709504/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709504" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, I wouldn't call it cheap, but I do still have an unlimited 4G plan from Verizon, so I know that strategy :) . But some of those places have shitty cell service and wireless is worth the attempt (though I do refuse to continue if they attempt to intercept SSL connections).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709504/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor709505"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 20:17 UTC (Fri)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/709505/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nybble41" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709505" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Nor do I think LWN has my best interests in mind.</font><br>
+<p>
+Trust is not a binary state. There is plenty of reason to believe that an anonymous attacker is far more likely to cause you harm than LWN. On the other hand, a blind "trust no one" policy causes direct harm to yourself in the form of missed opportunities. For example, a significant fraction of the modern Internet is unavailable to you so long as you leave JavaScript disabled. You may not deem that a great loss, but it's still a cost you pay for refusing to extend a reasonable degree of trust to those who have earned it.<br>
+<p>
+<font class="QuotedText">&gt; This may also relate to how, as I've mentioned, of the several thousand TLS errors I've seen in my career, none of them have ever been an attempt at a MiTM.</font><br>
+<p>
+That is because TLS is doing its job and making MitM difficult to accomplish, and thus a less attractive target. If those connections were not protected by TLS you would see a lot more MitM activity.<br>
+<p>
+<font class="QuotedText">&gt; 4G plans are cheap. (Yes, then you're at the mercy of your cell carrier for the same dangers, but that's one actor rather than multiple ones so an easier risk to mitigate.)</font><br>
+<p>
+A 4G plan from AT&amp;T, perhaps? Or Verizon? Both are well known for inserting tracking information into HTTP headers. Big-name wired ISPs have also been caught inserting their own ads and scripts into web pages. It isn't just free WiFi access points you have to worry about, and one actor is quite enough to cause damage. TLS is the only mechanism available which effectively mitigates the risk of tampering with HTTP traffic.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709505/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor709983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2016 16:09 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/709983/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709983" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It is not at all uncommon for "trusted" intermediaries such as ISPs to inject tracking data into requests (such as the unique advertising IDs injected into unencrypted HTTP headers by popular mobile network providers), or even insert scripts or other content into the pages returned to the browser.</font><br>
+<p>
+I'm minded of a small scandal $deity-knows-how-many years ago. Somebody bought a COTS router and put it in their network. The system started crashing at random. Turns out the router was randomly inserting advertising into what it *thought* were web pages. Iirc it was a SCADA system! and was using port 80 and html to communicate, and being a closed system it hadn't allowed for tampering with its wire protocol ...<br>
+<p>
+Or what about when some TLD or registrar started intercepting invalid domain requests and returning an IP pointing at a web advertising site ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor710256"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 28, 2016 13:23 UTC (Wed)
+                               by <b>sampablokuper</b> (guest, #53150)
+                              [<a href="/Articles/710256/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sampablokuper" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor710256" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>&gt; Unfortunately DNSSEC + DANE has been shown to be impractical in practice: see <a rel="nofollow" href="https://www.imperialviolet.org/2015/01/17/notdane.html">this writeup</a> for the reasons.</p>
+
+<p>I am curious to know what LWN readers make of that writeup by Adam Langley, and of the objections to DNSSEC by Thomas Ptacek that it links to.</p>
+
+<p>Ptacek, in particular, seems to be leading the charge against DNSSEC: see his further comments about it at Hacker News <a rel="nofollow" href="https://news.ycombinator.com/item?id=8894902">here</a> and <a rel="nofollow" href="https://news.ycombinator.com/item?id=12376175">here</a>.</p>
+
+<p>I enjoyed Tom Yates's article above, but had hoped it would address some of Ptacek and Langley's arguments and the relevant counter-arguments. Perhaps a future LWN piece will delve into the relative merits of DANE, DNSSEC and their alternatives.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/710256/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor710300"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 29, 2016 2:32 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/710300/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor710300" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One thing jumps out from all those HN posts — that despite having the time to complain for pages upon pages, tptacek doesn't make a single mention of any alternative solution. He just wants to see a thing people have built at great effort, to fill a real need, fail out of spite.<br>
+<p>
+My DNS is using DNSSEC for the same reason my web browser depends on CAs, X.509 and ASN.1; it's a trash fire, nobody who uses it likes that it's necessary, but that's just how things on the internet (and computers in general) *are*. And while I'd prefer both DNS and TLS become obsolete in my lifetime, whining that some fix isn't good enough won't make a perfect one magically appear.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/710300/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor710304"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 29, 2016 4:54 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/710304/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor710304" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+DNSSEC is actually pretty nice as a protocol. Well, except that it has to work over DNS. Amazingly, it doesn't depend on X.509, or ASN.1, or even TLS.<br>
+<p>
+It's a pretty straightforward and obvious design overall. The problem is that its implementations are not the easiest ones to use so the maintenance burden is not trivial. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/710304/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor709229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DNS infections preventable with DNSSEC and you get to sign your existing SSL cert </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 1:51 UTC (Thu)
+                               by <b>johnjones</b> (guest, #5462)
+                              [<a href="/Articles/709229/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johnjones" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709229" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Given that infections such as :<br>
+<p>
+<a href="https://www.proofpoint.com/us/threat-insight/post/home-routers-under-attack-malvertising-windows-android-devices">https://www.proofpoint.com/us/threat-insight/post/home-ro...</a><br>
+<p>
+plus the need to make sure that SSL certificates are not compromised by deploying DANE <br>
+(DANE allows a domain owner to specify which CA is allowed to issue certificates for a particular resource, which solves the problem of any CA being able to issue certificates for any domain.)<br>
+<p>
+<a href="https://en.wikipedia.org/wiki/DNS-based_Authentication_of_Named_Entities">https://en.wikipedia.org/wiki/DNS-based_Authentication_of...</a><br>
+<p>
+I'm not sure why any major site does not deploy this...<br>
+<p>
+<a href="http://blog.easydns.org/2015/08/06/for-dnssec/">http://blog.easydns.org/2015/08/06/for-dnssec/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709257"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DNS infections preventable with DNSSEC and you get to sign your existing SSL cert </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 10:25 UTC (Thu)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/709257/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anselm" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709257" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+The problem with DANE for the web is that browser support for DANE is really patchy. In general, the browser makers prefer solutions like HPKP because they need to handle HTTP, anyway, and like most reasonable people they would much rather not have to deal with DNS (especially DNSSEC) more than they have to.
+</p>
+<p>
+Unless there is more buy-in from browser vendors, there's really not a lot of incentive for web sites to deploy DANE, but until DANE is widely deployed there is little pressure on browser vendors to include support for it. It's a classic Catch-22 situation.
+</p>
+<p>
+(DANE has more of a chance to grow legs in the e-mail arena, because mail servers already deal with DNS and don't have anything to do with HTTP. Right now, much of the TLS-enabled mail traffic is handled on an “opportunistic” basis with no validation of a remote mail server's certificate, but DANE would give us a way to batten down the hatches within DNS, with no need for a separate PKI infrastructure.)
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709257/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DNS infections preventable with DNSSEC and you get to sign your existing SSL cert </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 19:53 UTC (Thu)
+                               by <b>drag</b> (guest, #31333)
+                              [<a href="/Articles/709373/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="drag" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709373" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There really is only 3 major browser makers that really matter... Mozilla, Google, and Microsoft.  If they do buy-in on DANE (or something similar) then it's pretty much a done deal. <br>
+<p>
+I also really believe in the need for a central name server service on the OS-level.  Doing things like tying into LDAP, kerberos, or AD is massively improved in reliability, performance, and adminstration by the use of SSSD, for example.  Local resolver for DNS and having applications depend on that local resolver just makes sense for me. <br>
+<p>
+So since it's effectively bad practice, nowadays, to have each and every application have it's own special configuration method and configuration for dealing with name services then the same thing may be true for certificates. <br>
+<p>
+Maybe along with local DNS there should be local certification service for programs to use to validate certs for various things via DANE or other similar mechanisms. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709407"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DNS infections preventable with DNSSEC and you get to sign your existing SSL cert </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 0:10 UTC (Fri)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/709407/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anselm" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709407" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote><em> Mozilla, Google, and Microsoft. If they do buy-in on DANE (or something similar) then it's pretty much a done deal.</em></blockquote>
+<p>
+In theory, yes. In practice, at least Google and Mozilla aren't at all keen on the idea.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709407/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor709251"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NSEC3 allows zone-walking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 9:46 UTC (Thu)
+                               by <b>vitek</b> (guest, #36586)
+                              [<a href="/Articles/709251/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vitek" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709251" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I cannot agree that NSEC3 does not allow "a brute-force search of the namespace".<br>
+<p>
+You quickly collect the hashes of existing names. Then you can guess the real names privately on your computer without connecting to dns server ever again. Old DNS (without DNSSEC) does not have this problem.<br>
+<p>
+<a href="https://dnscurve.org/espionage2.html">https://dnscurve.org/espionage2.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709251/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709534"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NSEC3 allows zone-walking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2016 5:18 UTC (Sat)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/709534/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709534" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I want to look for secret subdomains in a website I'd start with the TLS certificate's SAN field. Let's Encrypt encourages the practice of putting all of one's eggs in this basket, and they don't allow the safe alternative of wildcards.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709534/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709545"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NSEC3 allows zone-walking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2016 11:31 UTC (Sat)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/709545/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anselm" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709545" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+Wildcard certificates are widely considered problematic, mostly because it isn't clear what exactly they're supposed to mean, and various ambiguities can introduce subtle security issues (see, e.g., <a href="https://tools.ietf.org/html/rfc6125#section-7.2">RFC 6125</a>). There's also the problem that if a wildcard certificate is deployed on many different servers, they all need access to the corresponding private key, which increases the risk of that key becoming compromised.
+</p>
+<p>
+It's probably not a great idea in general to have certificates with lots of SANs, either; at least the private-key issue exists there, too. At least Let's Encrypt lets you have as many certificates as you like, so you're not encouraged to get a single certificate for all your domains from a commercial CA that charges you for every CSR they sign on your behalf.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709545/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor709554"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Certificate Transparency &amp; Redaction</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2016 16:18 UTC (Sat)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/709554/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709554" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you make certificates for the Web PKI you are already strongly encouraged -- and will soon be more or less obliged‡ -- to submit them to the Certificate Transparency logging infrastructure. In the particular case of a web server (and perhaps some day soon SMTP server) Google's systems will automatically submit anything they find in their travels anyway if it wasn't previously logged.<br>
+<p>
+Log monitors (the most famous is run by Rob at Comodo on <a href="https://crt.sh/">https://crt.sh/</a> and the second most famous is Google's which is part of their site about transparency and security) allow the public to peer into the logs, without that load impacting the logs themselves, some monitors offer a pay-for alerting service e.g. "We'll tell you about every certificate issued for example.com, example.org or my.example for $10 per year" and I presume that by now brand protecting outfits operate their own monitors.<br>
+<p>
+So you can already see the vast majority of all DNS names for which Web PKI certificates have been issued.<br>
+<p>
+Now, the idea from CAs that there should be "secret" names in public documents is not a new one. Earlier this year we discussed redaction technology for CT logging. It would be possible in principle to partly redact SAN DNS names, so for example ?.example.com might be any certificate issued for www.example.com or secret.example.com or xyzzy.example.com but not www.example.org. Such redaction would have a cost in terms of the value of CT logging (maybe it's fine if some random engineer got a certificate issued for test-preprod-server-04.example.com but you can't tell it wasn't for www.example.com based on the redacted logs) so it needs to be justified. So far, Google has determined that the cost is not justified and, although this technology exists, refused to accept redacted logging as sufficient.<br>
+<p>
+More or less every time we've asked CAs to justify, their response basically is "This is a legitimate need". Which is exactly the sort of phrase we associate with Mossack Fonseca and shell companies. Further details were conspicuously absent. In fact the last time we went round this loop the push back was even stronger, it was "essential" we were told that subscribers be able to redact parts of their X.500 Distinguished Name from the certificate, not just SANs. As usual no reason was forthcoming beyond "legitimate".<br>
+<p>
+Funny thing about Mossack Fonseca, when journalists could see what was really going on it didn't look terribly legitimate after all. Politicians resigned, scandals erupted, tax investigations began... How about that.<br>
+<p>
+One justification we have been shown is the idea of a temporary secret. Maybe Disney doesn't want us knowing their next Star Wars movie is named "Return of the Empire" and so return-of-the-empire.example shouldn't be revealed in CT logs. But this is basically just a protest of technological incompetence. Not only would star-wars-eight.example be a perfectly fine DNS name for this movie anyway, but if they must have the other name they need not issue a certificate until literally moments before it is needed. Choosing to provision the server with a certificate a month early, and then demand everybody else pay a price to keep its name secret is foolishness.<br>
+<p>
+‡ Early obligation imposed on Symantec broke loads of things for their customers recently. A cynical observer might think this constitutes tit-for-tat over Symantec's poor handling of a security incident last year. Whatever the reason, we can expect Google's engineers learned important lessons for when they do this in anger across the entire web late in 2017.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709554/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709756"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Certificate Transparency &amp; Redaction</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2016 19:50 UTC (Tue)
+                               by <b>niner</b> (guest, #26151)
+                              [<a href="/Articles/709756/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="niner" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709756" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How about this for a reason? We're hosting websites for about 1500 customers and have recently been victim of a successful DDoS attack. What we don't know is if we were the target or if it was one of our customers. If it was one of the customers, the way to become more resilient is to distribute them over multiple IP addresses in different ranges. But if we ourselves are the target, the attacker would just go after all our customers. Even such a broad scale attack is still quite affordable. Unless the attacker has no means to find out who those customers are. But with public listings of certificates, that's easy to find out.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709756/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709770"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Certificate Transparency &amp; Redaction</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2016 1:15 UTC (Wed)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/709770/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709770" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To make this into a reason you'd need to spell out the whole thing. How is it "easy to find out" the 1500 customers you host from the CT logs ? How would your proposed name redaction policy prevent this ? If the proposed policy is different from those floated before, how would it be implemented and audited ?<br>
+<p>
+If the reason it's "easy to find" your customers is because you're branding everything in some way, for example you host a specialist product and your brand name for the product is baked into the FQDNs for each company, I'm afraid the fairly obvious feedback you're going to get is "If it hurts when you do that, stop doing it".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709770/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor709258"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The simplest fix to DNS attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 10:32 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/709258/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709258" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you are concerned about DNS spoofing, then rather than wait for the world to deploy a complex cryptographic protocol, the simple fix is just not to use DNS.  Twitter could get a static IP address, publish it, and job done.  There are more than enough IPv4 addresses for all the major websites to get one - certainly it is cheaper to buy a static IPv4 address than to configure DNSSEC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709258/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709265"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The simplest fix to DNS attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 11:03 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/709265/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709265" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Load balancing? Routing redundancy? Geographically local exit points?<br>
+<p>
+Nah, nobody ever needs more than 1 server in a basement to run a service.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709265/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709266"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The simplest fix to DNS attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 11:14 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/709266/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709266" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am not saying that all access to google.com should be over a fixed IP address.  I am saying that for those concerned about DNS being spoofed or blocked, publishing a known IP address seems like a much simpler solution than deploying DNSSEC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709266/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709268"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The simplest fix to DNS attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 11:16 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/709268/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709268" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It most definitely is not simpler. And is much more stupid.<br>
+<p>
+For example, a single IP is _easier_ to spoof. Just announce it with a more specific route.<br>
+<p>
+Oh, and HTTPS won't help you - IPs are not supported consistently for CNs in X509.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709268/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709270"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The simplest fix to DNS attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 12:55 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/709270/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709270" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The abuse of  X.500s Common Name for things that aren't Common Names unless you squint really hard is one thing, but unless you can show me where I'm wrong I believe a certificate with a CN of 10.20.30.40 and a SAN ipAddress of 10.20.30.40 will indeed work for a server on address 10.20.30.40 (obviously this particular address was chosen as an example, and isn't routeable) with the vast majority of HTTPS-capable software.<br>
+<p>
+What can't work is asking for <a href="https://example.com/">https://example.com/</a> and expecting a certificate for 10.20.30.40 to work just because example.com happens to resolve to 10.20.30.40 on some particular client. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709270/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709339"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The simplest fix to DNS attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 15:32 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/709339/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709339" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+CAs are not issuing certs for raw IPs anymore ( <a href="https://www.cabforum.org/documents.html">https://www.cabforum.org/documents.html</a> - only FQDNs are allowed). And even before that, their support was spotty.<br>
+<p>
+The problem with IPs is that they don't have a clear ownership. Especially for cases like Amazon EC2 instances.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709339/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709357"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The simplest fix to DNS attacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 16:16 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/709357/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709357" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've seen a few people say this (that CAs aren't issuing for IP addresses), it's not true.<br>
+<p>
+Last year a restriction was imposed forbidding RFC1918 (and its IPv6 moral equivalent) addresses, as well as DNS names that aren't FQDNs from the public Internet. One of my long list of outstanding tasks is to go back and verify the extent to which CAs complied with their further requirement this year to revoke existing certificates that would now be forbidden by that rule.<br>
+<p>
+But that doesn't forbid issuing for Internet IP addresses, you are correct that you won't be able to adequately prove control over the IP address for your Amazon EC2 instance, but you would be able to prove control for addresses issued to an Autonomous System you control and in some cases even where you have an Autonomous System you may be able to adequately prove control via the AS owner. If you are (in your scenario) publishing an address you claim people can rely on as really yours, it certainly shouldn't be for some EC2 instance that might abort at any moment.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709357/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor709359"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cloudflare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 16:29 UTC (Thu)
+                               by <b>niall.noigiallach</b> (guest, #47469)
+                              [<a href="/Articles/709359/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="niall.noigiallach" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709359" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      No mention of Cloudflare, who enabled DNSSEC in their infrastructure not too long ago and are using EC-DSA. Makes job lot easier for end user who only than has to submit DS to relevant domain registry. Also takes hassle out of stuff such as automating zone resigning etc.
+
+https://blog.cloudflare.com/introducing-universal-dnssec/
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709359/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor709370"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 18:43 UTC (Thu)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/709370/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kjp" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709370" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Re: The twitter example (again), how does DNSSEC actually prevent a downgrade attack to normal DNS?  Why couldn't the government / ISPs just filter out all the DNSSEC records?<br>
+<p>
+I've searched for DNSSEC downgrade attack, and searched the 3 RFCS I found for "downgrade", and haven't found very much.  <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709370/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709383"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 21:34 UTC (Thu)
+                               by <b>mbunkus</b> (subscriber, #87248)
+                              [<a href="/Articles/709383/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mbunkus" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709383" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Basically your local resolver has a copy of the key used to sign the root zone (this is often called the trust anchor). Therefore your resolver knows that the root zone is signed, and that all answers from the root zone must contain valid DNSSEC records. If a bad actor filters those out, your resolver will detect this due to the aforementioned knowledge.<br>
+<p>
+Next DNSSEC uses DS (delegation signer) records in the parent zone to specify the keys used in the child zone. This means that inside the root zone there's the DS record for the .com top level domain. Its presence in the root zone indicates that .com itself is signed and that it must contain the appropriate DNSSEC records. If a bad actor filters those out, your resolver will be able to detect this, too.<br>
+<p>
+We can repeat this pattern all the way down: the twitter.com domain itself will again contain DS records for their signed sub-domains.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709383/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 23:17 UTC (Thu)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/709399/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kjp" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709399" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks.  Wow, the root key rollover looks like a nightmare.<br>
+<p>
+<a href="https://www.icann.org/news/blog/dnssec-rolling-the-root-zone-key-signing-key">https://www.icann.org/news/blog/dnssec-rolling-the-root-z...</a><br>
+<p>
+"The KSK rollover will take place in eight phases, which are expected to take about two years. The first phase is scheduled to begin in Q4 of 2016."<br>
+<p>
+Holy.  Shit.  I look forward to when a billion devices won't boot because they don't have the right key, or their local clock is wrong.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor709392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 23:05 UTC (Thu)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/709392/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709392" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I found that in order to see any of this with <b>dig</b>, I had to add the <b>+dnssec</b> command line option.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor709397"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 23:12 UTC (Thu)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/709397/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709397" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      What's an example of a domain that has DNSSEC set up?
+<P>
+I thought maybe <b>www.google.com</b>, but from what I can tell with <b>dig</b>, neither that nor <b>google.com</b> have any of these records.  I do see that <b>com</b> has <b>DNSKEY</b>, <b>RRSIG</b>, and <b>DS</b> records.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709397/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709400"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2016 23:26 UTC (Thu)
+                               by <b>sfeam</b> (subscriber, #2841)
+                              [<a href="/Articles/709400/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sfeam" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709400" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I get the DS RRSIG records back from "dig +trace" for both google.com and www.google.com.
+And from lwn.net for that matter.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709400/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709411"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 0:30 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/709411/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709411" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I believe you're talking about trace statements showing records from .com that <b>dig</b> receives incidentally to your query, because that's what I get.
+
+<p>
+To see google.com DS records, I do this:
+<pre>
+<kbd>
+  $ dig +dnssec @8.8.8.8 -q google.com. -t DS
+</kbd>
+</pre>
+and get no answers.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709411/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor709420"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 1:37 UTC (Fri)
+                               by <b>sfeam</b> (subscriber, #2841)
+                              [<a href="/Articles/709420/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sfeam" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709420" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      OK. How about this one:
+<pre>
+;; ANSWER SECTION:
+whitehouse.gov.         1792    IN      DS      38601 7 1 DA224BC306E05A54B7B96FE85A9593FBC13A8210
+whitehouse.gov.         1792    IN      RRSIG   DS 8 2 3600 20161222221015 20161215221015 60980 gov. dauaNaO6gZpf6NZYPmgQJLDYI2H8cNgMSPFfJl4gBnpivpLB+sBPtm7o 5m/zKmde6Cwpn9F+jP35OjCKH/XRxEcl6QYlxHkzwzXT9i3hIIfXvXUD TJcKIsPLoRuw2GKJf+GPwK4j7ZDJMNRsVY4rqaWY/LO5AEVoGwg7iYUs ooM=
+</pre>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709420/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor709465"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 15:53 UTC (Fri)
+                               by <b>niall.noigiallach</b> (guest, #47469)
+                              [<a href="/Articles/709465/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="niall.noigiallach" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709465" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Here's some:<br>
+<p>
+iedr.ie<br>
+dnssec.ie<br>
+ns.ie<br>
+<p>
+<p>
+dnsviz.net is handy way to visualise chain of trust.<br>
+<p>
+<a href="http://dnsviz.net/d/ns.ie/dnssec/">http://dnsviz.net/d/ns.ie/dnssec/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709465/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor709438"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SHA1? Seriously?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2016 14:57 UTC (Fri)
+                               by <b>alarsen</b> (subscriber, #4585)
+                              [<a href="/Articles/709438/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alarsen" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709438" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+dnssec-keygen is perfectly capable of generating better keys...<br>
+<p>
+# dnssec-keygen -r/dev/random -f KSK -3 -a RSASHA256 -b 4096 teaparty.me.uk<br>
+will generate a 4096-bit NSEC3-capable RSASHA256 key (algorithm number 8, see <a href="https://tools.ietf.org/html/rfc5702#section-2.1">https://tools.ietf.org/html/rfc5702#section-2.1</a>)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709438/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor709920"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2016 8:41 UTC (Thu)
+                               by <b>chojrak11</b> (guest, #52056)
+                              [<a href="/Articles/709920/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chojrak11" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709920" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+DNSSEC is a cancer. Why can't you see that at last? It will never be fully implemented.<br>
+DNSCurve is much better approach and is easy as 1, 2, 3.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709920/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor710142"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2016 23:32 UTC (Sat)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/710142/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor710142" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Last time I heard someone call a software project "cancer" unironically, they ended up making a mistake called Vista...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/710142/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor709991"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2016 17:08 UTC (Thu)
+                               by <b>spwhitton</b> (subscriber, #71678)
+                              [<a href="/Articles/709991/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="spwhitton" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor709991" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      There's an amusing litany of <a href="https://blog.fastmail.com/2016/12/20/dnssec-dane/">famous DNSSEC failures on FastMail's blog</a> (none of these are FastMail's failures: they are the reasons they haven't tried yet).
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/709991/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor710302"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting DNSSEC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 29, 2016 2:19 UTC (Thu)
+                               by <b>hawk</b> (subscriber, #3195)
+                              [<a href="/Articles/710302/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hawk" />
+                <input type="hidden" name="return" value="/Articles/708904/#CommAnchor710302" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On the topic of doing DNSSEC signing with BIND specifically, I would suggest reading this: <a href="https://users.isc.org/~jreed/dnssec-guide/dnssec-guide.html">https://users.isc.org/~jreed/dnssec-guide/dnssec-guide.html</a><br>
+It takes a more maintainable approach, utilizing the improved DNSSEC functionality in modern BIND versions.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/710302/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

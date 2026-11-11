@@ -1,0 +1,305 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Scaling transparent huge pages to 1GB [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Scaling transparent huge pages to 1GB">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="As a general rule, when developers talk about huge pages, they are referring to PMD-level pages [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1071536/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Scaling transparent huge pages to 1GB</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 12, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+As a general rule, when developers talk about huge pages, they are
+referring to PMD-level pages that are 1MB or 2MB in size, depending on the
+CPU architecture.  Most CPUs can support other huge-page sizes, though.  On
+x86 systems, PUD-level huge pages hold 1GB of data.  Providing such large
+pages transparently to processes has generally not been considered as
+either feasible or desirable, but Usama Arif is trying to change that
+assessment.  At the 2026 <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a>, he led a session in the
+memory-management track on how to make transparent huge pages (THPs) truly
+huge.
+<p>
+<!-- middle-ad -->
+On most systems, a 1GB, physically contiguous chunk of memory can be hard
+to find, especially after the system has run for a while and memory has
+fragmented.  Applications that can make use of such large chunks of memory
+have also been relatively scarce.  It is not surprising that little
+effort has gone into making a difficult-to-find resource transparently
+available to processes that are unlikely to benefit from it.  But, as Arif
+began, large-scale installations are now running with terabytes of
+installed memory.  On such systems, a PMD-level huge page is no longer
+huge.  Managing all that memory brings scalability problems; managing it in
+1GB chunks can help.
+<p>
+<a href="/Articles/1071721/"><img
+src="../_static/images/conf/2026/lsfmm/UsamaArif-sm.png" alt="[Usama Arif]"
+title="Usama Arif" class="lthumb"></a>
+
+Applications can gain access to 1GB huge pages now by using the <a
+href="https://docs.kernel.org/mm/hugetlbfs_reserv.html">hugetlbfs</a>
+subsystem.  But hugetlbfs is a static resource, requiring the establishment
+of a separate pool at boot time.  It provides no fallback if a huge-page
+allocation request cannot be satisfied.  There is a real need, Arif said,
+for a transparent way to back large applications with 1GB huge pages.
+He has an RFC patch set to fill this need, <a
+href="/ml/all/20260202005451.774496-1-usamaarif642@gmail.com/">posted in
+February</a>, that turned out to be smaller and less invasive than he had
+expected.
+<p>
+Arif dove directly into the details of how the management of 1GB
+transparent huge pages would work.  When creating a 2MB PMD-level
+transparent huge page, current kernels "deposit" an extra (base) page that
+can later be used to remap the huge page at the PTE level, should the need
+come to split it.  This deposit is made because splitting may be happening
+in response to memory pressure, so it should be possible to do without
+having to allocate more memory first.  The single page is wasted during the
+life of the THP, but it serves as a sort of insurance policy for times when
+memory is scarce.
+<p>
+In the RFC patch for 1GB THPs, Arif scaled up this policy to match the page
+size; it deposited pages for the PMD-level page table and 512 PTE-level
+page tables that would be needed to split the THP.  That is about 2MB of
+wasted memory, which makes for an expensive insurance policy.  David
+Hildenbrand had <a
+href="/ml/all/ee5bd77f-87ad-4640-a974-304b488e4c64@kernel.org/">questioned</a>
+the need for this preallocation — for both PMD-level and PUD-level THPs —
+so Arif was now considering doing without the page-table deposit.  In the
+session, Hildenbrand said that, if the system is splitting 1GB huge pages,
+somebody is doing something wrong.  Even on the largest systems, those
+pages are a scarce resource; they should be kept intact if at all possible.
+<p>
+The question that should be considered, Hildenbrand said, is how to decide
+which processes should be given 1GB THPs.  Kiryl Shutsemau suggested that
+processes could request them with <a
+href="https://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>,
+but Hildenbrand said that would be problematic for a number of reasons.
+Shutsemau then wondered about processes asking for 1GB THPs that cannot
+actually make full use of them; Arif answered that this case is why
+splitting those pages needs to work.
+<p>
+Hildenbrand, again, said that splitting those pages should be avoided and
+advocated for a smarter way of allocating them.  Perhaps they could be
+limited to shared-memory regions, for example.  Arif said that would put
+the burden on user space to set things up properly; he was hoping for a
+more transparent solution.  Lorenzo Stoakes said that 1GB huge pages are a
+resource that the kernel must maintain control over; Usama said that, by
+default, they would not be allocated unless the system administrator
+enabled them.
+<p>
+Matthew Wilcox said that the right answer was to make 1GB huge pages cheap
+enough that they are no longer a scarce resource.  Johannes Weiner said
+that there are a lot of applications that could benefit from 1GB THPs, but
+they (or their users) do not know that. At his employer, they have been
+rolling out 1GB huge pages extensively, and seeing a lot of performance
+benefits from them.  He suggested handing out 1GB THPs widely, then fixing
+the cases where they are not fully used.
+<p>
+Arif moved on to the question of whether supplying 1GB THPs would require
+using the <a href="486301.html">contiguous memory allocator
+(CMA)</a>.  His patch series works without it, but allocating huge pages of
+that size can be hard.  Part of the problem, he said, is that the
+memory-management subsystem's compaction code is currently working at the
+PMD level, so it does not succeed in defragmenting 1GB huge pages.  He
+mentioned some ongoing <a
+href="/ml/all/20260430202233.111010-1-riel@surriel.com/">work from Rik van
+Riel</a> that is aimed at making 1GB chunks easier to allocate.
+<p>
+Splitting of 1GB THPs is an open question as well, Arif said.  The current
+patch set, when called upon to split such a page, will disassemble it all
+the way to the PTE level, yielding 262,144 base pages.  He is considering
+only splitting to 512 PMD-level huge pages, then splitting just one of
+those down to the PTE level.  He asked whether that would be an acceptable
+strategy; relative silence in the room suggested that, at a minimum, there
+were no real concerns with that idea.
+<p>
+When he asked whether the <tt>khugepaged</tt> kernel thread should try to
+assemble 1GB THPs from existing process memory, though, the answer was a
+clear "no".  Allocating them at initial mapping time seems to be the
+desired approach.  Creating them after the fact in response to an
+<tt>MADV_COLLAPSE</tt> <tt>madvise()</tt> call might be acceptable, though.
+<p>
+Migration of 1GB THPs is another challenge; finding a 1GB page at the
+destination node can be difficult.  The alternatives are to block migration
+for these pages, or to split them.  Blocking migration is a simple
+solution, but it loses the transparency aspect, and would break memory
+hotplug.  With splitting, hotplug and NUMA balancing would work, but the
+1GB mapping would be lost.  Which alternative is best (or least bad) is not
+clear.
+<p>
+The group might have tried to debate that problem, but the session was far
+over its allotted time by this point.  Hildenbrand closed it by suggesting
+that the initial implementation should operate only on shared memory; that
+would simplify a number of aspects of the implementation.  It would also be
+possible to add a mount option for shmfs that would allow administrators to
+control access to the feature.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Huge pages</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1071716/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1072549"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Splitting must be entirely logarithmic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2026 21:52 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1072549/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1071716/#CommAnchor1072549" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Splitting of 1GB THPs is an open question as well, Arif said. The current patch set, when called upon to split such a page, will disassemble it all the way to the PTE level, yielding 262,144 base pages. He is considering only splitting to 512 PMD-level huge pages, then splitting just one of those down to the PTE level. He asked whether that would be an acceptable strategy; relative silence in the room suggested that, at a minimum, there were no real concerns with that idea.</span><br>
+<p>
+I must have missed or misunderstood this question. Usama has asked it of me before, and I was very clear on my answer, which has not changed. No, this is not acceptable.<br>
+<p>
+Assuming 4k/2M/1G, splitting a 1G down to 511 PMDs, then splitting the last PMD logarithmically means we need to allocate 521 folios. That's too much strain to place on slab. Sure, it's better than 262,144, but it's still too high. Splitting the entire 1GB logarithmically means we need 19 new folios, a far more reasonable number.<br>
+<p>
+The problem is that the MM does not yet handle folios larger than PMD size. But Usama is not the only one who wants folios larger than PMD size, so he should be able to find reviewers (if you review Usama's code, you don't have to write it yourself! Nor do you have to find reviewers for it!)<br>
+<p>
+Trying to dodge fixing this shortcoming in the MM is poor form. This is functionally we need, and somebody has to do it. If Usama wants to land 1GB support, he needs to do it.. Or procrastinate until somebody else does it. But I don't think it's that hard, just fiddly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072549/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Splitting must be entirely logarithmic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2026 22:22 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/1072551/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Paf" />
+                <input type="hidden" name="return" value="/Articles/1071716/#CommAnchor1072551" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I’m not an mm developer but can you sketch why it’s any issue at all?  Obviously, it’s not trivial, but seen from way outside it seems like it should be.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072560"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Splitting must be entirely logarithmic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2026 6:29 UTC (Wed)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1072560/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1071716/#CommAnchor1072560" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's actually fairly trivial. We assume that any PMD we find contains the head page of a folio. We also assume the inverse, that if we're creating a PMD that we want it to point to the first 2MB of a folio. It really is a SMOP to fix, it's just finding all the places that make that assumption and testing the result is a pain.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072560/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

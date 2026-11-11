@@ -1,0 +1,534 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A container-confinement breakout [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A container-confinement breakout">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The recently announced container-confinement breakout for containers started with runc is inte [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/780941/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A container-confinement breakout</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>March 6, 2019</br>
+           </div>
+<p>
+The recently <a href="/Articles/779542/">announced</a>
+container-confinement breakout for containers started with <a
+href="https://github.com/opencontainers/runc">runc</a> is interesting from
+a few different perspectives.
+For one, it affects more than just runc-based containers as privileged <a
+href="https://linuxcontainers.org/">LXC</a>-based containers (and likely
+others) are also
+affected, though the LXC-based variety are harder to compromise than the
+runc ones.
+But it also, once again, shows that privileged
+containers are difficult—perhaps impossible—to create in a secure manner.
+Beyond that, it
+exploits some Linux kernel interfaces in novel ways and the fixes use a
+perhaps lesser-known system call that was added to Linux less than five
+years back. 
+</p>
+
+<p>
+The runc tool implements the <a
+href="https://github.com/opencontainers/runtime-spec">container runtime
+specification</a> of the <a href="https://www.opencontainers.org/">Open
+Container Initiative</a> (OCI), so it is used by a number of different
+containerization solutions and orchestration systems, including <a
+href="https://www.docker.com/">Docker</a>, <a
+href="https://podman.io/">Podman</a>, <a
+href="https://kubernetes.io/">Kubernetes</a>, 
+<a href="https://cri-o.io/">CRI-O</a>, and <a
+href="https://containerd.io/">containerd</a>.  The flaw, which uses the
+<tt>/proc/self/exe</tt> pseudo-file to gain control of the host operating
+system (thus anything else, including other containers, running on the
+host), has been assigned 
+<a
+href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-5736">CVE-2019-5736</a>.
+It is a massive hole for containers that run with access to the host root
+user ID (i.e. UID 0), which, sadly, covers most of the containers being run
+today. 
+</p>
+
+<p>
+There are a number of sources of information on the flaw, starting with the
+announcement from runc maintainer Aleksa Sarai linked above.  The
+discoverers, Adam Iwaniuk and Borys Popławski, put out a <a 
+href="https://blog.dragonsector.pl/2019/02/cve-2019-5736-escape-from-docker-and.html">blog
+post</a> about how they found the hole, including some false steps along
+the way.  In addition, one of the LXC
+maintainers who worked with Sarai on the runc fix, Christian Brauner,
+<a
+href="https://brauner.github.io/2019/02/12/privileged-containers.html">described</a>
+the problems with privileged containers and how CVE-2019-5736 applies to
+LXC containers.  There is a proof of concept (PoC) attached to Sarai's
+announcement, along with another more detailed PoC he <a
+href="/ml/oss-security/20190213093151.znxnjuqtwbdlwnom@yavin/">posted</a>
+the following day after the discoverers' blog post.
+</p>
+
+<p>
+As with many exploits, this one takes a rather convoluted path, but it
+can reliably compromise the host.  It does this by either getting a user to
+create a container using a compromised container image or by having a user
+attach to a 
+container (e.g. using
+"<tt>docker&nbsp;exec</tt>") that an attacker has had write access to.
+That begins the complicated dance.
+</p>
+
+<p>
+The attacker sets up the entry point to the container (which is invoked
+when the container is created or accessed) to be a symbolic link to
+<tt>/proc/self/exe</tt>.  That link will resolve to the <tt>runc</tt> binary in
+the <i>host</i> filesystem when it is run from, say, a <tt>/bin/bash</tt> that
+contains:
+<pre>
+    #!/proc/self/exe
+</pre>
+The effect will be to re-execute the <tt>runc</tt> command inside the
+container but using the binary from the host.
+
+<p>
+The attacker also needs to subvert one of the shared libraries used by
+<tt>runc</tt> inside the container; when <tt>runc</tt> gets re-executed
+inside the container, it will use the shared libraries from within it.  In
+Sarai's PoC, he chose
+<tt>libseccomp</tt>, but other libraries used by <tt>runc</tt> could be
+chosen instead. 
+The shared library is changed to add a new global constructor function that
+will be called after the library is loaded.  This function will open
+<tt>/proc/self/exe</tt> for read (as it would get an <tt>ETXTBSY</tt> error
+if it tried to open it for write).  That <tt>open()</tt> results in a file
+descriptor that can be accessed via <tt>/proc</tt>
+(e.g. <tt>/proc/self/fd/3</tt>). 
+</p>
+
+<p>
+The reason that runc-based containers are easier to exploit than LXC-based
+ones is due to the fact that <tt>runc</tt> exits after it does its job,
+while <tt>lxc-attach</tt> waits around for its command to finish.  That
+means the runc binary is not busy (in the <tt>ETXTBSY</tt> sense) for most
+of the time that the container runs.  While this non-busy window is nearly
+always open for runc, it is much smaller for LXC:  After
+the container command completes and <tt>lxc-attach</tt> exits, there is a
+small window that can be
+exploited for privileged LXC containers.
+</p>
+
+<p>
+Once it has opened the file, the constructor then executes another binary
+(using <tt>execve()</tt>), which terminates the execution of
+<tt>runc</tt>.  That allows this new binary to open
+<tt>/proc/self/fd/3</tt> for write, since <tt>ETXTBSY</tt> is no longer
+returned after the <tt>execve()</tt>.  Now the attacker has a file descriptor
+that can be used to write anything they want to the <tt>runc</tt> binary
+<i>on the host</i>.  Game over.
+</p>
+
+<p>
+The fix, as implemented <a
+href="https://github.com/opencontainers/runc/commit/0a8e4117e7f715d5fbeef398405813ce8e88558b">by
+runc</a> and <a
+href="https://github.com/lxc/lxc/commit/6400238d08cdf1ca20d49bafb85f4e224348bf9d">LXC</a>,
+is to use an anonymous file created by <a
+href="http://man7.org/linux/man-pages/man2/memfd_create.2.html"><tt>memfd_create()</tt></a>,
+copy the contents of the <tt>runc</tt> binary into it, and then <a
+href="593918.html">seal the file</a> to protect it from being
+changed.
+For kernels prior to the introduction of <tt>memfd_create()</tt> in the
+3.17 kernel that was released back in October 2014, there is a fallback 
+fix that uses a file created with <a
+href="619146.html"><tt>O_TMPFILE</tt></a>. 
+The use of <tt>memfd_create()</tt> led Florian Weimer to <a
+href="/ml/oss-security/87va1pdsc9.fsf@oldenburg2.str.redhat.com/">wonder</a>
+about the fix, however:
+<div class="BigQuote">
+Is it really necessary to use a memfd_create here?  Do you really need
+sealing?  It's a bit odd to add a new system call dependency in a
+security update.  The ability fexecve a memfd descriptor is also rather
+odd.  I wouldn't have expected execute permissions on memfd descriptors,
+so this sounds like a kernel bug (which now can't be fixed).
+</div>
+</p>
+
+<p>
+But Sarai <a
+href="/ml/oss-security/20190212143708.623v7zle3xt23hcd@mikami/">does not
+see a problem</a> with the approach; sealing a file in memory ensures that
+the right binary is executed in all cases.  In response to Steve Grubb's <a
+href="/ml/oss-security/2160454.BXy79Bclyo@x2/">concern</a> that the fix was "<q>more of a 
+workaround than a root cause fix</q>", Sarai <a
+href="/ml/oss-security/20190212153112.xntebicjokknhqcy@yavin/">said</a>:
+<div class="BigQuote">
+As for it
+not being a root cause fix, I disagree (it protects against a variety of
+concerning attacks that aren't related to this CVE). Obviously if
+everyone used correctly-configured user namespaces then this wouldn't be
+a problem -- but here were are.
+</div>
+</p>
+
+<p>
+He did note that his <a
+href="/ml/linux-kernel/20190213030851.1881-1-cyphar@cyphar.com/">patch 
+set</a> providing a number of different VFS path-resolution restrictions
+"<q>would help fix this
+and could help fix a wide variety of other container runtime issues that
+have been bothering me for a couple of years</q>".  Those patches are
+based on earlier work, including the <a
+href="723057.html"><tt>AT_NO_JUMPS</tt> patches from 2017</a>; that
+functionality has been proposed in various forms over the years but has
+never made it into the mainline—at least so far.
+</p>
+
+<p>
+There are a couple of obvious exploit scenarios.  The easiest is to have
+someone use a malicious container image—a practice that is not
+unknown in the container world.  In fact, lots of container users grab
+images (or other artifacts) from the internet without vetting their
+contents.  
+A compromise of a running privileged container (which is most of them)
+could also 
+lead down this path.  The attacker could set up the exploit on likely
+suspects (e.g. <tt>/bin/bash</tt>)  and wait for
+the container owner to use <tt>docker&nbsp;exec</tt>—or do something to the
+container to draw attention to it.  Once the host has been compromised by
+one of its running containers, all of the other running containers and the
+operating system itself, are compromised.
+</p>
+
+<p>
+All in all, it is a nasty little hole.  Updating runc, LXC, and others
+affected would seem mandatory; 
+one hopes it has already long been done.  Finding better ways to further
+isolate containers going forward is needed, but the main tool, user
+namespaces, has been around for quite a while now.  As Brauner noted in his
+blog post, privileged containers are simply never going to be truly secure.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Containers</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/781013/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor782476"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2019 17:45 UTC (Wed)
+                               by <b>gebi</b> (guest, #59940)
+                              [<a href="/Articles/782476/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gebi" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782476" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+wouldn't just setting the runc binary immutable (chattr +i) be enough to fix the vulnerability?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782476/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor782496"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2019 19:28 UTC (Wed)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/782496/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782496" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, unless someone starts a container with CAP_LINUX_IMMUTABLE -- which was previously a "safe" thing to do and wouldn't be any more. One fairly easy way of emulating CAP_LINUX_IMMUTABLE would be to create your own sealed memfd and then bind-mount it over /usr/bin/runc -- the mitigation won't make an additional copy under those circumstances and there isn't a capability available to un-seal a memfd.<br>
+<p>
+I'm hoping that the updated mitigation patch I've been working on[1] will help work around the concerns about memfd_create(2).<br>
+<p>
+[1]: <a href="https://github.com/opencontainers/runc/pull/1984">https://github.com/opencontainers/runc/pull/1984</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782496/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor782478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2019 19:14 UTC (Wed)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/782478/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782478" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There has been an update on this from the runc side of things. Quite a few folks have complained about the new memory overhead in memfd_create(2) -- since it's done after cgroup attachment it gets accounted as container usage (since we are a Go binary this ends up being 10MB which is fairly significant). There is also the issue of kernel support -- aside from old kernels we also found out that RHEL's kernel appears to have issues with their memfd_create(2) backport.<br>
+<p>
+All of this has resulted in a PR I've posted[1] which solves the problem using a temporary (MNT_DETACH) read-only bind-mount of /proc/self/exe in an attempt to avoid the memory overhead -- and in principle because we create the read-only bind-mount ourselves and detached it's very unlikely a host process will accidentally make it read-write during the "runc init" window. If that fails, we then try memfd_create(2) followed by O_TMPFILE (or failing that, mksotemp(3)) inside the runc state directory -- which we need to have read-write access to in normal operation.<br>
+<p>
+I've also re-sent v5 of the AT_THIS_ROOT patchset (which includes the ability to scope #! resolution) to the ML today.<br>
+<p>
+[1]: <a href="https://github.com/opencontainers/runc/pull/1984">https://github.com/opencontainers/runc/pull/1984</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor782497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2019 19:25 UTC (Wed)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/782497/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782497" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; and in principle because we create the read-only bind-mount ourselves and detached it's very unlikely a host process will accidentally make it read-write during the "runc init" window.</font><br>
+<p>
+Scratch this, I just remembered as I was writing this comment that you could just remount it as read-write (not sure why I didn't consider that before). In that case, I will go with the overlayfs solution (where we create an overlayfs and open the upper-layer version of the binary). It will be quite ugly because you can't overlayfs on top of /proc/self -- and bind-mounts won't help either because overlayfs doesn't see them.<br>
+<p>
+I have had a looming feeling for the past month or so it would've just been easier to go the LXC route and tell everyone that running containers as root is a really bad idea, and that they should expect reasonable security from such a configuration.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor782521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2019 4:31 UTC (Thu)
+                               by <b>patrakov</b> (subscriber, #97174)
+                              [<a href="/Articles/782521/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="patrakov" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782521" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+With LXC, there is a bigger elephant in this fragile room. The official Ubuntu 18.10 LXC template is so evil that it escapes the memory limits by default, without any user action. Bug filed: <a href="https://github.com/lxc/lxc/issues/2845">https://github.com/lxc/lxc/issues/2845</a>.<br>
+<p>
+Also, for privileged LXC, two much simpler breakout techniques are available that work on Ubuntu: <a href="https://seclists.org/oss-sec/2019/q1/125">https://seclists.org/oss-sec/2019/q1/125</a>. The upstream position is that privileged containers cannot be made secure, so "not a security bug". I have no idea if they also work with other container runtimes, would appreciate if someone tests the ideas on Ubuntu and other distributions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor782522"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2019 4:36 UTC (Thu)
+                               by <b>patrakov</b> (subscriber, #97174)
+                              [<a href="/Articles/782522/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="patrakov" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782522" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also other LXC users claimed the auto-escape out of the devices cgroup as a result of installation of legitimate software inside the container: <a href="https://github.com/lxc/lxc/issues/2762">https://github.com/lxc/lxc/issues/2762</a>.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782522/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor782542"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2019 11:01 UTC (Thu)
+                               by <b>brauner</b> (subscriber, #109349)
+                              [<a href="/Articles/782542/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brauner" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782542" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For *privileged* containers we only drop mac_admin mac_override sys_time sys_module sys_rawio by default and not CAP_SYS_ADMIN.<br>
+We run full systems containers and as such dropping CAP_SYS_ADMIN even in *privileged* containers by default is unwanted since the init system will not be able to perform any mounts it wants.<br>
+So you would need to know in advance what mounts to perform. Fwiw, we do support this but it doesn't make a lot of sense for us.<br>
+Our security page also refers to such breakouts:<br>
+<p>
+"We are aware of a number of exploits which will let you escape such containers and get full root privileges on the host. Some of those exploits can be trivially blocked and so we do update our different policies once made aware of them. Some others aren't blockable as they would require blocking so many core features that the average container would become completely unusable."<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782542/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor782709"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A container-confinement breakout</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2019 9:38 UTC (Sun)
+                               by <b>smadu2</b> (guest, #54943)
+                              [<a href="/Articles/782709/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smadu2" />
+                <input type="hidden" name="return" value="/Articles/781013/#CommAnchor782709" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is rkt vulnerable ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/782709/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

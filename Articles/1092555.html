@@ -1,0 +1,562 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fixing the TCMalloc regression with RSEQ operations [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Fixing the TCMalloc regression with RSEQ operations">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The restartable sequences feature is one of the stranger corners of the kernel's user-space int [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Fixing the TCMalloc regression with RSEQ operations&quot;" href="https://lwn.net/headlines/1092555/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1092274/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fixing the TCMalloc regression with RSEQ operations</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 7, 2026</br>
+           </div>
+The <a href="697979.html">restartable sequences</a> feature is one of
+the stranger corners of the kernel's user-space interface; it provides a
+way for user space to carry out simple lockless operations and be informed
+if it is preempted over the course of an operation (and must, thus,
+restart).  Work merged in the 6.19 release to <a
+href="1033955.html">improve the performance of restartable
+sequences</a> broke the <a
+href="https://github.com/google/tcmalloc#tcmalloc">TCMalloc allocator</a>,
+which was relying on an undocumented (and unintended) kernel behavior.
+Now, Olivier Dion is <a
+href="/ml/all/20260828153349.8061-1-odion@efficios.com">proposing an
+addition</a> to the restartable-sequences API that will bring TCMalloc back
+into the fold; it does not make the restartable-sequences API any less
+strange, though.
+<p>
+As a quick reminder of the problem: the restartable-sequences API is built
+around <a
+href="https://elixir.bootlin.com/linux/v7.0.1/source/include/uapi/linux/rseq.h#L89"><tt>struct
+rseq</tt></a>, which is shared between user space and the kernel.  The
+<tt>cpu_id_start</tt> field of that structure is maintained by the kernel;
+it contains the number of the CPU on which the owning thread is executing.
+It is documented as being read-only for user space.  The TCMalloc library,
+though, wrote to this field anyway, setting it to a sentinel and using it, by
+way of some clever (to be polite) data-structure layout tricks, to notice when
+the kernel had reset it to a valid CPU number.  That reset would indicate
+that the execution of the thread had been interrupted at some point.  One
+of the optimizations in 6.19 eliminated the unconditional setting of that
+field, defeating this trick.
+<p>
+Until now, the problem has been worked around by detecting users of the
+older restartable sequences API and preserving the previous behavior, at a
+significant cost in both code complexity and performance.  Using
+restartable sequences in this mode is also incompatible with how the GNU C
+Library uses it, causing other performance problems.  For more details on
+the story so far, see <a href="1070072.html">this article</a>.
+<p>
+It is clearly desirable to bring TCMalloc up to the current form of
+restartable sequences, restoring compatibility with the C library and
+performance as well.  Dion's solution takes the form of "RSEQ operations",
+which is essentially the ability to program a set of operations for the
+kernel to carry out every time it returns to user space.  An operation can
+be set up to restore the unconditional setting of the CPU number for
+TCMalloc in a way that does not hurt performance for any thread that is not
+using this new feature.
+<p>
+The simplest of the operations that are defined in this series is
+<tt>RSEQ_OP_RESET</tt>, which resets a word in user-space memory to a specific
+value.  To set up such an operation, user space allocates and initializes a
+copy of this structure:
+<p>
+<pre>
+    struct rseq_op_reset {
+	struct rseq_op_node	node;
+	__u64			src;
+	__u64			dst;
+	__u32			len;
+    };
+</pre>
+<p>
+The <tt>src</tt> field holds a pointer to the value to be stored, or simply
+zero if zero should be stored; <tt>dst</tt> is a pointer to where that
+value should be stored, and <tt>len</tt> is the length of the destination,
+either four or eight bytes.  The <tt>node</tt> field is a structure of its
+own:
+<p>
+<pre>
+    struct rseq_op_node {
+	__u64 next;
+	__u64 prev;
+	struct {
+	    __u8  type;
+	    __u8  reserved[7];
+	};
+    };
+</pre>
+<p>
+Here, <tt>type</tt> should be set to the operation type
+(<tt>RSEQ_OP_RESET</tt> in this case); everything else must be zeroed and
+not touched again thereafter.
+<p>
+There are two other operations defined as well.
+<tt>RSEQ_OP_RESET_WITH_STRIDE_CPUID</tt> sets a value into an array indexed
+by the current CPU ID, while <tt>RSEQ_OP_RESET_WITH_STRIDE_MMCID</tt>
+indexes by the current <a href="885818.html">virtual-CPU ID</a>
+instead.  Either uses this structure:
+<p>
+<pre>
+    struct rseq_op_reset_with_stride {
+	struct rseq_op_node	node;
+	__u64			src;
+	__u64			dst;
+	__u64			dst_stride;
+	__u32			len;
+    };
+</pre>
+<p>
+The added <tt>dst_stride</tt> value is multiplied by the CPU ID to obtain
+the actual address to store the value into.
+<p>
+Once one of these structures has been set up, it can be registered with the
+new <tt>PR_RSEQ_OP</tt> operation to <a
+href="https://man7.org/linux/man-pages/man2/prctl.2.html"><tt>prctl()</tt></a>.
+If the second <tt>prctl()</tt> argument is <tt>PR_RSEQ_OP_REGISTER</tt>,
+the new operation will be registered; a value of
+<tt>PR_RSEQ_OP_UNREGISTER</tt> will unregister an existing operation.  Once
+an operation has been registered, it will be executed on each return to
+user space.  There is a limit of 2,048 operations total; one imagines that
+should be enough.
+<p>
+There is an interesting quirk to this API.  Normally, with a registration
+operation of this type, one would expect that the describing structure
+would be copied into the kernel and used there.  In this case, though, the
+data is left in place, and the <tt>next</tt> and <tt>prev</tt> pointers in
+the <tt>rseq_op_node</tt> structure are used to link the containing
+structure into a list maintained by the kernel.  On each return to user
+space, the requested operations will be carried out by traversing the list,
+which remains in user-space memory.  Unlike the <tt>rseq</tt> structure,
+the operations structures are not mapped into the kernel's address space;
+the normal primitives for access to user-space memory are used as needed.
+<p>
+This seems like a curious decision; all of those user-space accesses will
+surely slow the operations down, and user space will have the ability to
+change the contents of those structures (including the pointers) at any
+time.  Quite a bit of care is taken in the code to validate this list and
+its contents at every step (increasing the cost further), but it still
+feels like dangerous territory.  It would seem that the ability for user
+space to make changes is actually a desired feature in this case; the
+ability to change the value to be stored or the location where that value
+should go is evidently considered to be worth the cost.
+<p>
+Given that this series is, in the end, adding another virtual machine to
+the kernel (albeit an extremely simple one), one might wonder why Dion did
+not just implement the ability to run a BPF program on return to user space
+and be done with it.  The patches do not address that question, but a
+plausible answer is that loading BPF programs requires privilege, while
+restartable sequences does not.  Forcing every program that needs RSEQ
+operations to run with <tt>CAP_BPF</tt> would create problems of its own.
+<p>
+The patch series is so new that the bits are not yet dry; it is at the RFC
+stage and has not, as yet, received a lot of comments.  Dmitry Vyukov <a
+href="/ml/all/CACT4Y+axE=-F-nTfqXoyGTTOO3iCD=SAB-Pgu8pD+cBdh5Gqdw@mail.gmail.com/">asked</a>
+about whether it would be better to keep the operations structures in the
+kernel.  Florian Weimer, instead, <a
+href="/ml/all/lhua4q28z30.fsf@oldenburg.str.redhat.com/">worried</a> that
+the feature "<q>would turn into another bytecode interpreter over time,
+basically reimplementing BPF</q>".  As of this writing, Dion has not
+responded to these questions.  There is definitely interest in changes that
+can enable TCMalloc to use the current API and, eventually, allow the
+removal of the compatibility code; how much this particular proposal will
+have to evolve before being merged remains to be seen, though.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Restartable sequences</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1092555/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1092978"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The many attempts of Nature to evolve a BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2026 14:56 UTC (Mon)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1092978/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1092978" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p><a href="https://en.wikipedia.org/wiki/Carcinisation">Every kernel-userspace interface eventually evolves to form a bytecode.</a></p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1092978/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093019"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The many attempts of Nature to evolve a BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2026 21:55 UTC (Mon)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/1093019/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093019" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Every ABI, not just at the kernel-userspace boundary, already is a byte code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093019/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093020"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The many attempts of Nature to evolve a BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2026 22:46 UTC (Mon)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1093020/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093020" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Every ABI, not just at the kernel-userspace boundary, already is a byte code.</p>
+</blockquote>
+<p>Not really. I consider a distinguishing quality of a &quot;bytecode&quot; the fact that it has an intrinsic program counter (or an equivalent sequencing ability) of some sort.</p>
+<p>Syscalls and other function-call ABIs do not qualify because they are sequenced extrinsically.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093020/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093036"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCMalloc's problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2026 12:47 UTC (Tue)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/1093036/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="clugstj" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093036" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't understand.  TCMalloc violated the API, let them fix it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093036/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093154"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCMalloc's problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2026 18:04 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1093154/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093154" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>The rule is that &quot;you do not break userspace&quot;. Sure, if it's some virus or worm, good riddance. But who is going to go and recompile all those old tcmalloc-using programs out there?</p>
+<p>Really just goes to show that APIs could use more hardening and red teaming before merging.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093154/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093166"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCMalloc's problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2026 20:28 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1093166/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093166" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Really just goes to show that APIs could use more hardening and red teaming before merging.</span><br>
+<p>
+Well, how would you have realistically prevented exploitation of this internal behavior?<br>
+Even if your crystal ball told you that in the future this unconditional write will be exploited and you would have documented it as don't-do-that, what other internal behavior did you still miss to document?<br>
+<p>
+Accepting this unintended ABI and implementing an official substitute is the correct way to go instead of shifting the blame.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093166/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCMalloc's problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2026 21:03 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1093213/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093213" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I would have put tripwires in for:</p>
+<blockquote class="bq"><p>It is documented as being read-only for user space.</p>
+</blockquote>
+<p>The always-writes behavior would have been hidden behind a screen if userspace couldn't change its value out from behind the kernel's view.</p>
+<p>Whether there's a cookie that needs updated in tandem with the field for verification or whatever, <em>something</em> to actually enforce the documented &quot;do not change this&quot; behavior would have gone a long way.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1095324"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCMalloc's problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 18, 2026 18:50 UTC (Fri)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/1095324/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mrugiero" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1095324" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes. Basically the same way you would enforce any other read-only memory behavior: write here and get a segfault. If some read-only kernel data is mapped to userspace, it needs to go to a read-only page, and its permissions be unchangeable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095324/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093433"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCMalloc's problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2026 12:51 UTC (Thu)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/1093433/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="clugstj" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093433" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Userspace flagrantly violated the published ABI.  There are any number of places that someone could do that.  Are we going to fix every userspace bug in the kernel?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093433/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093651"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TCMalloc's problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2026 15:20 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1093651/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093651" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the buggy app was doing useful work (e.g. being a real program rather than an exploit demo) then yes, this is the basic idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093651/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1093379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An alternative approach</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2026 15:00 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1093379/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1092555/#CommAnchor1093379" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      For the curious: Thomas Gleixner has <a href="https://lwn.net/ml/all/87y0db1y22.ffs@fw13">posted an alternative approach</a> to solving this problem; it pushes a lot of the work into user space rather than adding a new interpreter to the kernel.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

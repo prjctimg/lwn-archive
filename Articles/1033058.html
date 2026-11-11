@@ -1,0 +1,1733 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Simpler management of the huge zero folio [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Simpler management of the huge zero folio">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One might imagine that managing a page full of zeroes would be a relatively straightforward tas [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1033741/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Simpler management of the huge zero folio</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 14, 2025</br>
+           </div>
+One might imagine that managing a page full of zeroes would be a relatively
+straightforward task; there is, after all, no data of note that must be
+preserved there.  The management of the huge zero folio in the kernel,
+though, shows that life is often not as simple as it seems.  Tradeoffs
+between conflicting objectives have driven the design of this core
+functionality in different directions over the years, but much of the
+associated complexity may be about to go away.
+<p>
+There are many uses for a page full of zeroes.  For example, any time that
+a process faults in a previously unused anonymous page, the result is a
+newly allocated page initialized to all zeroes.  Experience has shown that,
+often, those zero-filled pages are never overwritten with any other data,
+so there is efficiency to be gained by having a single zero-filled page
+that is mapped into a process's virtual address space whenever a new page
+is faulted in.  The zero page is mapped copy-on-write, so if the process
+ever writes to that page, it will take a
+page fault that will cause a separate page to be allocated in place of the
+shared zero page.  Other uses of the zero page include writing blocks of
+zeroes to a storage device in cases where the device itself does not
+provide that functionality and the assembly of large blocks to be written
+to storage when data only exists for part of those blocks.
+<p>
+The advent of transparent huge pages added a new complication; now
+processes could fault in a PMD-sized (typically 2MB) huge page with a
+single operation, and the kernel had to provide a zero-filled page of that
+size.  In response, for the 3.8 kernel release in 2012, Kirill Shutemov <a
+href="https://git.kernel.org/linus/4a6c1297268c">added a huge zero page</a>
+that could be used in such situations.  Now huge-page-size page faults
+could be handled efficiently by just mapping in the huge zero page.  The
+only problem with this solution was that not all systems use transparent
+huge pages, and some only use them occasionally.  When there are no
+huge-page users, there is no need for a zero-filled huge page; keeping one
+around just wastes memory.
+<p>
+To avoid this problem, Shutemov added <a
+href="https://git.kernel.org/linus/78ca0e679203">lazy allocation</a> of the
+huge zero page; that page would not exist in the system until an
+actual need for it was encountered.  On top of that, he added <a
+href="https://git.kernel.org/linus/97ae17497e99">reference counting</a>
+that would keep track of just how many users of the huge zero page existed,
+and a new shrinker callback that would be invoked when the system
+is under memory pressure and looking to free memory.  If that callback
+found that there were no actual users of the huge zero page, it would
+release it back to the system.
+<p>
+That seemed like a good solution; the cost of maintaining the huge zero
+page would only be paid when there were actual users to make that cost
+worthwhile.  But, naturally, there was a problem.  The reference count on
+that page is shared globally, so changes to it would bounce its cache line
+around the system.  If a workload that created a lot of huge-page faults was
+running, that cache-line bouncing would measurably hurt performance.  Such
+workloads were becoming increasingly common.  As so
+often turns out to be the case, there was a need to eliminate that global
+sharing of frequently written data.
+<p>
+The solution to that problem was <a
+href="https://git.kernel.org/linus/6fcb52a56ff6">contributed to the 4.9
+kernel</a> by Aaron Lu in 2016.  With this change, a process needing to
+take its first reference to the huge zero page would increment the
+reference count as usual, but it would also set a special flag
+(<tt>MMF_USED_HUGE_ZERO_PAGE</tt>) in its <a
+href="https://elixir.bootlin.com/linux/v6.16/source/include/linux/mm_types.h#L933"><tt>mm_struct</tt></a>
+structure.  The next time that process needed the huge zero page, it would
+see that flag set, and simply use the page without consulting the reference
+count.  The existence of the flag mean that the process already has a
+reference, so there is no need to take another one.
+<p>
+This change eliminated most of the activity on the global reference count.
+It also meant, though, that the kernel no longer knew exactly how many
+references to the huge zero page exist; the reference count now only tracks
+how many <tt>mm_struct</tt> structures contained at least one reference at
+some point during their existence.  The only opportunity to decrease the
+reference count is when one of those <tt>mm_struct</tt> structures goes
+away — when the process exits, in other words.  So the huge zero page may
+be kept around when it is not actually in use; all of the processes that
+needed it may have dropped their references, but the kernel cannot know
+that <i>all</i> of the references have been dropped as long as the
+processes themselves continue to exist.
+<p>
+That problem can be lived with; chances are that, as long as the processes
+that have used the huge zero page exist, at least one of them still has it
+mapped somewhere.  But Lu's solution inherently ties the life cycle of the
+huge zero page to that of the <tt>mm_struct</tt> structures that used it.
+As a result, the huge zero page cannot be used for operations that are not
+somehow tied to an <tt>mm_struct</tt>.  Filesystems are one example of a
+place where it would be useful to have a huge zero page; they often have to
+zero out large ranges of blocks on an underlying storage device.  But
+buffered I/O operations happen independently of any process's life cycle;
+they cannot use the huge zero page without running the risk that it might
+be deallocated and reused before an operation completes.
+<p>
+That limitation may be about to go away.  As Pankaj Raghav pointed out in
+<a href="/ml/all/20250811084113.647267-1-kernel@pankajraghav.com">this
+patch series</a>, the lack of a huge zero page that is usable in the
+filesystem context makes the addition of <a href="1009548.html">large
+block size support</a> to filesystems like XFS less efficient than it could
+be.  To get around this problem, a way needs to be found to give the huge
+zero page an even more complex sort of life cycle that is not tied to the
+life cycle of any process on the system without reintroducing the
+reference-counting overhead that Lu's patch fixed.
+<p>
+Or, perhaps, the right solution is, instead, to do something much simpler.
+After renaming the huge zero page to the "huge zero folio" (reflecting how
+it has come to be used in any case), the patch series adds an option to
+just allocate the huge zero folio at boot time and keep it for the life of
+the system.  The reference counting and marking of <tt>mm_struct</tt>
+structures is unnecessary in this case, so it is not performed at all, and
+the kernel can count on the huge zero folio simply being there whenever it
+is needed.  This mode is controlled by the new
+<tt>PERSISTENT_HUGE_ZERO_FOLIO</tt> configuration option which, following
+standard practice, is disabled by default.
+<p>
+The acceptance of this series in the near future seems nearly certain.  It
+simplifies a bit of complex logic, reduces reference-counting overhead even
+further, and makes the huge zero folio available in contexts where it could
+not be used before.  The only cost is the inability to free the huge zero
+folio but, in current systems, chances are that this folio will be in
+constant use anyway.  The evolution of hardware has, as a general rule,
+forced a lot of complexity into the software that drives it.  Sometimes,
+though, newer hardware (and especially much larger memory capacity) also
+allows the removal of complexity that was driven by the constraints felt a
+decade or more ago.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Huge pages</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1033058/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1033808"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some questions:</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 16:46 UTC (Thu)
+                               by <b>ttuttle</b> (subscriber, #51118)
+                              [<a href="/Articles/1033808/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ttuttle" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033808" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <ol>
+<li>Aren't there even bigger huge pages (like 1 GB) on some systems? Are they going to have a zero folio that big too?</li>
+<li>Are there systems out there where the 2 MB needed for a permanent zero folio will be a problem?</li>
+</ol>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033808/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033817"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some questions:</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 17:06 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1033817/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033817" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      For 1), there are definitely systems using extra-huge pages, often to back virtual machines.  I don't know if any that <i>fault</i> pages on that scale, though.  Probably keeping a PUD-level zero page around would not be worth the trouble at this point.
+<p>
+For 2), there are definitely folks out there (<a href="/ml/all/rr6kkjxizlpruc46hjnx72jl5625rsw3mcpkc5h4bvtp3wbmjf@g45yhep3ogjo/">example</a>) who worry about setting aside a 2MB page.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033817/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1033853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some questions:</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 1:30 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1033853/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033853" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you want 1GB pages, you need to use HugeTLB and there's no provision for zero pages in HugeTLB.<br>
+<p>
+Now, we might at some future point add support for PUD-sized THP, but there are some major questions to answer before we do that.<br>
+<p>
+One is, how do we determine if they're needed? Even 2MB THPs cause some workloads to regress.<br>
+<p>
+Another is, how do we handle swap? Your top-end NVMe drive on a PCIe gen5 bus can do maybe 12GB/s of writes. So we can swap out 12 x 1GB pages per second. That's ... not many.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033871"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Swap and THP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 10:49 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1033871/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033871" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I was under the impression that THP broke up hugepages so that swap could always work in terms of the smallest page size; if you're swapping, it'd prefer to break up 1GB pages into 4 KiB pages then swap individual 4 KiB pages, rather than try to swap entire hugepages in one go.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033871/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033902"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Swap and THP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 13:23 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1033902/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033902" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      People have been working for years to swap in units larger than base pages; there's all kinds of efficiency gains to be had there.  That said, swapping 1GB huge pages seems ... unlikely for now.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033902/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1033813"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing zeroes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 16:50 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1033813/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033813" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>The zero page is mapped copy-on-write, so if the process ever writes to that page, it will take a page fault that will cause a separate page to be allocated in place of the shared zero page.</blockquote>
+What if that write is all zero bytes?  The page could be left alone in that case.
+<p>
+It sounds unlikely, but if userspace is often faulting in pages that aren't used, maybe some programs are writing zeroes a lot of the time.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033813/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033816"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing zeroes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 17:03 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1033816/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033816" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I can't really think of a way of detecting zero writes that wouldn't slow things down horribly.  If applications writing zero-filled pages is a concern, the best solution might be to use <a href="/Articles/1016426/">KSM</a> to coalesce them back together.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033816/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1033815"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 16:54 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1033815/">Link</a>] (23 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033815" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I'm reading the article correctly, the huge page holding zeroes, marked copy-on-write, has to be physically allocated from RAM.  With all the tricks that MMUs can perform, surely they can give you a virtual memory area where any read will return zeroes and any write (of non-zero bytes) will fault?  Then there would be no need to waste physical RAM holding zeroes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033815/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 17:34 UTC (Thu)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/1033819/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tux3" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033819" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't know how much slack a modern MMU has for new features, but whatever address it gives you would probably need to point somewhere that exists on the bus, wouldn't it? It does address translation, but I wouldn't traditionally expect it to be in the business of writing back actual data<br>
+<p>
+But something about the idea of a physical /dev/zero device on the bus is funny to me<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033827"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 18:03 UTC (Thu)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1033827/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033827" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Not all addresses go out the address bus; a lot of CPU architectures use special physical addresses to map SOC registers or I/O devices.  I could easily see a CPU architecture that maps a certain (physical) address range to just be read-only returning zeros; you then map your virtual addresses to this physical range and you're in business.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033827/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033832"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 18:47 UTC (Thu)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/1033832/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tux3" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033832" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I might be confused, but are those physical MMIO SoC registers/devices not still behind some sort of crossbar and bus?<br>
+<p>
+The picture I had in my head has virtual addresses translated to physical, then sent on some crossbar that routes each physical range to some device that is ready to take the request. Then again the naive CPU uarch I'm working on at home is from the 1990's, I have no idea what real uarch looks like..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033832/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033834"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 18:59 UTC (Thu)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1033834/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033834" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Yes, but you could route a whole range of addresses to the same physical 32-bit register that always contains all-zeros (simply by ignoring low-order address bits.)  Even in the old days, there were CPUs that had address aliasing where multiple addresses actually wound up in the same place.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033834/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1033851"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 0:39 UTC (Fri)
+                               by <b>kucharsk</b> (subscriber, #115077)
+                              [<a href="/Articles/1033851/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kucharsk" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033851" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I advocated just such a feature (via a PTE value) to the SPARC architecture folks about 23 years ago.<br>
+<p>
+It would have worked just like reads to/from SPARC %r0; anything read from the page would have been like a read from /dev/zero, anything written to it would have been like a write to /dev/null. Normal page permissions would apply so a page fault writing to the zero page would invoke CoW or generate a page fault, as appropriate, and the page could be any of the page sizes supported by SPARC. At the time, that was a maximum of 16GB, but there had been discussions regarding future additional large page sizes up to 1TB!<br>
+<p>
+With no need to actually fill an 8KB page with zeroes, let alone one 16GB (or 1TB) in size, the memory savings could have been substantial on a system using large pages, something Solaris supported with MPSS.<br>
+<p>
+Sadly, that idea died when we stopped designing SPARC processors.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033851/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2025 22:39 UTC (Sat)
+                               by <b>intgr</b> (subscriber, #39733)
+                              [<a href="/Articles/1034090/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intgr" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034090" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; the memory savings could have been substantial on a system using large pages</span><br>
+<p>
+To me, being able to avoid using memory bandwidth to read zeroes sounds more interesting than the memory savings.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1033835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 19:10 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1033835/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033835" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That seems like a great idea, but I'm not aware of any processor that provides such a thing. It'd be interesting to work with a hardware vendor to prototype how much of an improvement that makes; I'd expect it to help, but as always, the question is whether it helps more than spending transistors on other things.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1033839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 21:14 UTC (Thu)
+                               by <b>pankyraghv</b> (subscriber, #153275)
+                              [<a href="/Articles/1033839/">Link</a>] (15 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pankyraghv" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033839" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am the original author of this patch series.<br>
+<p>
+This comment [1] did come up during the review process. The main motivation for making this huge zero folio more accessible was to use it for Block I/O where the memory needs to be DMA capable, therefore, we need the memory to exist physically.<br>
+<p>
+For example, I have changed one of the block library function that issues zeroes to the device with huge_zero_folio [2].<br>
+<p>
+[1] <a href="https://lore.kernel.org/linux-mm/p6ciia5cm5re4paau3tqhcdk3cdjmnwjuc2l5rv6ztb6kcgvyp@2g6ei7okvuw5/">https://lore.kernel.org/linux-mm/p6ciia5cm5re4paau3tqhcdk...</a><br>
+[2] <a href="https://lore.kernel.org/linux-mm/20250811084113.647267-6-kernel@pankajraghav.com/">https://lore.kernel.org/linux-mm/20250811084113.647267-6-...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033845"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 23:17 UTC (Thu)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1033845/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033845" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>D'oh, DMA.  Just when things were looking simple. 🙂
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033845/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033850"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 0:26 UTC (Fri)
+                               by <b>leromarinvit</b> (subscriber, #56850)
+                              [<a href="/Articles/1033850/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="leromarinvit" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033850" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess IOMMUs should in theory be capable of pulling such tricks - I wonder if any actually are?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033850/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 6:11 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1033863/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033863" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As long as you have some mechanism to serve as many zeroes over the bus as someone wants, the remaining part of the hardware seems fairly trivial: a physical address prefix that's always mapped to zero, large enough that you can put it into a page table at any level for a zero page of any size.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033979"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 22:19 UTC (Fri)
+                               by <b>leromarinvit</b> (subscriber, #56850)
+                              [<a href="/Articles/1033979/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="leromarinvit" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033979" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure, something needs to be serving those zeroes. The reason I thought about the IOMMU in the first place is just that it would be trivial to add (as anywhere else, obviously) *and* it already has enough address lines connected to cover the entire physical address space. As opposed to e.g. getting a r/o zero address range into the next DDR spec, where presumably an extra address line would have to be routed to the RAM, since otherwise it would reduce the max addressable capacity. And if you spec one more address line, you'd probably want to support twice as much RAM... But yes, architecturally, putting this into the (IO)MMU is a bit of a hack.<br>
+<p>
+This is indeed looking more and more like the "physical /dev/zero" mentioned above. Taking that idea to the extreme, I'm (not-quite-seriously) imagining a dedicated PCIe card. You could even make it writable and get a combined physical /dev/zero and /dev/null ;-). A 5.0 x16 card would give you ~63 GB/s of zeroes. Not too bad, but still slower than DDR5, so for best performance, you're back to mapping a physical RAM page.<br>
+<p>
+Eminently nonsensical and completely useless in practice of course, but could be a fun DIY project for the nihilistically inclined.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033979/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034018"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2025 5:31 UTC (Sat)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1034018/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034018" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+/dev/zero already acts like /dev/null when written to.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034018/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034475"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2025 11:53 UTC (Wed)
+                               by <b>leromarinvit</b> (subscriber, #56850)
+                              [<a href="/Articles/1034475/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="leromarinvit" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034475" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But you can't DMA to /dev/zero or /dev/null, them being char devices. And while you can DMA *from* the zero page, you can't DMA *to* it.<br>
+<p>
+I see I'm not finding many customers here for my hypothetical hardware /dev/zero. Of course, I wouldn't buy such a thing either... :-D<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034475/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034493"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2025 13:44 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1034493/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034493" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Ideally, though, you do want a zero page you can DMA to as well as from, with the writes being discarded; if you put such a node on the chip's internal network (as a peer to the memory controller), it can deliver zeros to read requests and accept then discard any writes.
+<p>There's then a chunk of optimizations to do: make sure the zero device is at the same physical address for all sockets in multi-socket systems (so no cross-socket traffic - you always talk to the closest zero device), and teaching nodes to skip the transactions across the internal network for this range of physical addresses, so that it doesn't take up internal bandwidth, and you've got a great thing for modern highly-integrated CPUs.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034493/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2025 14:27 UTC (Wed)
+                               by <b>leromarinvit</b> (subscriber, #56850)
+                              [<a href="/Articles/1034551/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="leromarinvit" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034551" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure if DMA-ing to a /dev/zero equivalent is something that would see much use, aside from hardware with weird quirks (e.g. requires uninteresting data to be read in order to function correctly, with no way to ignore it without actually performing reads). The only exception I can think of is read benchmarks with /dev/zero or /dev/null as output. But for "normal" workloads, things to be discarded typically come from the CPU, so DMA is not necessary. If you're going to discard data read from some other device, why read it in the first place? Of course, the same could be said about CPU-generated to-be-discarded data.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034559"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2025 14:47 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1034559/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034559" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      It's more that it makes the design simpler; it's just a peer to the memory controller, but where the memory controller maps a range of physical address bits to DRAM, the zeroes device maps a range of physical address bits to a guaranteed zero.
+<p>You could also make it fail with a suitable bus error on writes, from both CPU and DMA. Both work, but eating data written to it is likely to be simpler - and you can then use the MMU or IOMMU to make writes fail if that's the desired outcome.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034559/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034574"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2025 18:06 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1034574/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034574" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We can make a hardware /dev/null as a PCI-e card!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034574/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1033932"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 14:30 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1033932/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033932" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't understand the motivation for having a zero folio for block I/O.  The article explains how the zero folio is useful when a user process faults in a new page but never writes anything to it, so you can save memory by using a single shared page.<br>
+<p>
+But surely, every I/O operation writes something.  Is there any performance gain from starting with a read-only zero folio for your block I/O, then triggering a copy-on-write operation as soon as the I/O begins?  It would make more sense to allocate a real page every time.<br>
+<p>
+Or do you mean that when the page is initially requested, the kernel doesn't know whether it will be used for I/O?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033932/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 14:32 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1033936/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033936" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, I got it the wrong way round.  You are talking about sending zeroes to the device.  The user process allocates some memory with all zeroes, and then never changes it, but wants to write it to disk.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1033935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 14:33 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1033935/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033935" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I/O in the other direction; if I'm going to read into memory, then yes, there's no advantage from starting with a read-only folio and replacing it, but if I'm going to write out a mixture of real data interspersed with 2 MiB (or larger!) chunks of zeros, I need real zeroes to write out to the storage medium.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1034026"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2025 8:36 UTC (Sat)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1034026/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034026" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm missing something. ISTM you'd need a physical large zero page only on systems without an IOMMU. I'm not talking about using an IOMMU for any exotic magic address space: why wouldn't you just tile a virtual ZHP with aliases of the smallest-size zero page just like you for non-IO virtual memory? This way, you issue one nice bio_vec because the DMA region is contiguous from the device's POV due to the aliasing in the IOMMU page tables but you're still not actually paying for all that RAM.<br>
+<p>
+Maybe wiring this scheme up at the block device or DMA or whatever layer would take some subsystem interface rearrangements, sure, but still, for systems with IOMMUs, using a single enormous zero folio instead of copies of a small zero page seems like a software choice, not a hardware necessity. It would be a shame to claim necessity due to a constraint Linux is imposing on itself.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034026/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">So the zero folio has to exist physically?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2025 19:41 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1034069/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034069" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The biovec data structure stores physical addresses (not virtual nor bus addresses). So to do what you're suggesting would add complexity to the IOMMU driver (and inconvenience to systems which don't have an IOMMU). We'd have to treat zero pfns specially ... it's not unworkable, but I'm not convinced it's superior to the current solution.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1033844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2025 23:32 UTC (Thu)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/1033844/">Link</a>] (14 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cesarb" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033844" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Sometimes, though, newer hardware (and especially much larger memory capacity) also allows the removal of complexity that was driven by the constraints felt a decade or more ago.</span><br>
+<p>
+A 2MB page full of zeros is the same amount of memory as the whole RAM of my first desktop computer.<br>
+<p>
+A 2MB page full of zeros is 0,0061035% of the whole main RAM of my current desktop computer (excluding the video RAM).<br>
+<p>
+Four years ago, it was decided to completely ignore the first 1MB of memory on common x86 computers. Such a thing would have been unthinkable back when it was a large fraction of the available memory.<br>
+<p>
+It still feels very wasteful for those of us who grew in the "megabyte era". A 2MB page can fit a whole high-density floppy disk image, with space to spare. It was enough for a full operating system. It would take around five minutes to download.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033849"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 0:16 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1033849/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033849" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Two whole megabytes? Ah, youth! My first was a 6502 microcomputer with a whole 48kB of RAM. Now Intel puts 48kB of L1 D$ on laptop CPUs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033849/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033852"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 1:22 UTC (Fri)
+                               by <b>jdelkins</b> (subscriber, #166490)
+                              [<a href="/Articles/1033852/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jdelkins" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033852" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Apple II Plus? I had a IIe *with* the extended 80 column card, providing a jealousy-inducing 128k of RAM!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033852/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 2:09 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1033855/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033855" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The Oric-1. Not well-known outside the UK. Moved from that to a BBC Model B, then to an Acorn A5000.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033867"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 7:22 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1033867/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033867" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Jupiter Ace. 3KB of onboard RAM, and a 16KB expansion pack ... Same era as the Speccy<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033867/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1033933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 14:26 UTC (Fri)
+                               by <b>mzyngier</b> (subscriber, #32898)
+                              [<a href="/Articles/1033933/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mzyngier" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033933" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Pretty popular in France. It was my first machine as well...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1033854"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 2:05 UTC (Fri)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1033854/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033854" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>My first computer was the original Radio Shack Color Computer.  I went for the deluxe model with extended BASIC and 16K RAM instead of the low-end standard BASIC / 4K RAM.
+
+<p>After a while, I did get the RAM upgraded to 64K and I bought a floppy disk drive.  On the box of 10 floppy disks, I proudly wrote:  "Total capacity: 1.6MB"
+
+<p>Yup.  The 5.25" floppies used by the CoCo held 160kB apiece.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033854/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 2:30 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1033856/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033856" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I only used cassette tapes with the Oric. When I upgraded to the Beeb, it had 80-track floppies. 80 tracks * 10 sectors * 256 bytes was 200kB (double sided discs were 400kB!)<br>
+<p>
+How did the 6809 handle 64kB of RAM, with only having a 16 bit address bus and presumably needing some ROM and MMIO space? On the Beeb, there was additional hardware to choose which 16k chunk of memory occupied the address space from 32-48k.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033857"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 2:49 UTC (Fri)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1033857/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033857" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>In the CoCo, the bottom 32kB was mapped to RAM and the top 32kB to various ROMs.  However, the SAM chip that did the device decoding had a register that could let you flip between the normal memory map and a memory map that was (almost) all of the RAM.  So effectively, you could bank-switch the RAM in and out.  Or, you could copy the ROM to the RAM by putting the memory map in normal mode, reading a byte, switching the RAM in and writing the byte.  Do that for the whole address space and then you can leave the RAM permanently switched in <em>and</em> hot-patch the built-in ROM code.   Fun times.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033857/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 2:53 UTC (Fri)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1033858/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033858" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Oh sorry, there was some MMIO, but it was a tiny chunk of around 256 bytes at the very top of the address space.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1033859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 3:01 UTC (Fri)
+                               by <b>csamuel</b> (<b>&#x272D; supporter &#x272D;</b>, #2624)
+                              [<a href="/Articles/1033859/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="csamuel" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033859" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Two whole megabytes? Ah, youth! My first was a 6502 microcomputer with a whole 48kB of RAM. Now Intel puts 48kB of L1 D$ on laptop CPUs.</span><br>
+<p>
+48kB? Luxury! When I was a lad all I had was a CBM VIC-20 with 3.5kB memory, and we thought we were lucky...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033864"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 6:26 UTC (Fri)
+                               by <b>jorgegv</b> (subscriber, #60484)
+                              [<a href="/Articles/1033864/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jorgegv" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033864" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nice reference, you cheered my morning... I just went to rewatch Monty Python's sketch for the Nth time...<br>
+<p>
+:-D<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033864/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1033866"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 7:17 UTC (Fri)
+                               by <b>peda</b> (subscriber, #5285)
+                              [<a href="/Articles/1033866/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="peda" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033866" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Same start for me (and I also considered myself lucky) but the VIC-20 actually had 5kB RAM. The "missing" 1.5kB was used for IRQ vectors/kernel/basic (1kB) and for video output (typically a screen of 22x23 chars, 0.5kB or 506 bytes to be exact). You could use at least the 0.5kB video memory without too much trouble if you didn't mind the garbled screen, and if you had no intention of returning to the Basic interpreter you had other options (never tried to actually do the latter myself though).<br>
+<p>
+But indeed, you did have 3.5kB free (3584 bytes) for Basic programs, but that would not have been possible without the 1.5kB used to maintain the system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033866/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034147"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2025 20:54 UTC (Sun)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/1034147/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbonzini" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034147" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Don't forget the extra 4096 bits of color RAM (though those are mapped as 1 KiB * 4 bit which makes it a bit less convenient...)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034147/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1033875"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 10:27 UTC (Fri)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1033875/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033875" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+48 KiB of RAM? Luxury! I had to compute uphill, backwards, both ways, on my ZX81 with a 16 KiB RAM pack! Only had 1 KiB built-in, but 16 KiB with that wobbly RAM pack hanging off the back. You'd spent 20 minutes typing stuff in, and then get up too fast and knock the ZX81 and _poof_ everything gone as the thing reset itself!<br>
+<p>
+48 KiB of RAM? Luxury!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033875/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1033873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zeroes are overrepresented</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2025 10:09 UTC (Fri)
+                               by <b>adobriyan</b> (guest, #30858)
+                              [<a href="/Articles/1033873/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="adobriyan" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1033873" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When cow mappings get configurable initial value, everything discussed could be multiplied by 256.<br>
+<p>
+Just imagine /dev/zero00, /dev/zeroff with /dev/zeroed in between!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035547"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zeroes are overrepresented</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 29, 2025 1:19 UTC (Fri)
+                               by <b>cypherpunks2</b> (guest, #152408)
+                              [<a href="/Articles/1035547/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cypherpunks2" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1035547" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+CoW mappings don't have initial values. All it is is a read-only (from the MMU's perspective) physical page that new allocations' pages point to. When a write comes in, a page fault occurs and instead of sending a SIGSEGV, the kernel, seeing that the fault occurred at an address that is marked as writable (from userspace's perspective), copies that page and makes any necessary modifications, adjusts the page tables, and restarts the process.<br>
+<p>
+I guess one could create 256 different pages, but the main time this matters is with newly available memory in a VMA.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035547/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1034075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per CPU refcount?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2025 20:17 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1034075/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1033058/#CommAnchor1034075" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder why a per-CPU counter wasn't used for the refcount. They avoid cache line bouncing and as only one is needed the extra space isn't excessive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

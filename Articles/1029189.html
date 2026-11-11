@@ -1,0 +1,870 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>SFrame-based stack unwinding for the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="SFrame-based stack unwinding for the kernel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's perf events subsystem can produce high-quality profiles, with full function-call c [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1029427/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>SFrame-based stack unwinding for the kernel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 11, 2025</br>
+           </div>
+The kernel's <a
+href="https://www.man7.org/linux/man-pages/man2/perf_event_open.2.html">perf
+events subsystem</a> can produce high-quality profiles, with full
+function-call chains, of resource usage
+within the kernel itself.  Developers, however, often would like to see
+profiles of the whole system in one integrated report with, for example,
+call-stack information that crosses the boundary between the kernel and
+user space.  Support for unwinding user-space call stacks in the perf
+events subsystem is currently inefficient at best.  A long-running effort
+to provide reliable, user-space call-stack unwinding within the kernel,
+which will improve that situation considerably, appears to be reaching
+fruition.
+<p>
+A process's call stack (normally) contains all of the information that is
+needed to recreate the chain of function calls that led to a given point in
+its execution.  Each call pushes a frame onto the stack; that frame
+contains, among other things, the return address for the call.  The problem
+is that exactly <i>where</i> that information lives on the stack is not
+always clear.  Functions can (and do) put other information there, so there
+may be an arbitrary distance between the address in the stack pointer
+register and the base of the current call frame at any given time.  That
+makes it hard for the kernel (or any program) to reliably work through the
+call chain on the stack.
+<p>
+One solution to the problem is to use frame pointers — dedicating a CPU
+register to always point to the base of the current call frame.  The frame
+pointer will be saved to the call stack at a known offset for each function
+call, so frame pointers will reliably make the structure of the call stack
+clear.  Unfortunately, frame pointers hurt performance; they occupy a CPU
+register, and must be saved and restored on each function call.  As a
+result, building software (in both kernel and user space) without frame
+pointers is a common practice; indeed, it is the usual case.
+<p>
+Without frame pointers, the kernel cannot unwind the user-space call stack
+in the perf events subsystem.  The best that can be done is to copy the
+user-space stack (through the kernel) to the application receiving the
+performance data, in the hope that the unwinding can be done in user space.
+Given the resolution at which performance data can be collected, the result
+is the copying of massive amounts of data, and a corresponding impact on
+the performance of the system.
+<p>
+Call-stack unwinding is not a new problem, of course.  In user space, the
+solution has often involved debugging data generated in the <a
+href="https://dwarfstd.org/">DWARF</a> format.  DWARF data is voluminous
+and complicated to interpret, though; handling it properly requires
+implementing a special-purpose virtual machine.  Trying to use DWARF in the
+kernel is a good way to lower one's popularity in that community.
+<p>
+So DWARF is not an answer to this problem.  Some years ago, developers
+working on live patching (which also needs reliable stack unwinding) came
+up with <a href="/Articles/728339/">a new data format called ORC</a>; it is
+far simpler than DWARF and relatively compact.  ORC has been a part of the
+kernel's build process ever since, but it has never been adapted to user
+space.
+<p>
+<h4>Enter SFrame</h4>
+<p>
+At least, ORC hadn't been adapted to user space until the <a
+href="932209.html">SFrame project</a> (which truly needs an amusing
+Lord-of-the-Rings-inspired name) was
+launched.  SFrame is an ORC-inspired format that is designed to be as
+compact as possible.  In an executable file that has been built with SFrame
+data, there is a special ELF section containing two tables that look
+somewhat like this:
+<p>
+<blockquote>
+<img src="../_static/images/2025/sframe.svg" alt="[SFrame diagram]"
+     class="photo forcewhite" width=700>
+</blockquote>
+<p>
+The left-hand table (the "frame descriptor entries") contains one entry for
+each function; the table is sorted by virtual address.  When the need comes
+to unwind a call stack, the first step is to take the current program
+counter and, using a binary search, find the frame descriptor entry that
+includes that address.  Each entry contains, beyond the base address for
+the function, pointers to one or more "frame row entries".  Each of those
+entries contains between one and 15 triplets with start and size fields
+describing a portion of the function's code, and an associated frame-base
+offset.  The offset of the program counter from the base address is used to
+find the relevant triplet which, in turn, gives the offset from the current
+stack pointer to the base of the call frame.  From there, the process can
+be repeated to work up the call stack, one frame at a time.
+<p>
+The GNU toolchain has the ability to build executables with SFrame data,
+though it seems that some of that support is still stabilizing.  SFrame
+capability is evidently coming to LLVM soon as well.  Thus far, though, the
+kernel is unable to make use of that data to generate user-space call
+traces.
+<p>
+See <a href="940686.html">this article</a> for more information about
+SFrame.  There is <a
+href="https://sourceware.org/binutils/docs/sframe-spec.html">a
+specification for the v2 SFrame format</a> available; this is the format
+that the GNU toolchain currently supports.  <a
+href="https://sourceware.org/binutils/wiki/sframe/sframev3todo">Version&nbsp;3
+of the SFrame format</a> is under development, seemingly with the goal of
+deployment before SFrame is widely used.  The new version adds some
+flexibility for finding the location of the top frame, the elimination
+of unaligned data fields (which are explicitly used by the current format
+to reduce its memory requirements), support for signal frames, and s390x
+architecture support, among other things.
+<p>
+<h4>Using SFrame in the kernel</h4>
+<p>
+Back in January Josh Poimboeuf posted <a
+href="/ml/all/cover.1737511963.git.jpoimboe@kernel.org/">a patch series</a>
+adding support for SFrame for user-space call-stack unwinding in the perf
+events subsystem.  He has since moved on to other projects; Steve Rostedt
+has picked up the work and is trying to push it through to completion.  The
+original series is now broken into three core chunks, each of which
+addresses a part of the problem.
+<p>
+The SFrame data, being stored in an ELF section, can be mapped into a
+process's address space along with the rest of the executable.  Accessing
+that data from the kernel, though, is subject to all of the constraints
+that apply to user-space memory.  Notably, this data may be mapped into the
+address space, but it might not be resident in RAM, so the kernel must be
+prepared to take page faults when accessing it.
+<p>
+That, in turn, means that the kernel can only access SFrame data when it is
+running in process context.  Data from the system's performance monitoring
+unit, though, tends to be delivered via interrupts.  So the code that
+handles those interrupts, and which generates the kernel portion of the
+stack trace, cannot do the user-space unwinding.  That work has to be
+deferred until a safe time, which is usually just before the kernel returns
+back to user space.
+<p>
+So <a href="/ml/all/20250708012239.268642741@kernel.org">the first patch
+series</a> adds the infrastructure for this deferred unwinding.  When the
+need to unwind a user-space stack is detected, a work item is set up and
+attached using the task_work mechanism; the kernel will then ensure that
+this work is done at a time when user-space memory access is safe.  Support
+for deferred, in-kernel stack unwinding on systems where frame pointers are
+in use is also added as part of this series.
+<p>
+The <a href="/ml/all/20250708020003.565862284@kernel.org">second series</a>
+teaches the perf events subsystem to use this new infrastructure.  The
+resulting interface for user space is somewhat interesting.  A call into
+the kernel can generate a large number of performance events, each of which
+may have a stack trace associated with it.  But the user-space portion of
+that trace can only be created just before the return to user space.  So
+the perf events subsystem will report any number of kernel-side traces,
+followed by a single user-space trace at the end.  Since the user-space
+side of the call chain does not change while this is happening, a single
+trace is all that is needed.  User space must then put the pieces back
+together to obtain the full trace.  The <a
+href="/ml/all/20250708020051.774149982@kernel.org">last patch in the
+series</a> updates the <tt>perf</tt> tool to perform this merging and
+output unified call chains.
+<p>
+Finally, the <a href="/ml/all/20250708021115.894007410@kernel.org">third
+series</a> adds SFrame support to all of this machinery.  When an
+executable is loaded, any SFrame sections are mapped as well.  Within the
+kernel, a <a href="/Articles/845507/">maple tree</a> is used to track the
+SFrame sections associated with each text range in the executable.  The
+kernel does not, however, track the SFrame sections associated with shared
+libraries, so the series contains a new <a
+href="https://man7.org/linux/man-pages/man2/prctl.2.html"><tt>prctl()</tt></a>
+operation so that the C library can provide that information explicitly.
+That part of the API is likely to change (the <a
+href="/ml/all/20250708021200.397301537@kernel.org">relevant patch</a>
+suggests that a separate system call should be added) before the series is
+merged.
+<p>
+With the SFrame information at hand, using it to generate stack traces is a
+relatively straightforward job; the kernel just has to use the SFrame
+tables to work through the frames on the stack.  The result should be fast
+and reliable, with a minimal impact on the performance of the workload
+being measured.
+<p>
+The sum total of this work is quite a bit of new infrastructure added to
+the core kernel, including code that runs in some of the most constrained
+contexts.  So the chances are good that there are still some minor problems
+to work out.  The bulk of the hard work would appear to be done, though.
+It may take another development cycle or three, but the multi-year project
+to get SFrame support into the kernel would appear to be reaching its
+conclusion.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/SFrame</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.19</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1029189/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1029683"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame us more accurate too</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 12, 2025 18:35 UTC (Sat)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1029683/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029683" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Frame pointers can miss leaf functions.  SFrame will not do that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029683/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1029692"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Co-routines?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 12, 2025 23:04 UTC (Sat)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/1029692/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029692" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I do not see any support for co-routines: a RETURN is replaced by a co-CALL of some other routine in the nest, and is itself the destination of a co-CALL.  Incremental producer-consumer bit packing can be expressed as a nest of two co-routines; "the stack" remembers two "leaf" activations, whose co-RETURN (co-CALL) points each vary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029692/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1029721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Co-routines?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2025 7:44 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1029721/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029721" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+More generally anything using continuation passing style does not really play well with stack traces and won't work with this either without some special considerations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1029828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Co-routines?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2025 14:22 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1029828/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029828" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What would you want a "stack trace" to say for coroutines? They may have called each other millions of times by the time we try to "inspect the stack". Surely you wouldn't want to have millions of repetitions of "producer called consumer called producer called ...". Isn't it enough to know "thread is in producer which was called from event loop"?<br>
+<p>
+Is there any prior work in this area we can steal^W benefit from?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1029863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Co-routines?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2025 21:40 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1029863/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029863" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Isn't it enough to know "thread is in producer which was called from event loop"?</span><br>
+<p>
+Not really. In particular, this makes debugging the coroutine-heavy code a pure nightmare. Debugger becomes worse than useless.<br>
+<p>
+What I'd love is to have a weak link to the "caller frame". It's OK for it to be garbage-collected if the chain becomes too long.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1029694"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 12, 2025 23:56 UTC (Sat)
+                               by <b>SLi</b> (subscriber, #53131)
+                              [<a href="/Articles/1029694/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="SLi" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029694" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; At least, ORC hadn't been adapted to user space until the SFrame project (which truly needs an amusing Lord-of-the-Rings-inspired name) was launched.</span><br>
+<p>
+Indeed. What can we come up with that doesn't sound completely stupid?<br>
+<p>
+Smeagol? Shelob (since it unwinds tangled stacks)? Framewise Gamgee? Framebeard? BackAgain?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029694/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1029698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2025 5:25 UTC (Sun)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/1029698/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magfr" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029698" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Find a nice backronym from ENT or just bite the bullet and call it MAN.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1029722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2025 7:45 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1029722/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029722" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess ENT would not work that well for a format more compact than DWARF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1029872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2025 23:32 UTC (Mon)
+                               by <b>himi</b> (subscriber, #340)
+                              [<a href="/Articles/1029872/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="himi" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029872" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Considering how (unintentionally?) ironic the name "DWARF" is, ENT seems perfectly reasonable for something designed to be compact and concise.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1029699"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2025 9:12 UTC (Sun)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/1029699/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="excors" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029699" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As this is an attempt to spread ORC into the wider world, I think the obvious answer is the word for "to rule them all" in Black Speech (the common language of Orcs and other servants of Mordor, which was itself designed to solve the problem of mutually-unintelligible dialects between tribes and help them coordinate more efficiently, just as SFrame is doing): DURBATULÛK, or Debugging Userspace Reliably By A Table of Unwinding-Location Ûseful Knowledge.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029699/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1029702"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2025 10:27 UTC (Sun)
+                               by <b>SLi</b> (subscriber, #53131)
+                              [<a href="/Articles/1029702/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="SLi" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029702" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I approve.<br>
+<p>
+CONFIG_DURBATULUK=y<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029702/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1029708"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2025 17:16 UTC (Sun)
+                               by <b>jemarch</b> (subscriber, #116773)
+                              [<a href="/Articles/1029708/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jemarch" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029708" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's spelled s-f-r-a-m-e but it's pronounced DURBATULUK<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029708/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1029713"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Naming</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2025 21:27 UTC (Sun)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/1029713/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Sesse" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1029713" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SFrame obviously stands for Saruman-Frame, so we're already covered.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029713/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1030223"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some thoughts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 17, 2025 5:19 UTC (Thu)
+                               by <b>irogers</b> (subscriber, #121692)
+                              [<a href="/Articles/1030223/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="irogers" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1030223" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SFrames trying to advance performance and profiling accuracy is a noble thing. The article missing LBR stack traces which have largely solved the issue in areas like AutoFDO.<br>
+<p>
+Some other thoughts:<br>
+ - Why a new encoding format, why not have a subset of dwarf that matches the limited stack frame encoding supported by sframes? Dwarf is compressed and there may be potential for reuse of the ELF section in areas like C++ exception delivery.<br>
+ - When perf is invoked to record system wide for a period of time like `perf record -e cycles -a sleep 10` any system call that hasn't transitioned to user code will only have the kernel side of the stack trace.<br>
+ - The bpf helper bpf_get_stackid with BPF_F_USER_STACK will just return a placeholder value which may break or cause additional memory usage in BPF programs.<br>
+ - JITs need to be taught to generate/register/remove SFrames or perhaps some kind of JIT interface like GDB's can be devised.<br>
+<p>
+"Unfortunately, frame pointers hurt performance; they occupy a CPU register, and must be saved and restored on each function call." A register can be freed by holding the frame pointer in thread-local storage. Function call cost is addressed by inlining. x86 lacks any callee-save floating point registers which is likely a greater performance issue and unfortunately not addressed by the upcoming APX changes. A greater performance issue is the -fno-omit-frame-pointers is less well optimized by C compilers, for example, missing tail call optimizations.<br>
+<p>
+Last year the return of frame pointers was heralded:<br>
+<a href="https://www.brendangregg.com/blog/2024-03-17/the-return-of-the-frame-pointers.html">https://www.brendangregg.com/blog/2024-03-17/the-return-o...</a><br>
+<p>
+There have been calling conventions like ARM32's APCS that have very dense debug info but also would be reasonably easy to reverse engineer by walking the code forward until the function return is seen. Perhaps the code itself is the best debug format.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1030223/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1041148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some thoughts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 8, 2025 7:47 UTC (Wed)
+                               by <b>ibhagat</b> (subscriber, #133641)
+                              [<a href="/Articles/1041148/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ibhagat" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1041148" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Why a new encoding format, why not have a subset of dwarf that matches the limited stack frame encoding supported by sframes? Dwarf is compressed and there may be potential for reuse of the ELF section in areas like C++ exception delivery.</span><br>
+<p>
+IOW, why not use an "EH Frame-like" solution?<br>
+<p>
+It all comes down to the core distinction between the two formats: Stack Tracing versus Stack Unwinding.<br>
+<p>
+Stack unwinding may be used for exception handling and needs to fully restore the register state of a previous function to continue execution there. Now state restoration needs to be done for the CFA, and all callee-saved registers minimally. So EH Frame needs to track a lot of entities. And the DWARF format, which it is based on, compacts this information by rather storing the DWARF opcodes (together with arguments) which you then execute to decipher the stack offsets, and sometimes DWARF expressions to encode more complex sequences. And this compaction mindset carries over into the encodings: EH Frame has LEB encoding.<br>
+<p>
+Above are the prime causes of the complexities that show up in the implementation of EH Frame based stack tracers.  Now, if the number of tracked entities is few(er) in number (say two or three), there are less reasons to continue with that sort of complexity.  If you start to peel off these sources of complexities, you'll land at something that is not DWARF anymore anyway...And so encoding offsets directly like done in SFrame was explored, which has the added advantage that stack tracing is going to be fast.<br>
+<p>
+SFrame is purpose-built for the simpler goal of stack tracing. By focusing solely on the task of stack tracing, SFrame makes different design choices across the board - from data retrieval to encodings for the data it tracks - to create a format that is dramatically simpler, smaller, and faster for its intended purpose.<br>
+<p>
+<span class="QuotedText">&gt; When perf is invoked to record system wide for a period of time like `perf record -e cycles -a sleep 10` any system call that hasn't transitioned to user code will only have the kernel side of the stack trace.</span><br>
+<p>
+Umm...whats the issue here?<br>
+<p>
+<span class="QuotedText">&gt; Perhaps the code itself is the best debug format.</span><br>
+<p>
+IMO, such reverse engineering is not viable, especially if the usecase is fast stack tracing.  It has its own maintenance and adoption issues: arch-specific know-how, keeping up with ISA extensions et al to say the least.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1041148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1035856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame logo</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 30, 2025 23:29 UTC (Sat)
+                               by <b>ibhagat</b> (subscriber, #133641)
+                              [<a href="/Articles/1035856/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ibhagat" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1035856" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; At least, ORC hadn't been adapted to user space until the SFrame project (which truly needs an amusing Lord-of-the-Rings-inspired name) was launched.</span><br>
+<p>
+If not the name now, may be we can make do with a cool logo for SFrame..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1037075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Little-endian format</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 1:54 UTC (Mon)
+                               by <b>maskray</b> (subscriber, #112608)
+                              [<a href="/Articles/1037075/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="maskray" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1037075" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The format includes endianness variations that complicate toolchain support. I think we should use a little-endian format universally, regardless of the target system's native endianness. On the big-endian z/Architecture, this is efficient; the LOAD REVERSED instructions used by the bswap versions in the following program don't even require extra instructions.<br>
+<p>
+#define WIDTH(x) \<br>
+typedef __UINT##x##_TYPE__ [[gnu::aligned(1)]] uint##x; \<br>
+uint##x load_inc##x(uint##x *p) { return *p+1; } \<br>
+uint##x load_bswap_inc##x(uint##x *p) { return __builtin_bswap##x(*p)+1; }; \<br>
+uint##x load_eq##x(uint##x *p) { return *p==3; } \<br>
+uint##x load_bswap_eq##x(uint##x *p) { return __builtin_bswap##x(*p)==3; }; \<br>
+<p>
+WIDTH(16);<br>
+WIDTH(32);<br>
+WIDTH(64);<br>
+<p>
+My blog post had a TODO chapter about CTF Frame. I spent some time today to read the spec and add my analysis here: <a href="https://maskray.me/blog/2020-11-08-stack-unwinding#sframe">https://maskray.me/blog/2020-11-08-stack-unwinding#sframe</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1041146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Little-endian format</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 8, 2025 6:54 UTC (Wed)
+                               by <b>ibhagat</b> (subscriber, #133641)
+                              [<a href="/Articles/1041146/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ibhagat" />
+                <input type="hidden" name="return" value="/Articles/1029189/#CommAnchor1041146" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Implementations in toolchain will anyway need to support endian swapping to allow cross-toolchains, producing a big-endian executable from a<br>
+little-endian host and vice versa.  I dont see how that can be avoided.<br>
+<p>
+That said, while it may be efficient on big-endian z/Architecture, due to the load reversed instructions, this may not uniformly hold true for all arches.   E.g., on aarch64 (see added insn in dependency chain for load_bswap_inc16):<br>
+<p>
+<p>
+load_inc16:<br>
+         ldrh    w0, [x0]<br>
+         add     w0, w0, 1<br>
+         ret<br>
+<p>
+load_bswap_inc16:<br>
+         ldrh    w0, [x0]<br>
+         rev16   w0, w0<br>
+         add     w0, w0, 1<br>
+         ret<br>
+<p>
+ Using LE universally then means that, for AArch64 BE e.g., it defers the task of endian swap on to the stack tracers. This is transferring more work build time to run time. It should be avoided.  Keeping SFrame data in the same endianness as the machine it will be used for stacktracing on is more sensible IMO.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1041146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,240 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The state of the pageout scalability patches [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The state of the pageout scalability patches">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The virtual memory scalability improvement patch set overseen by Rik van Riel has been under co [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/285792/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The state of the pageout scalability patches</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 17, 2008</br>
+           </div>
+The virtual memory scalability improvement patch set overseen by Rik van
+Riel has been under construction for well over a year; LWN <a
+href="257541.html">last looked at it</a> in November,
+2007.  Since then, a number of new features have been added and the patch
+set, as a whole, has gotten closer to the point where it can be considered
+for mainline inclusion.  So another look would appear to be in order.
+<p>
+
+One of the core changes in this patch set remains the same: it still
+separates the least-recently-used (LRU) lists for pages backed up by files
+and those backed up by swap.  When memory gets tight, it is generally
+preferable to evict page cache pages (those backed up by files) rather than
+anonymous memory.  File-backed pages are less likely to need to be written
+back to disk and they are more likely to be well laid-out on disk, making
+it quicker to read them back in if necessary.  Current Linux kernels keep
+both types of pages on the same LRU list, though, forcing the pageout code
+to scan over (potentially large numbers of) pages which it is not
+interested in evicting.  Rik's patch improves this situation by splitting
+the LRU list in two, allowing the pageout code to only look at pages which
+might actually be candidates for eviction.
+<p>
+
+There comes a point, though, where anonymous pages need to be reclaimed as
+well.  The kernel will make an effort to pick the best pages to evict by
+going for those which have not been recently referenced.  Doing that,
+however, requires going through the entire list of anonymous pages,
+clearing the "referenced" bit on each.  A large system can have many
+millions of anonymous pages; iterating over the entire set can take a long
+time.  And, as it turns out, it's not really necessary.
+<p>
+
+The VM scalability patch set now changes that behavior by simply keeping a
+certain percentage of the system's anonymous pages on the inactive list -
+the first place the system looks for pages to evict.  Those pages will
+drift toward the front of the list over time, but will be returned to the
+active list if they are used.  Essentially, this patch is applying a form
+of the "referenced" test to a portion of anonymous memory - whether or not
+anonymous pages are being evicted at the time - rather than trying to check
+the referenced state of all anonymous pages when the kernel decides it
+needs to reclaim some of them.
+<p>
+
+Another set of patches addresses a different situation: pages which cannot
+be evicted at all.  These pages might have been locked into memory with a
+system call like <tt>mlock()</tt>, be part of a locked SYSV shared memory
+region, or be part of a RAM disk, for example.  They can be either page
+cache or anonymous pages.  Either way, there is little point in having the
+reclaim code scan them, since it will not be possible to evict them.  But,
+of course, the current reclaim code does have to scan over these pages.
+<p>
+
+This unneeded scanning, as it turns out, can be a problem.  The extensive
+<a href="/Articles/286485/">unevictable LRU document</a> included with the
+patch claims:
+<p>
+<div class="BigQuote">
+	For example, a non-numal x86_64 platform with 128GB of main memory
+	will have over 32 million 4k pages in a single zone.  When a large
+	fraction of these pages are not evictable for any reason [see
+	below], vmscan will spend a lot of time scanning the LRU lists
+	looking for the small fraction of pages that are evictable.  This
+	can result in a situation where all cpus are spending 100% of their
+	time in vmscan for hours or days on end, with the system completely
+	unresponsive.
+</div>
+<p>
+Most of us are not currently working with systems of this size; one must
+spend a fair amount of money to gain the benefits of this sort
+of pathological behavior.  Still, it seems like something which is worth
+fixing. 
+<p>
+The solution, of course, is yet another list.  When a page is determined to
+be unevictable, that page will go onto the special, per-zone unevictable
+list, after which the pageout code will simply not see it anymore.  As a
+result of the variety of ways in which a page can become unevictable, the
+kernel will not always know at mapping time whether a specific page can go
+onto the unevictable list or not.  So the pageout code must keep an eye out
+for those pages as it scans for reclaim candidates and shunt them over to
+the unevictable list as they are found.  In relatively short order, the
+locked-down pages will accumulate in this list, freeing the pageout code to
+concentrate on pages it can actually do something about.
+
+<p>
+Many of the concerns which have been raised about this patch set over the
+last year have been addressed.  A few remain, though.  Some of the new
+features require new page flags; these flags are in extremely short supply,
+so there is always pressure to find ways of implementing things which do
+not allocate more of them.  There are a few too many configuration options
+and associated <tt>#ifdef</tt> blocks.  And so on.  Addressing these may
+take a while, but convincing everybody that these (rather fundamental) memory
+management changes are beneficial under all circumstances may take rather
+longer.  So, while this patch set is making progress, a 2.6.27 merge is
+probably not in the cards.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Page replacement algorithms</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scalability</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/286472/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor286705"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The state of the pageout scalability patches</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2008 4:07 UTC (Thu)
+                               by <b>jwb</b> (guest, #15467)
+                              [<a href="/Articles/286705/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jwb" />
+                <input type="hidden" name="return" value="/Articles/286472/#CommAnchor286705" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+A system with 128GB of memory is completely within the reach of most businesses these days.  I
+priced out a machine today with 32 CPU cores and 128GB of memory.  It was $51000 on the list
+price.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/286705/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor286717"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The state of the pageout scalability patches</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2008 6:16 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/286717/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dlang" />
+                <input type="hidden" name="return" value="/Articles/286472/#CommAnchor286717" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I recently priced a 4-socket opteron box with 128G of ram at ~$25K. I ended up buying the
+2-socket boxs which are limited to 'only' 64G
+
+these aren't the $2-3k 1u pizzabox machines that companies like to buy in large numbers for
+clusters, but if you have apps that don't cluster well (or have per-machine licensing) they
+can still be a _very_ good deal.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/286717/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

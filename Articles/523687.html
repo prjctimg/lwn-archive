@@ -1,0 +1,1107 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Potential pitfalls in DNS handling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Potential pitfalls in DNS handling">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The domain name system (DNS) seems relatively straightforward, at least from a high level, but [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/524303/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Potential pitfalls in DNS handling</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>November 14, 2012</br>
+           </div>
+<p>
+The domain name system (DNS) seems relatively straightforward, at least
+from a high level, but there are some darker corners of the protocol that
+could easily trip 
+up the unwary&mdash;or even the wary.  A recent <a
+href="https://lists.exim.org/lurker/message/20121026.080330.74b9147b.en.html">vulnerability</a>
+in the <a href="http://exim.org/">Exim</a> mail transfer agent shows one
+such example, but there are more.  In fact, Exim developer Phil Pennock,
+who patched the recent vulnerability, has collected up a number of these places
+where DNS parsing can go awry.
+</p>
+
+<p>
+The Exim hole was a fairly standard buffer overflow, but it came about
+because of the way DNS messages are structured.  When a program requests a
+<tt>TXT</tt> record (for, say, a <a
+href="http://en.wikipedia.org/wiki/DomainKeys_Identified_Mail">DomainKeys
+Identified Mail</a> (DKIM) public key), the reply is broken up into
+multiple DNS "strings".  The <tt>TXT</tt> record itself can be up to 64K in
+size, with an overall length specified in the "resource record"
+(<tt>RR</tt>) header, but it is broken up into multiple strings, each of
+which is prefaced with a length.  
+</p>
+
+<p>
+Each string is a one-octet length value, followed by that many octets of data.
+To construct the full <tt>TXT</tt> record, one collects each of the
+string payloads into a buffer, which is where Exim went astray.  For DKIM
+verification, a 4K buffer was allocated for the <tt>TXT</tt> record.  Each
+string was length checked, so that it couldn't overrun the buffer, but the
+loop did not terminate once the buffer was exhausted.  An
+attacker-controlled DNS server (or a benign server that just had a
+<tt>TXT</tt> record larger than 4K) could send a large record and either
+crash Exim or execute arbitrary code.
+</p>
+
+<p>
+The <a
+href="http://git.exim.org/exim.git/commitdiff/4263f395efd136dece52d765dfcff3c96f17506e">fix</a>
+is simple, making two changes: check for buffer exhaustion before looking
+at the next string and increase the size of the buffer to 64K.  Either of
+those would be sufficient to fix the problem, doing both just provides a
+more robust fix.  It's not clear why the original 4K buffer size was
+chosen, but Pennock speculated that it seemed a reasonable limit to the
+original developer given that there was a test for overflow (though it
+turned out to be incorrect).
+
+
+<p>
+The problem was found in an Exim DKIM code
+inspection that was done after a 
+<a href="http://www.kb.cert.org/vuls/id/268267">US-CERT advisory</a> as
+and a <a
+href="http://www.wired.com/threatlevel/2012/10/dkim-vulnerability-widespread/"><i>Wired</i>
+article</a> raised DKIM issues.  While the specific problems reported were
+not present in 
+Exim, Pennock was 
+concerned that increased attention would be focused on that code, thus the
+code review.
+</p>
+
+<p>
+There are other implications to consider with the strings that make up a
+<tt>TXT</tt> record.  At first blush, joining the strings directly (rather
+than with a space or newline character) makes sense, but there are
+protocols that depend on the strings within a <tt>TXT</tt> record being
+treated as separate entities.  DKIM and <a
+href="http://en.wikipedia.org/wiki/Sender_Policy_Framework">Sender Policy
+Framework</a> (SPF) both explicitly say that the strings
+should be joined directly, but forcing that behavior for all <tt>TXT</tt>
+records retrieved by Exim broke some <i>ad hoc</i> uses.
+</p>
+
+<p>
+Likewise, there is a question of how to handle multiple <tt>TXT</tt>
+records. Those records will be returned in random order, so two DKIM key
+<tt>TXT</tt> records (i.e. prefaced with "v=DKIM1;") could be returned in a
+query.  If
+applications don't check for that possibility, or handle it differently
+than the DNS administrator creating the <tt>TXT</tt> records expected,
+problems could result.  Once again, DKIM and SPF explicitly disallow
+multiple <tt>TXT</tt> records for their information, so compliant programs
+need to check.  Other protocols may not be as clear.
+</p>
+
+<p>
+Beyond that, DNS has some surprises in the kinds of names it allows.  Many
+believe that domain and host names are restricted to certain subsets of
+characters, but that is not true.  As <a
+href="http://www.ietf.org/rfc/rfc2181.txt">RFC 2181</a> specifies, the
+limits are purely length-based (63 octets per component, 255 octets for a
+domain name).  Each octet of the name can contain any value from 0 to 255.
+Looking at the host names returned by the following command is rather
+interesting:
+<pre>
+    $ host -lva test.globnix.net nlns.globnix.net
+    ...
+    foo\\.bar.test.globnix.net. 600 IN      A       192.0.2.8
+    ...
+    cr\013\010lf.test.globnix.net. 600 IN   AAAA    2a02:898:31:dead:beef::32
+    ...
+    i-want-nul.test.globnix.net. 600 IN     CNAME   nul\000gap.test.globnix.net.
+    ...
+</pre>
+
+</p>
+
+<p>
+That domain is one that Pennock has had for years, and the entries are
+meant to be somewhat eye-opening.  For example, note that '.' is legal in
+the components 
+of a host name (represented textually as <tt>foo\.bar...</tt>).  And that
+brackets ([, ]), colons, NULs (\000), newlines, backslashes, and so on are all
+legal.  Any of those could pose a problem for a program that didn't expect
+to receive them.  One of the ways that might happen is with a reverse
+lookup, where an IP address to host name mapping is sought.
+
+<p>
+For actual domain names, it may be difficult or impossible to
+register any with "weird" characters, but they are definitely legal as far
+as DNS is concerned.
+The registrars will shy away from those kinds of domains because they
+aren't legal in email addresses or URLs.  But, as Pennock's examples show,
+domains with their own DNS can create all sorts of problematic host names.
+</p>
+
+<p>
+These dark corners are hopefully well-known to DNS server and library
+developers, but they aren't necessarily obvious to those outside of those
+specialties.  One 
+can well imagine that there are bugs lurking in applications and tools that
+use DNS at a medium or low level.  Some of those could easily result in security
+vulnerabilities. 
+</p>
+
+<p>
+[I would like to thank Phil Pennock for sharing his research and answering
+questions about DNS handling.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Domain Name System (DNS)</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Email</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/523687/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor525145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 11:02 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/525145/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525145" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yikes!  Any byte value is allowed even . and \0?  That's quite a surprise.  It also means that the common foo.bar.com DNS notation is inadequate; you'd have to carefully define an escaping scheme so that any hostname can be written unambiguously.<br>
+<p>
+What happens when one of these odd hostnames needs to be encoded in a URI?  It is not enough to say 'just %-encode it' because that does not address the issue of '.' contained in a component.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525223"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 16:02 UTC (Thu)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/525223/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NAR" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525223" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, it looks like that the "Preferred name syntax" chapter is indeed only about the preferred names. Interestingly the inet:getaddr/2 function in Erlang accept characters only between $21 and $7e, so no space or international domain names.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525223/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor525269"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 18:14 UTC (Thu)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/525269/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525269" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Anything is allowed in DNS labels? Was that always the case, because RFC1035 says this in section 2.3.1 on "Preferred name syntax" - on names in DNS generally:
+<p><blockquote><em>
+"Note that while upper and lower case letters are allowed in domain
+names, no significance is attached to the case.  That is, two names with
+the same spelling but different case are to be treated as if identical.
+<p>
+The labels must follow the rules for ARPANET host names.  They must
+start with a letter, end with a letter or digit, and have as interior
+characters only letters, digits, and hyphen.  There are also some
+restrictions on the length.  Labels must be 63 characters or less."
+</em></blockquote>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525269/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525271"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 18:18 UTC (Thu)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/525271/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525271" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, perhaps it's RFC2673 allowing this: <a href="https://tools.ietf.org/html/rfc2673">https://tools.ietf.org/html/rfc2673</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525271/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor525297"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 20:10 UTC (Thu)
+                               by <b>bjencks</b> (subscriber, #80303)
+                              [<a href="/Articles/525297/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bjencks" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525297" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Further up 2.3.1 it says:
+
+<blockquote><em><p>"For example, when naming a mail domain, the user should satisfy both the rules of this memo and those in RFC-822.  When creating a new host name, the old rules for HOSTS.TXT should be followed.  This avoids problems when old software is converted to use domain names.</p>
+
+<p>The following syntax will result in fewer problems with many applications that use domain names (e.g., mail, TELNET)."</p></em></blockquote>
+
+and proceeds to describe the rules you quoted, indicating that those rules are guidelines for maximum interoperability, not MUST specifications of the protocol.
+
+Section 3.1 reinforces this:
+
+<blockquote><em>"Although labels can contain any 8 bit values in octets that make up a label, it is strongly recommended that labels follow the preferred syntax described elsewhere in this memo, which is compatible with existing host naming conventions."</em></blockquote>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525297/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 10:24 UTC (Fri)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/525399/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525399" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interesting. Which means RFC1035 is surely inconsistent on this, given 2.3.1 says "the labels must" - a "must" that isn't actually a "must". But as someone else points out, RFC2181 §11 clearly states binary is allowed. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 19:11 UTC (Fri)
+                               by <b>hawk</b> (subscriber, #3195)
+                              [<a href="/Articles/525482/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hawk" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525482" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the point there is that section 2.3.1 of RFC1035 (<a href="http://tools.ietf.org/html/rfc1035#section-2.3.1">http://tools.ietf.org/html/rfc1035#section-2.3.1</a>) is not describing the capabilities of the actual DNS protocol but rather what names should be used to achieve compatibility with existing systems.<br>
+<p>
+This article is really about what kind of data you can get back in a (still correctly formatted) DNS response. It's important to note that even though the DNS protocol can carry anything there may still be application specific naming rules that prevents the full-on "any byte is valid" in a specific context.<br>
+<p>
+<p>
+(The article does have an unfortunate mixup (that's my take on it, anyway) where hostname name rules and DNS protocol name rules seem to be considered the same thing. See my comment regarding this: <a href="http://lwn.net/Articles/525471/">http://lwn.net/Articles/525471/</a>)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor526286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 22, 2012 6:40 UTC (Thu)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/526286/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magfr" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor526286" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem with application specific rules is that a cracker could choose to not adhere to them so the problem is still there and the application have to be prepared for everything that the protocol can transport.<br>
+<p>
+Note that everything the protocol can transport might be a superset of what the protocol allows.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/526286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor525467"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 17:57 UTC (Fri)
+                               by <b>hawk</b> (subscriber, #3195)
+                              [<a href="/Articles/525467/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hawk" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525467" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess the point is that "the common foo.bar.com DNS notation" is not really "DNS notation" at all but a common domain name notation used in the operating system/application layers regardless of resolution mechanism.<br>
+<p>
+In fact, it's clearly a different notation from the one that the DNS protocol uses, so there being a difference in capability there is not hugely surprising.<br>
+<p>
+For the actual DNS protocol it's not actually that shocking, there dots have no special meaning and the same applies to any other byte value.<br>
+Instead, of the dot-separation the DNS protocol prefixes each label by an integer specifying the length.<br>
+<p>
+<p>
+However, there being a difference between the capabilities of how domain names are handled by the OS/application and by DNS and possibly other resolution mechanisms in use clearly creates an opportunity for confusion/inconsistency/disaster/... when mapping between the native format of each resolution mechanism (the 8bit clean "DNS wire notation" in the case of DNS) and the "string representation with dot-separation".<br>
+<p>
+<p>
+I suppose the idea is that the resolver library in the operating system ought to take care of this mapping (escaping or discarding or whatever should be done for names that can not be represented in the dot-separated string notation) once and for all and let the applications just do their thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525467/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525510"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 23:54 UTC (Fri)
+                               by <b>Comet</b> (subscriber, #11646)
+                              [<a href="/Articles/525510/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Comet" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525510" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The bind library does.<br>
+<p>
+That doesn't stop people writing code like:<br>
+<p>
+     labels = result.split('.')<br>
+     shorthost = labels[0]<br>
+<p>
+If you split on '.', then you break when presented with the escaped form '\.' as you'll do an extra split.  You might get away with it when only looking for the TLD, or just sorting data and rejoining the strings.<br>
+<p>
+So, there's an escaping mechanism, it helps a lot of the time, but other times it produces surprising results and you need to at least know that the escaping mechanism is in use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525510/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor525207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 14:44 UTC (Thu)
+                               by <b>rvfh</b> (guest, #31018)
+                              [<a href="/Articles/525207/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rvfh" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525207" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is worth noting that file names in UNIX can also have any characters except NULL and /. I had the bad surprise to find out that some users can be very creative with file naming, and misbehaving programs even more so, before I realised this.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525309"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 21:29 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/525309/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525309" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I once found a hacker on a large university system who kept a setuid binary in / for his backdoor, except the name had escaping sequences which kept it hidden from the typical shell listing. I found it when poking around, like inquisitive users do. I had compiled zshell, which unlike the default, proprietary shell on the system let me see and manipulate those names. I was giddy when I executed it and was dropped into a root shell.<br>
+<p>
+I notified the sysadmin, who was incredulous at first. Later I found out that the hacker had penetrated many more systems, including many Bell Atlantic servers. Never did find out how he broke in, though in those days there was lots of low hanging fruit to exploit.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525309/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor525412"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 12:25 UTC (Fri)
+                               by <b>cate</b> (subscriber, #1359)
+                              [<a href="/Articles/525412/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cate" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525412" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not really. You can eventually have "/" in a filename: "/" has a value defined in localedef, thus you can define a private locale, create a file containing the ascii value of "/", and returning to a normal locale.<br>
+<p>
+It is allowed by POSIX (but without specifying what a POSIX program should behave when it encounters such file), but I never tested.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525412/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525524"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'/' in filename? Really?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2012 2:35 UTC (Sat)
+                               by <b>pr1268</b> (guest, #24648)
+                              [<a href="/Articles/525524/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pr1268" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525524" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Really...?  Any online examples of this?</p>
+
+<p>I'm sincerely curious as to how I could overcome the inability to create a directory named &quot;<a href="http://www.allmusic.com/artist/ac-dc-mn0000574772">AC/DC</a>&quot; in my music files directory (where each subdirectory is named after the artist/band whose song files are stored within).</p>
+
+<p>Back to the article, I feel somewhat re-assured that the various DNS library implementations would appear to fail given strange input that the RFCs seem to allow.  And besides, those are relatively low-numbered RFCs; surely they've been around a while to shake out the bugs. &lt;/slightly ignorant observation&gt;</p>
+
+<p>Thanks to Phil Pennock and the Exim developers looking into this.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525524/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525542"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'/' in filename? Really?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2012 11:47 UTC (Sat)
+                               by <b>hummassa</b> (guest, #307)
+                              [<a href="/Articles/525542/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hummassa" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525542" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Use the codepoint 0x2215 And be happy...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525542/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor525478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 18:34 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/525478/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525478" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; file names in UNIX can also have any characters</font><br>
+<p>
+And I maintain that's a bug. Kernels should be doing:<br>
+<p>
+* UTF-8 normalization<br>
+* Leading and trailing space elimination<br>
+* Banning leading dashes<br>
+* Banning non-printable unicode characters<br>
+<p>
+There's absolutely no reason for treating filenames as opaque strings, except that by doing so, you avoid having arguments about encodings. Now that UTF-8 has won, we should revisit that decision.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2012 1:39 UTC (Sat)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/525521/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anselm" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525521" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+UTF-8 normalisation probably makes sense, but disallowing leading dashes in filenames would disable potentially desirable features like being able to create a file called »-i« in a directory where you don't want to accidentally have »rm *« delete all your files.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525522"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2012 2:13 UTC (Sat)
+                               by <b>apoelstra</b> (subscriber, #75205)
+                              [<a href="/Articles/525522/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="apoelstra" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525522" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; UTF-8 normalisation probably makes sense, but disallowing leading dashes in filenames would disable potentially desirable features like being able to create a file called »-i« in a directory where you don't want to accidentally have »rm *« delete all your files. </font><br>
+<p>
+Nor would it allow creating "-r" in directories where you want rm to be extra destructive. :)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525522/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor525554"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2012 15:13 UTC (Sat)
+                               by <b>Jandar</b> (subscriber, #85683)
+                              [<a href="/Articles/525554/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Jandar" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525554" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is not the kernels job to judge the userspace character-encodings or other aspects of filenames.  If we follow this path would more than one dot legal, why ban only leading and trailing spaces?  And think of the children, disallow NSFW words in filenames or file-content ;-).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525554/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor525689"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2012 10:51 UTC (Mon)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/525689/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cesarb" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525689" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You will probably like this essay: <a href="http://www.dwheeler.com/essays/fixing-unix-linux-filenames.html">http://www.dwheeler.com/essays/fixing-unix-linux-filename...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525689/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor525239"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 17:05 UTC (Thu)
+                               by <b>RobSeace</b> (subscriber, #4435)
+                              [<a href="/Articles/525239/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="RobSeace" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525239" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <i>Many believe that domain and host names are restricted to certain subsets
+of characters, but that is not true. As RFC 2181 specifies, the limits are
+purely length-based (63 octets per component, 255 octets for a domain
+name). Each octet of the name can contain any value from 0 to 255.</i>
+<br><br>
+Talking purely of DNS restrictions, sure...  But, people get their beliefs about actual hostname restrictions from <a href="http://tools.ietf.org/html/rfc1123#page-13">RFC 1123</a> and <a href="http://tools.ietf.org/html/rfc952">RFC 952</a> before it, which limit host and domain names to "characters drawn from the alphabet (A-Z), digits (0-9), minus sign (-), and period (.).  Note that periods are only allowed when they serve to delimit components of 'domain style names'."
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525239/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor525324"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 22:30 UTC (Thu)
+                               by <b>Comet</b> (subscriber, #11646)
+                              [<a href="/Articles/525324/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Comet" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525324" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Answering several points at once:<br>
+ * RFC2181 clarifies what the underlying protocol supports.  It didn't change anything.<br>
+ * DNS has always been this open; it's up to the application layer to impose restrictions.  If you don't put in the restrictions yourself, you have no restrictions, so don't forget them.  Then remember that common usage doesn't always match specifications -- eg, URLs often do end up with underscores in them.<br>
+ * There isn't actually a generic specification for hostnames that I've ever found.  There's old rules which applied to HOSTS.TXT; there are rules for mail domains; there are rules for hostnames as encountered in URLs.  That's about it.<br>
+ * Escaping: with modern Bind, you might need to export IDN_DISABLE=t into the environment before running dig(1) and friends, to avoid the IDN errors that might get thrown for parse issues.  With that in mind, there is actually a quoting mechanism in common use, derived from RFC1035 section 5.1.  RFC4343 is the one which extends this to be used more generally.<br>
+ * If you validate hostnames from user input, don't forget to consider hostnames which you get from reverse DNS or from CNAME lookups, or NAPTR.  You might leave it unmolested for pass-back to the DNS layer, but if you're passing it up, consider escaping.<br>
+ * Whatever beliefs people have about what's allowed in a hostname: fine, now just make sure your code enforces it.  :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525324/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525329"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2012 22:32 UTC (Thu)
+                               by <b>Comet</b> (subscriber, #11646)
+                              [<a href="/Articles/525329/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Comet" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525329" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Forgot I had this:<br>
+% host -lva f.e.e.b.d.a.e.d.1.3.0.0.8.9.8.0.2.0.a.2.ip6.arpa nlns.globnix.net<br>
+<p>
+Sorry Jake, should have mentioned it before.  That too is public DNS, it's just that it's only in IPv6 that I have enough public IPs spare to dedicate a dead:beef range to test purposes.  ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525329/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor525414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 13:10 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/525414/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525414" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Whatever beliefs people have about what's allowed in a hostname: fine, now just make sure your code enforces it. :)</font><br>
+<p>
+Indeed it would be foolish not to sanitize your (network!) inputs only on the basis that some specification restricts something.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor525471"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 18:21 UTC (Fri)
+                               by <b>hawk</b> (subscriber, #3195)
+                              [<a href="/Articles/525471/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hawk" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525471" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Overall, nicely put together article. However, I think this particular section is problematic:<br>
+<p>
+"Many believe that domain and host names are restricted to certain subsets of characters, but that is not true. As RFC 2181 specifies, the limits are purely length-based (63 octets per component, 255 octets for a domain name)."<br>
+<p>
+The problem with that reasoning is that it implies that RFC2181 defines anything else than what the DNS protocol can carry.<br>
+<p>
+In fact, the RFC goes out of its way pointing out that DNS is general purpose and that different applications will want different rules for what names are acceptable. From the "Name syntax" section (<a href="http://tools.ietf.org/html/rfc2181#section-11">http://tools.ietf.org/html/rfc2181#section-11</a>):<br>
+<p>
+"  Occasionally it is assumed that the Domain Name System serves only<br>
+   the purpose of mapping Internet host names to data, and mapping<br>
+   Internet addresses to host names.  This is not correct, the DNS is a<br>
+   general (if somewhat limited) hierarchical database, and can store<br>
+   almost any kind of data, for almost any purpose."<br>
+<p>
+...description of what the DNS protocol can carry...<br>
+<p>
+"  Note however, that the various applications that make use of DNS data<br>
+   can have restrictions imposed on what particular values are<br>
+   acceptable in their environment.  For example, that any binary label<br>
+   can have an MX record does not imply that any binary name can be used<br>
+   as the host part of an e-mail address.  Clients of the DNS can impose<br>
+   whatever restrictions are appropriate to their circumstances on the<br>
+   values they use as keys for DNS lookup requests, and on the values<br>
+   returned by the DNS.  If the client has such restrictions, it is<br>
+   solely responsible for validating the data from the DNS to ensure<br>
+   that it conforms before it makes any use of that data."<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525471/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor525509"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Potential pitfalls in DNS handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2012 23:50 UTC (Fri)
+                               by <b>Comet</b> (subscriber, #11646)
+                              [<a href="/Articles/525509/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Comet" />
+                <input type="hidden" name="return" value="/Articles/523687/#CommAnchor525509" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes; so when you perform a reverse DNS lookup, which can return arbitrary data, it is thus your responsibility, as an application using DNS, to enforce restrictions upon that value.<br>
+<p>
+If the reverse DNS for an IP contains \r\n and you emit the IP to your logs, make sure you understand what is escaped where, to ensure that your logs don't have arbitrary records injected via DNS data.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/525509/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

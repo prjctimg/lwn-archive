@@ -1,0 +1,601 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>More accurate congestion notification for TCP [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="More accurate congestion notification for TCP">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The 'More Accurate Explicit Congestion Notification' (AccECN) mechanism is defined by this RFC  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1058475/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>More accurate congestion notification for TCP</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 18, 2026</br>
+           </div>
+The "More Accurate Explicit Congestion Notification" (AccECN) mechanism is
+defined by <a
+href="https://datatracker.ietf.org/doc/draft-ietf-tcpm-accurate-ecn/">this
+RFC draft</a>.  The Linux kernel has been gaining support for AccECN with
+TCP over the last few releases; the 7.0 release will enable it by default
+for general use.  AccECN is a subtle change to how TCP works, but it has
+the potential to improve how traffic flows over both public and private
+networks.
+<p>
+TCP, from the beginning, has included a couple of window
+counters used by each side of a connection to specify how much data it is
+willing to accept from the other at any given time.  The windows work well
+to prevent the endpoints from being overwhelmed with packets, but early TCP
+did not consider the problem of congestion in the routers between the
+endpoints.  That shortcoming made itself known in the form of severe
+congestion problems in the mid-to-late 1980s.
+<p>
+Around that time, Van Jacobson and Mike Karels took on the problem of
+preventing congestion collapse.  Their key insight was that dropped packets
+were almost never a result of corruption of the packets themselves.
+Instead, they were a signal that some system between the endpoints was
+experiencing congestion; indeed, dropped packets were the <i>only</i> way
+that a router could signal congestion.  Jacobson implemented the first
+congestion-control algorithms that would slowly ramp up the transmission
+rate until packet loss was experienced, indicating the point where the
+capacity of the channel had been exceeded.  Jacobson's <a
+href="https://dl.acm.org/doi/10.1145/52324.52356">classic paper</a>
+describes this work in detail.
+<p>
+Using packet-loss events in this way made the net work again, but it was
+never going to be the most efficient way to regulate transmission speeds.
+It takes time to realize that a packet has been dropped, and each dropped
+packet represents a waste of resources.  It would be a far better if
+the TCP endpoints could be informed of congestion, and moderate their
+transmission speeds, before the congestion reaches the point of packet
+loss.
+<p>
+<h4>Explicit congestion notification</h4>
+<p>
+Around the end of the 1990s, work was started on what eventually became <a
+href="https://datatracker.ietf.org/doc/html/rfc3168">RFC&nbsp;3168</a>,
+describing explicit congestion notification (ECN), a means by which routers
+can inform the endpoints of a connection that they are experiencing
+congestion.  It required changes at both the IP and TCP layers of the
+stack.
+<p>
+At the IP level, two bits were allocated from the IPv4 and IPv6 headers;
+they were named ECT and CE.  The setting of either of those bits (but not
+both) in an IP packet is an indication that the endpoints understand the
+ECN protocol and are willing to implement it.  When a router that is
+experiencing congestion receives a packet with exactly one of those bits
+set, it can choose to set the other bit to indicate "congestion
+experienced" in the hope that the endpoints will respond by slowing their
+transmission rates.
+<p>
+In a typical TCP connection, one side will be transmitting at a rather
+higher rate than the other.  If the heavy transmitter is causing
+congestion, the ECN signal will arrive at the receiving end, where it is
+not entirely useful.  So TCP had to be enhanced to relay that signal back
+to the transmitting side.
+
+Two bits were allocated in the TCP header as well with the names ECE (ECN
+echo) and CWR (congestion window reduced).  If both of those bits are set
+in the initial SYN packet starting a connection, they are interpreted as a
+signal that the initiating side implements ECN.  If the peer also supports
+ECN, it sends its SYN-ACK response with only the ECE bit set.  When both of
+those things happen, the connection will use ECN.
+<p>
+When one side of a connection receives a packet with the two IP-level
+congestion-mark bits set, indicating congestion in the path, it will start
+setting the TCP ECE bit in every ACK packet it sends back to the other
+side.  An endpoint, on receiving a packet with ECE set, is supposed to
+respond in the same way it would if a packet had been dropped; it will
+reduce its congestion window (and thus the transmission speed).  It will
+also set the CWR bit in the TCP header in the next packet it sends to
+indicate that the ECE signal has been received.  Once the CWR bit is
+observed at the other end, the recipient will stop setting ECE.
+<p>
+The Linux kernel gained support for ECN in the 2.4.0-test7 release in
+September 2000.  The immediate result was an early lesson on the problem of
+<a href="/Articles/745590/">protocol ossification</a>.  As was <a
+href="/2000/0914/kernel.php3">noted in LWN</a> at the time, many of the routers
+on the Internet not only did not support ECN, but they also actively
+dropped SYN packets with the TCP ECN bits set, making communication
+impossible.  So, while Linux had ECN support from an early date, it was
+many years before it could be safely enabled on most systems, and it still
+is not fully enabled even in current kernels.
+<p>
+<h4>More accurate ECN</h4>
+<p>
+ECN was an improvement over what came before, but there is room to do even
+better.  The design of the ECN protocol means that it can only communicate
+a single "congestion experienced" event during each round-trip time for the
+connection; that is how long it will take between the transmission of the
+first ACK with ECE set and the reception of a packet with CWR set.  That
+will slow the response to heavy congestion, with the likely result that
+packets will still be dropped.  AccECN was designed to provide faster and
+more detailed feedback on congestion to the TCP endpoints.
+<p>
+AccECN makes minimal changes to ECN at the IP level; the
+two bits are used as before.  At the TCP level, it grabs another header bit
+that had, back in 2003, been assigned by <a
+href="https://www.rfc-editor.org/rfc/rfc3540">RFC&nbsp;3540</a> for a
+"robust ECN" mechanism that was never deployed.  That bit, renamed AE, is
+used in a couple of ways with the new protocol.  At connection time, an
+AccECN-capable site should set the AE bit along with ECE and CWR; if the
+other side also supports AccECN, it will respond with ECE and AE set.  If
+the receiving side does not understand AccECN and ignores the AE bit, it
+will see what looks like a "classic ECN" configuration and respond
+accordingly.  (Note that the connection protocol, like everything else, is
+somewhat more complex than described here; see the RFC draft for the gory
+details).
+<p>
+When AccECN is in use, each side maintains a set of counters, one of which
+is the number of packets received with the congestion-experienced marker.
+After the connection is established, the AE, CWR, and ECE bits are combined
+into a single three-bit field, inevitably called ACE.  The contents of that
+field will be the three least-significant bits of the packet counter,
+giving the other side a continually updated view of how many
+congestion-marked packets have been seen.  When the ACE count changes, a
+transmitting side can get a sense for just how many packets have been
+stamped with the congestion mark in transit and respond accordingly.
+<p>
+Three bits do not allow for a large count, needless to say.  The RFC draft
+provides a set of complicated rules for determining whether the count may
+have wrapped and guessing how many times that may have happened.  ACKs are
+sent relatively frequently — perhaps one for every two data packets in an
+ongoing stream — leaving little opportunity for multiple wraps of the ACE
+counter most of the time.  In any case, eight counter values that can
+change with every ACK (rather than one bit that can only change once per
+round-trip time) provide much higher-resolution information on the
+presence of congestion on the path between the two endpoints.
+<p>
+AccECN, as described so far, was clearly designed to avoid as many
+protocol-ossification problems as possible.  Even so, it includes a number
+of provisions for the detection of middlebox interference with the ACE bits
+and the count as a whole.  The nature of the modern Internet is such that
+protocol changes must be done with a lot of care, even when the changes are
+within the specification of the protocols themselves.
+<p>
+There is more to AccECN, though, if the connection will support it.  Each
+side of the connection is required to maintain three other counters for
+incoming data.  There are two counters to track the number of <i>bytes</i>
+received with either (but not both) of the IP-level ECN bits set, and a
+counter for the number of bytes received with both bits set (indicating
+congestion).  There is a pair of TCP options that can be used to
+communicate these counters (more precisely, the bottom 24&nbsp;bits of each
+counter) to the other side.  These counters give a far more accurate
+indication of how much congestion is actually occurring, and they can be
+profitably be put to use by a number of advanced congestion-control
+algorithms.
+<p>
+The problem with TCP options, of course, is again middleboxes, which often
+will not pass packets that contain unrecognized options.  The
+connection-establishment dance thus includes a couple of attempts to send
+packets with the AccECN options to see whether they make it unmolested to
+the other end; the options will not be used unless these tests pass.  The
+chances of successfully using the new options over the Internet may be
+relatively small, but AccECN is also intended for use within data centers,
+where any middleboxes are under the owners' control and can be coerced into
+letting the options through.
+<p>
+<h4>AccECN in Linux</h4>
+<p>
+Support for AccECN in the Linux kernel first started arriving in the 6.15
+development cycle, with additional pieces following in subsequent releases.
+In 7.0, a number of final cases have been fixed, and the use of AccECN is
+enabled by default — for some connections.  Specifically, as described in
+<a
+href="https://docs.kernel.org/networking/ip-sysctl.html#:~:text=tcp_ecn">Documentation/networking/ip-sysctl.rst</a>,
+the use of AccECN (and ECN in general) is controlled by the
+<tt>net/ipv4/tcp_ecn</tt> sysctl knob.  In previous kernels, the value of
+<tt>tcp_ecn</tt> is, by default, two, meaning to use classic ECN when
+requested for incoming connections, but to not attempt to use it with
+outgoing connections.  AccECN is disabled entirely in that configuration.
+The new default value is five, which enables AccECN for incoming
+connections, but still leaves all forms of ECN disabled for outgoing
+connections.  In other words, the fear of protocol ossification remains, so
+Linux systems will, by default, not attempt to use either type of ECN for
+connections they initiate.
+<p>
+Some highly scientific "screw around on the net for a while" tests
+conducted here suggest that, 25&nbsp;years or so after its inception,
+classic ECN is safe to enable for outgoing connections.  It may take some
+time to determine whether the same is true for AccECN.  It will also be a
+while before AccECN-enabled servers are widespread on the Internet, though
+they may be deployed within data centers rather more quickly.  Decades may be
+required, but there should eventually come a point where more accurate
+explicit congestion notification is making the net work more smoothly on a
+wide scale.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Networking/Congestion control</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1058666/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1059373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are router/switch vendors likely to respond?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 18, 2026 15:48 UTC (Wed)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1059373/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1059373" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In a previous life, they resisted everything (:-))<br>
+Of course, if they lazily refrain from *doing* anything to these bits and options, we're in a good state.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1059380"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are router/switch vendors likely to respond?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 18, 2026 17:09 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1059380/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1059380" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What we need to do is make "RFC compliant" a valuable marketing tool - at which point if they start breaking protocols they run foul of "fit for purpose" legislation.<br>
+<p>
+Actually, there might be an argument that gear is not CRA-compliant if it isn't RFC-compliant :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059380/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1059405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are router/switch vendors likely to respond?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2026 5:19 UTC (Thu)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1059405/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1059405" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's most often firewall vendors that rely on the usual "we block X% of attacks" argument to sell their crap, unfortunately. For them, better be less compliant and block more legitimate traffic and more attacks at the same time than fail compared to a competitor during a benchmark that floods packets with random bits set :-(<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1059413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are router/switch vendors likely to respond?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2026 10:02 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1059413/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1059413" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Urk. "We have fewer false negatives - who cares about false positives" :-(<br>
+<p>
+This is where you want old-fashioned trustworthy journalists who can write a proper article / benchtest.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1060519"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TIL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2026 8:51 UTC (Fri)
+                               by <b>Hi-Angel</b> (guest, #110915)
+                              [<a href="/Articles/1060519/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Hi-Angel" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1060519" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+TIL that "ossification" is a word.<br>
+<p>
+I was reading the article and I though "ossification" means "open-sourcing", and I was like "why would open-sourcing a protocol be a problem for protocol adoption? 🤷‍♂️".<br>
+<p>
+So I read the QUIC article referred to here, and it also used "ossification" with no further explanation. And then it hit me — it's probably a word of it's own, with no relation to OSS! And so it is<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060519/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1060522"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TIL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2026 9:25 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1060522/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1060522" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Iirc, the word "os" is latin for bone. So "ossification" means converting to bone / stone. The word long pre-dates computers, let alone FLOSS.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1060522/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1061343"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">per-connection? fallback?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2026 17:42 UTC (Wed)
+                               by <b>pj</b> (subscriber, #4506)
+                              [<a href="/Articles/1061343/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pj" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1061343" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can AccECN be enabled per-connection?  If it's enabled, and the outbound connect attempt with AccECN fails, will it fall back and try again without AccECN (maybe with plain ECN, maybe with bog-standard TCP) ?  Such behavior might encourage better/faster adoption rates<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061343/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1061353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">per-connection? fallback?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2026 19:06 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1061353/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1061353" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I don't believe there is per-connection control.  It will definitely fall back, though, if an AccECN attempt fails; the procedure for doing that was designed into the protocol.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1061353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1062331"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Funny docs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2026 9:25 UTC (Wed)
+                               by <b>safari</b> (guest, #96021)
+                              [<a href="/Articles/1062331/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="safari" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1062331" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On 6.18.16, 2 is maximum value I can write to tcp_ecn sysctl (otherwise I get EINVAL).<br>
+Documentation/networking/ip-sysctl.rst documents values 0-5.<br>
+However, <br>
+$ grep tcp_ecn_mode_max net/ipv4/sysctl_net_ipv4.c<br>
+static int tcp_ecn_mode_max = 2;<br>
+                .extra2         = &amp;tcp_ecn_mode_max,<br>
+<p>
+However, this was changed in commit 8ae3e8e6ceedfb3cf74ca18169c942e073586a39 from 2 to 5.<br>
+<p>
+Is 6.18.16 safe to run if I change that to 5?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1062331/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1077810"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fallback is also a setting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 14, 2026 13:36 UTC (Sun)
+                               by <b>draco</b> (subscriber, #1792)
+                              [<a href="/Articles/1077810/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="draco" />
+                <input type="hidden" name="return" value="/Articles/1058666/#CommAnchor1077810" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From the article:<br>
+<span class="QuotedText">&gt; Some highly scientific "screw around on the net for a while" tests conducted here suggest that, 25 years or so after its inception, classic ECN is safe to enable for outgoing connections.</span><br>
+<p>
+With or without tcp_ecn_fallback on? It doesn't change your conclusion, but it does change what it means.<br>
+<p>
+Linux documentation:<br>
+<span class="QuotedText">&gt; tcp_ecn_fallback - BOOLEAN</span><br>
+<span class="QuotedText">&gt;     If the kernel detects that ECN connection misbehaves, enable fall back to non-ECN.</span><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077810/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

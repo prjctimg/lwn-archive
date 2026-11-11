@@ -1,0 +1,379 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Extending run-time verification for the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Extending run-time verification for the kernel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" There are a lot of things people expect the Linux kernel to do correctly. Some of these are ch [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1031202/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Extending run-time verification for the kernel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>July 30, 2025</br>
+           </div>
+<p>
+There are a lot of things people expect the Linux kernel to do correctly. Some
+of these are checked by testing or static analysis; a few are ensured by
+run-time verification: checking a live property of a running Linux system. For
+example, the scheduler has a handful of different correctness properties that
+can be
+checked in this way.
+Nam Cao posted a
+<a href="https://lwn.net/ml/all/cover.1751634289.git.namcao@linutronix.de/">
+patch series</a> that aims to extend the kinds of properties that the kernel's
+<a href="https://docs.kernel.org/trace/rv/runtime-verification.html">run-time
+verification system</a> can check, by adding support for
+<a href="https://en.wikipedia.org/wiki/Linear_temporal_logic">
+linear temporal logic</a> (LTL). The patch set has seen eleven revisions since the
+<a href="https://lwn.net/ml/all/cover.1741708239.git.namcao@linutronix.de/">
+first version</a> in March&nbsp;2025, and recently made it into the linux-next
+tree, from where it seems likely to reach the mainline kernel soon.
+</p>
+
+<p>
+Run-time analysis is present everywhere in the kernel;
+<a href="https://www.kernel.org/doc/html/latest/locking/lockdep-design.html">
+lockdep</a>, for example, is a kind of run-time verification.
+But instrumenting the whole kernel for each kind of verification that people may
+want to perform is infeasible.
+The run-time verification subsystem allows for
+tracking more complex properties by hooking into the kernel's existing tracing
+infrastructure. For example, run-time verification can be used to ensure that
+a system schedules tasks correctly; there are options to ensure that task
+switches only occur during a call to <tt>__schedule()</tt>, that the scheduler
+is called in a context where it is safe to do so, and
+various other properties of the scheduler interface
+that depend on the global state of the system.
+Each property that is checked in this way is represented by a per-CPU or
+per-task state machine called a monitor.
+Tracing events drive the transitions in these machines.
+If
+they ever reach an error state, the kernel can be configured to
+log an error message or panic.
+</p>
+
+<p>
+The use of state machines has the nice property of keeping the actual overhead
+of the monitors as low as possible. A 2019
+<a href="https://bristot.me/wp-content/uploads/2019/09/paper.pdf">paper</a> by
+Daniel Bristot de Oliveira, Tommaso Cucinotta, and Rômulo Silva de Oliveira
+showed that the overhead of updating a state machine was actually lower than the
+overhead of just recording tracing events to a file for later analysis. Because
+state machines, ironically, do not track much state, the per-task memory usage of
+the system is quite small as well.
+</p>
+
+<p>
+Writing state machines by hand is a tedious process, though, so the kernel
+includes an
+<tt>rvgen</tt> tool that can convert a state machine described in
+<a href="https://gitlab.com/graphviz/graphviz#graphviz---graph-visualization-tools">
+Graphviz's</a>
+<a href="https://en.wikipedia.org/wiki/DOT_(graph_description_language)">
+DOT</a>
+format into appropriate C code. There is a bit of manual work to do in order to
+connect the generated state machine to the correct tracing events, but <tt>rvgen</tt>
+also generates appropriate kernel configuration and header files, and provides a checklist
+of what the programmer will need to implement themselves.
+</p>
+
+<p>
+The problem Cao ran into was that simple deterministic state machines are
+too inflexible to easily represent some desirable properties. For example, it would be
+nice to have a monitor that can detect priority inversion in realtime tasks, but
+representing this property as a state machine is complex and error prone. Cao's
+solution is to add another specification language to <tt>rvgen</tt> that can
+handle more complicated statements. The resulting code is still compiled to a
+state machine — specifically, a
+<a href="https://en.wikipedia.org/wiki/B%C3%BCchi_automaton">
+non-deterministic Büchi automaton</a> — but it can express properties about the
+future execution of a task more easily.
+</p>
+
+<p>
+The new specification language has a custom syntax, but the underlying semantics
+are taken from linear temporal logic (LTL),
+which is a kind of modal logic. LTL extends classical Boolean logic with a
+notion of time.
+Unlike some more
+complicated modeling systems, LTL only deals with a single, discrete,
+non-branching timeline — hence the "linear" part of the name. In addition to the
+fundamental operations on Booleans (such as "or" and "not"), LTL has two new
+operators "next" and "until". In LTL, "next A" means that some proposition
+A must be true on the next time-step. Similarly, "A until B" means that A must be
+true at all subsequent points in time until (and possibly after) B is true.
+</p>
+
+<p>
+Just as classical logic has derived operators such as "implies", these two
+temporal operators can be combined to produce more helpful operators like
+"eventually" and "always".
+This
+makes it possible to express constraints such as "a task that acquires a lock
+must release the lock before exiting" as something like "it is always the case
+that a task that acquires a lock does not exit until it releases the lock".
+In Cao's proposed syntax, that would look like this:
+</p>
+
+<pre>
+    RULE = always (ACQUIRE imply ((not EXIT) until RELEASE))
+</pre>
+
+<p>
+Upper-case words correspond to events or rules; the first rule of the file is
+used to generate the state machine. Lower-case words are operators. Cao's simple
+code does not implement operator precedence, so parentheses are mandatory on
+pain of surprising behavior.
+</p>
+
+<p>
+The code generator is currently fairly basic.
+The above rule compiles to a five-state non-deterministic state machine, but many
+sets of states are unreachable. To illustrate the kind of state machine produced
+for a
+simple property like the above, I took the generated Büchi
+machine and flattened it into a deterministic state machine shown in the diagram
+below. Red edges represent acquire events, blue edges represent exit events, and green
+edges represent release events. After pruning
+unreachable states, the machine looks like this:
+</p>
+
+<a href="/Articles/1030831">
+<img src="../_static/images/2025/machine-illustration.png"
+border=0
+width=400
+alt="[A complicated state machine diagram]"
+title="A complicated state machine diagram"
+/>
+</a>
+
+<p>
+State <tt>s0</tt> is the rejecting state, which indicates that there was a
+problem. Much of the complexity in this example comes from correctly tracing
+situations where it is not certain whether a lock has been acquired or not. In
+any case, this kind of automaton would be
+painful to write by hand;
+<a href="/Articles/1030831">
+the generated code</a> is much easier
+to deal with. In order to use it, the programmer must fill in the implementation
+of the <tt>ltl_atoms_init()</tt> function, which sets the initial state of the
+monitor, and then arrange for the <tt>ltl_atom_update()</tt> function to be
+called from appropriate tracepoints. The rest of the integration with the
+run-time verification subsystem is handled by the generated code.
+The actual state machine itself is generated and placed in a separate header file.
+</p>
+
+<p>
+The patch set includes
+<a href="https://lwn.net/ml/all/c9d5d176c87c6f5df9c1132015828a3c366bf75b.1751634289.git.namcao@linutronix.de/">
+two</a>
+<a href="https://lwn.net/ml/all/06f4152fdc07f7dd0f28939f77a07ce03be8849f.1751634289.git.namcao@linutronix.de/">
+example</a> definitions for run-time monitors using the
+new syntax. Both have to do with ensuring that realtime tasks do not sleep
+incorrectly, and are simple enough that they probably could have been written by
+hand. But the hope is that having a generator available will enable other kernel
+developers to write more complicated run-time checks in their areas of
+expertise.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1030685/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1031951"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nice work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2025 17:38 UTC (Wed)
+                               by <b>npws</b> (subscriber, #168248)
+                              [<a href="/Articles/1031951/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="npws" />
+                <input type="hidden" name="return" value="/Articles/1030685/#CommAnchor1031951" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is one of the things were a lot of developers will intuitively feel that a state machine must be too much overhead and start coming up with some hackish way to accomplish something probably not quite the same. And in the end it often turns out that counterintuitively the properly engineered, clean solution is actually also the fastest. Nice work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1031951/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1032227"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">different kinds of verification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2025 5:22 UTC (Sat)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/1032227/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alison" />
+                <input type="hidden" name="return" value="/Articles/1030685/#CommAnchor1032227" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>It's wonderful that the pioneering work of Daniel Bristot de Oliviera is moving forward despite his loss.</p>
+
+<p>What relationship should the runtime verification have with the Clang thread-safety analysis described in the <a href="https://lwn.net/Articles/1012990/">Capability analysis for the kernel</a> article which LWN published in March?  And then in addition to lockdep, there's the dynamic KCSAN analyzer, which the article does not mention.</p>
+
+<p>Thanks for this detailed and clear explanation, which certainly exceeds by a mile the responsibility of journalists by providing an example.   The example does raise some questions.  The function ltl_possible_next_states() takes a state parameter which appears to be the same as the ltl_buchi_state.   Presumably all the states and the allowed transitions between them should be represented in the diagram.  We see there s0, s1, s10 (presumably s2), s11 (presumably s3) and  . . . oops, where's s4?   So s4 must instead be s10000 and s10 must be s1 . . . but there's an s1!  Also, all the arrows leading out of s0 point back to itself, but the switch-case statement implies that s0 can transition to other states.  What do the arrow colors mean?  Maybe nothing, since arrows of 3 colors point from s0 to itself.</p>
+
+<p>Inspired by the generation described in the text, I asked Copilot to generate an ASCII state machine based on the message set of a public API.  After a couple of iterations taking perhaps 10 minutes total, it produced something reasonable.   Notably, the diagram was better than what I made during an hour-long first attempt.</p>
+
+<p>Should the kernel's Rust, about which Daroc has written, also want this analysis, or maybe it doesn't need it?  A part 2 of this article which talks more about these various approach to concurrency checking would be welcome!</p>
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1032227/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1032229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">different kinds of verification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2025 9:18 UTC (Sat)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/1032229/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="excors" />
+                <input type="hidden" name="return" value="/Articles/1030685/#CommAnchor1032229" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's a non-deterministic state machine (meaning the same event in the same state could transition to one of multiple other states, depending on some factor outside of the state machine's knowledge). That's implemented deterministically by keeping track of every possible state the machine might currently be in.<br>
+<p>
+S0 to S4 are the individual states. The code's `mon-&gt;states` and `next`, and the 's10001' etc in the diagram, are bitmasks of those states. E.g. 's10001' means the machine is currently known to be in either S0 or S4.<br>
+<p>
+I assume `ltl_possible_next_states` is called multiple times, once for each bit that's set in `mon-&gt;states`, and all the `next` outputs are merged into a single bitmask and copied back into `mon-&gt;states`.<br>
+<p>
+The arrow colours are explained in the article (red=acquire, green=release, blue=exit).<br>
+<p>
+'s0' is an abbreviation of 's00000' and means it's not in any of S0-S4, which I think is equivalent to halting the non-deterministic state machine, so it's represented as looping back to itself. (Here it's triggered by the error case of getting an exit event in the middle of an acquire-release pair.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1032229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1032286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">different kinds of verification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2025 13:35 UTC (Mon)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1032286/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1030685/#CommAnchor1032286" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, this is all correct. Sorry; I probably should have explained how I flattened down the example in more detail. The main point I was trying to convey was that a fairly simple-sounding constraint on the behavior of the system is equivalent to this quite complex and opaque state machine; so the real benefit of the patch set is not really enabling anything new per se, but rather making it possible to write these more complex checks in a maintainable way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1032286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,693 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fending off unwanted file descriptors [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Fending off unwanted file descriptors">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the more obscure features provided by Unix-domain sockets is the ability to pass a file  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1023925/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fending off unwanted file descriptors</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 5, 2025</br>
+           </div>
+One of the more obscure features provided by Unix-domain sockets is the
+ability to pass a file descriptor from one process to another.  This
+feature is often used to provide access to a specific file or network
+connection to a process running in a relatively unprivileged context.  But
+what if the recipient doesn't <i>want</i> a new file descriptor?  A feature
+added for the 6.16 release makes it possible to refuse that offer.
+<p>
+Normally, a Unix-domain connection is established between two processes to
+allow the exchange of data.  There is, however, a special option
+(<tt>SCM_RIGHTS</tt>, documented in <a
+href="https://man7.org/linux/man-pages/man7/unix.7.html">unix(7)</a>) to
+the <a
+href="https://man7.org/linux/man-pages/man2/sendmsg.2.html"><tt>sendmsg()</tt></a>
+system call that accepts a file descriptor as input.  That descriptor will
+be duplicated and installed into the receiving process, giving the
+recipient access to the file as if it had opened it directly.
+<tt>SCM_RIGHTS</tt> messages can be used to give a process access to files
+that would otherwise be unavailable to it.  It is also useful for
+network-service dispatchers, which can hand off incoming connections to
+worker processes.
+<p>
+The <tt>SCM_RIGHTS</tt> feature is not exactly new; it was added to the
+1.3.71 development kernel by Alan Cox in 1996, but existed in Unix prior to
+that.  Interestingly, it seems that, in the long history of this feature,
+nobody has ever considered the question of whether the recipient actually
+wants to acquire a new file descriptor.  In retrospect, it seems like a bit
+of a strange omission.  Developers tend to take care with the management of
+the open-file table in their programs, closing files that are no longer
+needed, and ensuring that file descriptors are not passed into new process
+or programs unnecessarily.  Injecting an unexpected file descriptor into a
+process has the potential to interfere with those efforts.
+<p>
+A specific problem with unexpected file descriptors, as <a
+href="/ml/all/20250519205820.66184-9-kuniyu@amazon.com">pointed out</a> by
+Kuniyuki Iwashima in <a
+href="/ml/all/20250519205820.66184-1-kuniyu@amazon.com">this patch
+series</a>, is their denial-of-service potential.  If a file descriptor
+that is somehow hung — consider a descriptor for an attacker-controlled
+FUSE filesystem or a hung NFS file — is installed into a process, the
+recipient may be blocked indefinitely while trying to close it.  This
+situation is similar to dumping a load of toxic waste on somebody's lawn;
+the victim may find themselves unable to get rid of it.  In the
+<tt>SCM_RIGHTS</tt> case, this sort of toxic file descriptor can prevent
+the recipient from getting work done (or exiting).
+<p>
+The solution, as implemented by Iwashima, is to provide a new option to
+disable the reception of file descriptors over a given socket.  That is
+done with a <a
+href="https://man7.org/linux/man-pages/man3/setsockopt.3p.html"><tt>setsockopt()</tt></a>
+call, using the new <tt>SO_PASSRIGHTS</tt> flag, like:
+<p>
+<pre>
+    int zero = 0;
+    ret = setsockopt(fd, SOL_SOCKET, SO_PASSRIGHTS, &amp;zero, sizeof(zero));
+</pre>
+<p>
+If this option is used as above to disable the reception of file
+descriptors, any attempt to transfer a descriptor over that socket will
+fail with an <tt>EPERM</tt> error.  Of course, the reception of
+<tt>SCM_RIGHTS</tt> file descriptors remains enabled by default; to do
+otherwise would surely break large numbers of programs.  If
+<tt>SCM_RIGHTS</tt> were being designed today, it would likely require an
+explicit opt-in, but that ship sailed decades ago, so developers wanting to
+protect a process against unwanted file descriptors will need to disable
+<tt>SCM_RIGHTS</tt> explicitly for any socket that it might be pass to <a
+href="https://man7.org/linux/man-pages/man3/recvmsg.3p.html"><tt>recvmsg()</tt></a>.
+<p>
+The <tt>SO_PASSRIGHTS</tt> option found its way into the mainline kernel
+(as part of <a
+href="https://web.git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=1b98f357dadd">the
+large networking pull</a>) on May&nbsp;28 and will be available as of the
+6.16 kernel release.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Networking/SCM_RIGHTS</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.16</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1023085/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1024164"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">another item finally completed</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 14:26 UTC (Thu)
+                               by <b>brauner</b> (subscriber, #109349)
+                              [<a href="/Articles/1024164/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brauner" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024164" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This came out of <a href="https://github.com/uapi-group/kernel-features?tab=readme-ov-file#disabling-reception-of-scm_rights-for-af_unix-sockets">https://github.com/uapi-group/kernel-features?tab=readme-...</a> and the fact that I complained about this again when I implemented the SO_PEERPIDFD support for reaped peers. Great that this has finally happened and as a proper socket option!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024164/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1024168"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Always turn off SO_PASSRIGHTS until after authentication/authorization</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 15:13 UTC (Thu)
+                               by <b>danpb</b> (subscriber, #4831)
+                              [<a href="/Articles/1024168/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="danpb" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024168" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even if a process wants/intends to use recvmsg + SCM_RIGHTS, not all peers are equally trusted. Most notably if the protocol running over the socket involves any authentication and/or authorization actions, the peer will probably initially be untrustworthy. IOW, it feels like everything using recvmsg on UNIX sockets should immediately turn off SO_PASSRIGHTS on a new socket, and then only enable it again after establishing a satisfactory level of trust in the connection via appropriate authentication/authorization.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024168/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Always turn off SO_PASSRIGHTS until after authentication/authorization</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 7:27 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1024234/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024234" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe/suspect that most practical use cases will do authn via SCM_CREDENTIALS, which seems like it should be pretty straightforward in practice.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024425"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Always turn off SO_PASSRIGHTS until after authentication/authorization</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 10:34 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/1024425/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbonzini" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024425" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is that access to the socket + SCM_RIGHTS itself  can count as authentication: access to the socket proves that you have access to the service, the file descriptor acts as a capability and tells you what to perform the action on.<br>
+<p>
+Figuring out if the file descriptor is valid is actually easy, the problem is that you cannot close safely an invalid one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024425/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1024177"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">awesome!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 17:04 UTC (Thu)
+                               by <b>rcampos</b> (subscriber, #59737)
+                              [<a href="/Articles/1024177/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rcampos" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024177" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SCM_RIGHTS is very hard to use properly, though. It's been several years since I last used it, but IIRC you can't choose and enforce the number of fds you receive (like if the mem allocated was slightly bigger, iirc, more fds than you requested can be added?).<br>
+<p>
+This is a great improvement, let's go for a sane interface for sending fds next! :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024177/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1024191"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 18:16 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1024191/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024191" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there a race window between creating a new socket and setting SO_PASSRIGHTS=0 where fds can still be injected?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024191/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024192"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 18:17 UTC (Thu)
+                               by <b>kkdwivedi</b> (guest, #130744)
+                              [<a href="/Articles/1024192/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kkdwivedi" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024192" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would presume you can't be sent the descriptors until you've published the socket somewhere, so you can do it between creation and binding it to some visible path.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024192/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024200"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 18:35 UTC (Thu)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1024200/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024200" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I understood the patch correctly (always a dangerous assumption), your process should be safe as long as you set the option before calling recvmsg().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024200/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024203"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 19:00 UTC (Thu)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1024203/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024203" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I don't <em>think</em> so? The check is done before
+
+<pre>
+  skb_queue_tail(&amp;other-&gt;sk_receive_queue, skb);
+</pre>
+
+(which is just barely visible in the context) so as long as the socket is accessible to some application, it can start enqueueing packets to it, I'd think?
+
+This makes it harder to use, but it seems to me it also fundamentally makes sense. If the kernel were to only check at recvmsg() time, it could be left with the same unenviable job of dealing with the file descriptor as the destination process, though perhaps it's in a potential position to just delete it without ever closing it properly.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024203/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 19:20 UTC (Thu)
+                               by <b>kkdwivedi</b> (guest, #130744)
+                              [<a href="/Articles/1024208/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kkdwivedi" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024208" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right, it would be done at send time. The check is in patch 8. Doing it during receive is problematic as the descriptors must be closed in the context of the receiver, and they would account against the resource limits of the target process. It would be equivalent to the current state, where one can receive and close them. Another problem is that close(2) itself is not guaranteed to provide forward progress, like a descriptor belonging to a FUSE or NFS mount could stall the process altogether. I think systemd used to spawn a fresh thread for every close to avoid blocking PID 1, I don't know if they still continue to do that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1024209"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 19:28 UTC (Thu)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1024209/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024209" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, no, you're right. I had thought that the thread wouldn't get to that point unless the receiver had already called recvmsg(), but I see on re-reading that isn't true. I was mixing up the state of the lock on the socket with the state of the socket.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024209/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024233"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 7:21 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1024233/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024233" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, *if* you create the socket in an inaccessible state, such as by doing one of the following:<br>
+<p>
+- Create the socket in a directory where search/execute permission is denied to non-owners (annoying because you need to fiddle with the directory's permissions every time, and also you need to own it).<br>
+- Set the umask such that the socket is initially created with permissions that deny write to non-owners (not thread safe, and less portable than setting permissions on the directory).<br>
+<p>
+If it is an abstract socket (see unix(7)), then you can't do any of this and so there is necessarily a race condition.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024233/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 8:05 UTC (Fri)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1024235/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024235" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Isn't it worse than that? When you have a unix socket server, doesn't each accept() or accept4() call create a new socket that you'd have to set the sockopt on? Seems that really what you need is to have a new flag for accept4() to set this from the start?<br>
+<p>
+But maybe I'm totally confused, despite having worked on some small things I will not claim to understand anything there well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024243"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">racy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 9:10 UTC (Fri)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1024243/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024243" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Err, no. It's inherited from the original at accept() time. I missed that sk_scm_recv_flags is in a union with sk_scm_rights, oops.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024243/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Incomplete solution?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2025 20:20 UTC (Thu)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/1024218/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="comex" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024218" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But what if you actually *want* to receive file descriptors from untrusted processes (just not hung ones)?<br>
+<p>
+…That was my first reaction, anyway.  But thinking about it more, perhaps receiving fds from untrusted processes is just a fundamentally broken design.  After all, almost anything you might try to do with a file descriptor, even something like fstat() to get metadata about it, is likewise vulnerable to hangs if the fd comes from a FUSE filesystem.  Or, worse, spoofing.<br>
+<p>
+On the other hand, there are *some* operations that can be performed on an untrusted fd without risk of either hangs or spoofing.  So there are some imaginable server designs where closing unwanted fds really is the only unsafe operation (just like with servers that don’t want fds at all), yet unlike with servers that don’t want fds at all, SO_PASSRIGHTS doesn’t help.<br>
+<p>
+But I have no idea how many programs actually use such designs.<br>
+<p>
+One example I can think of is a server that expects a sealed memfd.  It should be safe to call fcntl(fd, F_GET_SEALS) on an untrusted fd to both verify that it’s a memfd and check whether it’s been sealed.  At least for now, no other kind of fd implements F_GET_SEALS, and fcntl is not forwarded generically to the VFS layer (unlike ioctl).<br>
+<p>
+Or for a more complicated example: kcmp() should also be safe for untrusted fds.  So I’m imagining a server that uses fds as capabilities for resources it manages.  When a client asks the server to ‘open’ a resource, the server creates some random throwaway fd, perhaps a pipe or memfd; adds it to a local table recording the association between the fd and the resource; and then sends the fd back to the client (over a socket).  Then when the client wants to perform an operation on the resource, it sends the fd back to the server (again over a socket), and the server uses kcmp() to figure out which resource they’re operating on.  The point of this scheme would be that client processes could pass fds to other client processes in order to delegate access to resources, just like you can do with normal fds representing kernel resources.  …Admittedly, I’m skeptical that anyone uses this design, since kcmp() is quite new and not universally enabled.  But perhaps there’s some way to do it with other syscalls.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024384"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Incomplete solution?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 18:58 UTC (Fri)
+                               by <b>kkdwivedi</b> (guest, #130744)
+                              [<a href="/Articles/1024384/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kkdwivedi" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1024384" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One of the earlier versions proposed BPF based filtering, you could match in the exact struct file (same source of truth as kcmp) or also filter on file types (no fuse descriptors, etc.), that’s still planned as a next step IIUC. I replied to that version precisely because it would allow building fine grained capability sandboxes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024384/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1025781"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Incomplete solution?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 22:50 UTC (Tue)
+                               by <b>alkbyby</b> (subscriber, #61687)
+                              [<a href="/Articles/1025781/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alkbyby" />
+                <input type="hidden" name="return" value="/Articles/1023085/#CommAnchor1025781" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Exactly. For example systemd's journald uses passed fds (typically sealed memfds, but they support some other options). It does look like today systemd journald is vulnerable to the passage of "slow to close" fds.<br>
+<p>
+Proof: <a href="https://systemd.io/JOURNAL_NATIVE_PROTOCOL/">https://systemd.io/JOURNAL_NATIVE_PROTOCOL/</a><br>
+<p>
+and <a href="https://github.com/systemd/systemd/blob/2c7f35b1444712e5795294cd31be51bf54f2278c/src/journal/journald-manager.c#L1626">https://github.com/systemd/systemd/blob/2c7f35b1444712e57...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025781/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,842 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Providing 64KB base pages with 4KB kernels, two different ways [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Providing 64KB base pages with 4KB kernels, two different ways">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Some CPU architectures are able to run with a number of different base-page sizes; using a larg [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1071536/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Providing 64KB base pages with 4KB kernels, two different ways</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 11, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+Some CPU architectures are able to run with a number of different base-page
+sizes; using a larger size can often result in better performance at the
+cost of increased memory use.  Other architectures are more limited.  At
+the 2026 <a href="https://events.linuxfoundation.org/lsfmmbpf/">Linux
+Storage, Filesystem, Memory Management, and BPF Summit</a>, two sessions in
+the memory-management track explored options for letting processes run with
+64KB page sizes when the underlying kernel does not.  The first was focused
+on letting each process have its own page size, while the second concerned
+bringing 64KB pages to x86 systems.
+<p>
+<h4>Per-process page sizes</h4>
+<p>
+Using 64KB pages improves performance, but doing so can also create
+internal fragmentation and a significant amount of wasted memory.  That
+memory-use price tends to limit the use of larger base-page sizes.  Ryan
+Roberts and Dev Jain (remotely) presented a plan to enable the running of
+processes with page sizes that differ from that of the system as a whole,
+in an attempt to get the best of both worlds.
+<p>
+<a href="/Articles/1071711/"><img
+src="../_static/images/conf/2026/lsfmm/RyanRoberts-sm.png" alt="[Ryan Roberts]"
+title="Ryan Roberts" class="rthumb"></a>
+
+Roberts started by saying that there is a performance gap between systems
+with larger and smaller page sizes.  With a "<q>random selection of
+benchmarks</q>", a performance improvement of 2-17% can be had with a
+larger page size.  But the associated memory usage increase pushes people
+to stay with the the standard 4KB page size supported by many
+architectures.  The contiguous-PTE support found in some recent processors
+(where physically contiguous pages can share a translation lookaside buffer
+(TLB) entry) helps a bit, but even using that feature, the performance gap
+remains.
+<p>
+There are a number of reasons for the performance difference.  On the
+software side, a larger page size equates to fewer page faults and shorter
+least-recently-used (LRU) lists in the kernel.  On the hardware side,
+larger pages lead to better TLB use; a system running with 64KB pages can
+cover 16&nbsp;times the memory area with the TLB.  Arm CPUs can cache the
+results of the last page-table walk, speeding the translations of addresses
+that land within the same page-table entry (PTE) page; larger page sizes
+increase the coverage of that cache.  Using larger pages also just makes
+the page tables more compact, reducing their TLB and cache impact.
+<p>
+There is architecture-level work aimed at closing the performance gap,
+Roberts said, but the results of that work will not be available for some
+years yet.  So there is reason to explore what can be done on the software
+side instead.  One possibility is to give each process its own page size,
+so that processes that benefit from larger pages can have them without
+imposing higher memory use on the system as a whole.  The Arm architecture,
+in particular, supports this concept, allowing the kernel to remain with a
+4KB page size while letting individual processes run with larger pages.
+<p>
+Jain took over to describe the proposed implementation, which is split into
+three layers.  The first of those, the "ABI adaptor", is designed to hide
+the difference between the kernel's page size and that of any given
+process.  Each process's page size is stored in the <a
+href="https://elixir.bootlin.com/linux/v7.0.1/source/include/linux/mm_types.h#L1123"><tt>mm_struct</tt></a>
+structure; it is preserved when a process forks, but may be changed by an
+<a
+href="https://man7.org/linux/man-pages/man2/execve.2.html"><tt>execve()</tt></a>
+call.  Various system calls (<a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>,
+for example) will modify length and alignment parameters to match the
+kernel's page size.  That work is fairly straightforward, Jain said, but <a
+href="https://man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>
+calls can require more care.  The ELF loader is enhanced to understand the
+alignment needs of processes with different page sizes.  There is a fair
+amount of trickery added to the implementation of various <tt>/proc</tt>
+files so that a process running with 64KB pages sees the results that would
+come from a 64KB kernel.
+<p>
+The second layer is a set of modifications to the kernel's
+memory-management subsystem.  It turns out that a lot of the code paths
+used to implement transparent huge pages can be reused to provide 64KB
+pages, on a 4KB kernel, to processes using the larger page size.  For such
+processes, allocation requests specify the page size as the minimum
+acceptable allocation size; larger pages, up to the PMD-level huge-page
+size, remain possible.
+<p>
+The page cache presents challenges of its own, since it is shared by all
+processes in the system.  One option would be to just use 64KB folios there
+all the time, but that would waste quite a bit of memory when caching small
+files.  So the page cache still uses 4KB pages most of the time.  Should a
+64KB process map a file with <tt>mmap()</tt>, all 4KB folios from that file
+will be dropped from the page cache, and any new folios will subsequently
+be added to the cache at the larger size.
+<p>
+Kiryl Shutsemau asked whether all filesystems support larger folios in the
+page cache now; Matthew Wilcox answered in the negative, saying that some
+filesystems are "<q>lazy slackers</q>" that have not yet added that
+support.  The biggest problem, he said, is Btrfs.  Wilcox suggested that,
+as an alternative to dropping page-cache entries, the kernel could go ahead
+and use 64KB folios as long as they do not extend past the end of the file.
+<p>
+Lorenzo Stoakes said that this work looks rather invasive, and wondered why
+it was not possible to just make greater use of multi-size transparent huge
+pages (mTHPs), which can provide a number of the same benefits.  Roberts
+answered that mTHPs do not provide all of the hardware-level benefits that
+a larger page size does.  Stoakes also worried that extensive use of larger
+page sizes could put a lot of pressure on the memory-management subsystem's
+compaction code.
+<p>
+Time was running short, so Roberts skipped over some of the intended
+discussion (including the third layer, which is the architecture-specific
+code that handles differently sized page tables) and moved directly to a
+list of open items.  The first of those had to do with what happens if the
+kernel attempts an operation requiring a 4KB page size while running in the
+context of a 64KB process.  One option would be to have the process fall
+back to 4KB pages; that would provide functional correctness, but would
+lose performance.  The alternative is to fail the operation; this idea
+<i>seems</i> simpler, but would require sprinkling a lot of page-size
+checks throughout the kernel, Roberts said.
+<p>
+User-space ABI compatibility is a challenge; the kernel can pretend to be
+running with 64KB pages when queried by a 64KB process, but it will never
+be able to emulate everything.  Some <tt>/proc</tt> files, for example,
+simply cannot hide the fact that the kernel is using 4KB pages.  It is also
+not possible for <a
+href="https://docs.kernel.org/admin-guide/mm/pagemap.html"><tt>/proc/<i>PID</i>/pagemap</tt></a>
+to represent a 4KB process when read by a 64KB process.  There are also
+some system calls and other features (<a
+href="https://man7.org/linux/man-pages/man2/userfaultfd.2.html"><tt>userfaultfd()</tt></a>,
+for example) that cannot be emulated.
+<p>
+One way to deal with these problems, Roberts said, would be to "defeature"
+64KB processes, limiting their functionality.  Processes with different
+page sizes would be invisible to each other, and processes with page sizes
+larger than the kernel's would be unable to use features like
+<tt>userfaultfd()</tt>.  Any operation that cannot be properly represented
+to a 64KB process would simply fail.
+<p>
+Roberts concluded that saying that, while allowing processes to have
+different page sizes brings benefits, there are some sticky points as well.
+Adding this feature would also bring a fair amount of churn to the
+memory-management subsystem.  Those benefits may well be worth the trouble,
+though. 
+<p>
+<!-- middle-ad -->
+
+<h4>A 64KB base-page size for x86</h4>
+<p>
+Using larger base pages can be a nice solution for workloads that benefit
+from them, but there is one little problem: some minor architectures,
+including x86, do not support running with larger base-page sizes.  In the
+next session, Shutsemau proposed a way to work around this limitation
+on x86 systems.  The idea was met with a certain amount of skepticism by
+the assembled developers, though.
+<p>
+<a href="/Articles/1071712/"><img
+src="../_static/images/conf/2026/lsfmm/KirylShutsemau-sm.png" alt="[Kiryl Shutsemau]"
+title="Kiryl Shutsemau" class="rthumb"></a>
+
+Using 64KB base pages, Shutsemau began, can provide a 1.7% performance
+improvement on "<q>a very important workload</q>" on Arm processors; he
+would like to bring that speedup to x86 systems as well.  Using larger
+pages would reduce the memory overhead of the system memory map, allow for
+easy (and performance-improving) TLB coalescing, faster <span
+class="nobreak">I/O</span> operations, and easier allocations of 1GB huge
+pages.  Doing so, he said, requires splitting the kernel's concept of the
+system page size in two.
+<p>
+Currently, the <tt>PAGE_SIZE</tt> macro is used throughout the kernel to
+represent the hardware's base-page size.  Shutsemau would phase that out,
+in favor of <tt>PTE_SIZE</tt>, which describes the hardware's view of the
+base-page size, and <tt>PG_SIZE</tt>, which is the size of pages as they are
+managed within the kernel (and seen by user space).  The <tt>PAGE_SIZE</tt>
+macro would only be defined at all if <tt>PTE_SIZE</tt> and
+<tt>PG_SIZE</tt> are equal.  Page-frame numbers, he said, would always
+refer to <tt>PTE_SIZE</tt> frames.
+<p>
+Needless to say, there are a lot of places in the kernel that would have to
+change to reflect this new view of the world.  Creating page-table entries
+would become more complicated, since the offset within the
+(<tt>PG_SIZE</tt>) page would have to be taken into account; all of the
+functions that deal with PTEs would gain a new offset parameter.  While the
+kernel is managing 64KB pages, user space would still see the page size as
+being 4KB, as always.  So there would be no user-space changes required to
+run successfully on such a system.
+<p>
+The most challenging part, Shutsemau said, is page-fault handling, since
+multiple PTEs would have to be mapped for each faulting page.  User space
+would only be held to a 4KB alignment requirement, meaning that virtual
+memory areas (VMAs) could begin or end in the middle of a 64KB page.  The
+page-fault handler might, as a result, end up only mapping part of a page
+when a fault happens; in such cases, the unmapped part of the page would
+simply be wasted.  Misaligned pages could also lead to memory waste.
+<p>
+Wilcox said that copy-on-write (COW) faults would become more expensive on
+these systems, since they would have to fault in surrounding base pages to
+fill out a 64KB page.  David Hildenbrand, instead, worried about how
+<tt>userfaultfd()</tt> could be implemented; it might need a new operation
+to install a single PTE rather than a whole page.
+<p>
+Hildenbrand also suggested it might be better to just go to a 64KB page
+size throughout the system; that would make life easier for everybody, he
+said.  That, Shutsemau answered, would really just have the effect of
+shifting the complexity to the architecture code, which would have to
+implement the fiction of a larger base-page size and hide the details from
+the rest of the kernel.  Going to a larger base-page size would also break
+some applications.  Hildenbrand was unsympathetic to the latter point,
+saying that such applications should either be fixed or just be run on 4KB
+systems.
+<p>
+Jason Gunthorpe said that there has been a lot of experience with 64KB page
+sizes on Arm systems.  Users tend to push back, he said, because there is
+always one special application that can only run with 4KB pages.  Another
+participant asked why this complexity was needed when the kernel has
+support for mTHPs that is getting better over time.  Part of the problem
+with that idea, Shutsemau said, is that not all filesystems support larger
+folios.  Sticking with a small base-page size also makes it harder for the
+system to allocate larger chunks of memory.
+<p>
+On the topic of memory waste, Hildenbrand suggested the possibility of
+creating "negative-order folios" to represent sub-page chunks of memory.
+The idea of using the slab allocator for sub-page allocations was also
+suggested, but that would not work in all cases.
+<p>
+As the session ran low on time, Shutsemau acknowledged that he was not
+seeing a lot of enthusiasm for his proposal.  He asked what the fundamental
+objections were.  Hildenbrand answered that, in current kernels, an
+order-zero folio is a single page; changing that understanding would entail
+a significant change in how folios are handled.  He asked for a cleaner
+way, one that requires no "<q>weird part-of-page interfaces</q>" to reach
+the desired objectives.
+<p>
+Gunthorpe said that the fundamental constraint is that there has to be a
+way to run old applications that require a 4KB page size.  It would be
+better to find a way to solve that problem, with minimal kernel
+disturbance, on systems with a larger base-page size.  The session closed
+with Hildenbrand saying that other work in the kernel is addressing many of
+the motivations behind Shutsemau's proposed changes.  Given that, he
+suggested, 64KB base pages may not be the future; the right path may be
+better optimizing the operation of systems with 4KB pages.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Scalability</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1071484/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1072334"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">negative-order folios</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2026 15:27 UTC (Mon)
+                               by <b>david.hildenbrand</b> (subscriber, #108299)
+                              [<a href="/Articles/1072334/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.hildenbrand" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072334" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Hildenbrand suggested the possibility of creating "negative-order</span><br>
+<span class="QuotedText">&gt; folios" to represent sub-page chunks of memory. The idea of</span><br>
+<span class="QuotedText">&gt; using the slab allocator for sub-page allocations was also suggested,</span><br>
+<span class="QuotedText">&gt; but that would not work in all cases.</span><br>
+<p>
+I'm afraid that wasn't me ... unless I was daydreaming. I guess the idea was to use the order field as a bitmap, but I cannot immediately tell if that is really feasible as I also don't remember the details of that comment.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072334/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">negative-order folios</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2026 21:10 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1072373/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072373" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that was me. I talked about it a bit here:<br>
+<p>
+<a href="https://lore.kernel.org/linux-mm/afIYFtL6KrBs38rT@casper.infradead.org/">https://lore.kernel.org/linux-mm/afIYFtL6KrBs38rT@casper....</a><br>
+<p>
+but I wouldn't propose a negative order folio for a couple of reasons. I understand why our overworked scribe recorded it that way though; I'm sure my spoken words weren't perfectly clear.<br>
+<p>
+First, folios are always &gt;= PAGE_SIZE. As long as we want to be able to mmap things, they have to be PAGE_SIZE.<br>
+<p>
+Second, allowing negative orders to the page allocator could never be more than a hack. That's just an unreasonable mental workload to any user. Instead, introduce a new interface that allows allocation of memory in units of 512 (rather than units of PAGE_SIZE) and reimplement alloc_page() as a wrapper around it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1077063"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">negative-order folios</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2026 0:46 UTC (Tue)
+                               by <b>nyc</b> (guest, #91222)
+                              [<a href="/Articles/1077063/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nyc" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1077063" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Am I right that the linked message is describing an idea of eventually pervasively using descriptors for power-of-two -sized and -aligned memory regions? I do like this idea.<br>
+<p>
+However, there is a notion of trading off some internal fragmentation to reduce the assembly ratio for the first superpage size for superpage size spectra with a wide gap between their base page size and their first superpage size. Using such an increased allocation unit (PAGE_SIZE) distinct from the TLB/MMU base page size (MMUPAGE_SIZE) also has a benefit of guaranteeing that smaller superpage size allocations won't fail from external fragmentation for architectures with dense superpage size spectra. There are also algorithms for maintaining ABI compatibility, likely originally due to Hugh Dickins, that beyond avoiding breaking ABI, also allow the allocation unit size to be compile-time configurable (or boot-time). <br>
+<p>
+Depending on what people think the value of doing that is relative to the code to do it, it could be worth considering. I may even have something for it (hopefully Hugh will think I did his code and/or algorithms justice) that passes LTP on 16 architectures in qemu for PAGE_MMUSHIFT values of 0, 2, 4 and 6 (here PAGE_SHIFT == MMUPAGE_SHIFT + PAGE_MMUSHIFT).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077063/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1077061"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">negative-order folios</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 23:23 UTC (Mon)
+                               by <b>nyc</b> (guest, #91222)
+                              [<a href="/Articles/1077061/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nyc" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1077061" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't know anything about negative order folios, but I might have an answer to the general category of using larger base page sizes while preserving binary compatibility that at least passes LTP in qemu for shifts (PAGE_MMUSHIFT) of 0, 2, 4 and 6 on 16 architectures. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077061/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1072357"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Toss legacy stuff to VMs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2026 19:25 UTC (Mon)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1072357/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072357" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can legacy stuff be made to run in legacy VMs, while the modern stuff that fetches page size at runtime gets to run natively?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072357/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Toss legacy stuff to VMs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2026 20:48 UTC (Mon)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1072369/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072369" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some kind of `binfmt_misc` with QEMU mediating perhaps?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072420"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Toss legacy stuff to VMs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2026 16:58 UTC (Tue)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/1072420/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k3ninho" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072420" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe the full extent of this thought would be mapping ABI capabilities to the release version (and calling them personalities like VMS or Windows NT did) and running everything that doesn't specify the version under a legacy dont_break_userspace personality in order to ... not break userspace. I suspect this is an antipattern because it fragments the interface and would allow non-upstreamed ABI changes to be held against the Linux community.<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072420/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1072706"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Toss legacy stuff to VMs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2026 0:12 UTC (Thu)
+                               by <b>notriddle</b> (subscriber, #130608)
+                              [<a href="/Articles/1072706/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="notriddle" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072706" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure. That's how Asahi Linux runs Steam.<br>
+<p>
+<a href="https://github.com/AsahiLinux/muvm">https://github.com/AsahiLinux/muvm</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072706/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1072374"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are 1.7% really worth it?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2026 21:38 UTC (Mon)
+                               by <b>PeeWee</b> (subscriber, #175777)
+                              [<a href="/Articles/1072374/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PeeWee" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072374" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+Using 64KB base pages, Shutsemau began, can provide a 1.7% performance improvement on "a very important workload" on Arm processors; he would like to bring that speedup to x86 systems as well.
+</blockquote>
+Given all the ifs and buts that followed, according to this article, I cannot help but wonder if it's really worth it, especially when the performance improvement is only part of the equation; the other being internal fragmentation / memory waste. I think, at some point, one needs to ask, how many instances of such an "important workload" could be run with 4K pages vs. 64K pages. If one can run 100 instances with 4K pages without swapping but only 80 with 64K, due to underutilized pages, that's a net loss; assuming perfect scalability with instance count, of course. What about other workloads that need to coexist on such systems? If any of them need to make do with less available memory, that goes to the cost side of the balance sheet.</p>
+Also, why not aim lower? I've read that MacOS is using 16K pages, which seems like a reasonable compromise. It gives four times the page table coverage compared to 4K.</p>
+I'm also wondering if CPU vendors are simply cheaping out here. Maybe we need some new MMU hardware that's capable of dealing with modern memory demands. I mean, <em>very major</em> portions (&gt; 30%) of silicon real estate is spent on Cache Memory, but so little on TLB?!
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072374/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are 1.7% really worth it?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2026 3:19 UTC (Tue)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1072392/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072392" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The bigger point that I don't see mentioned much is the kernel already has large folios, which bring all those benefits in a much saner way without new weirdness.<br>
+<p>
+It's just that not all code has been converted to use them, and besides btrfs the last I heard was anonymous memory seemed to be stalled.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1072403"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are 1.7% really worth it?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2026 8:35 UTC (Tue)
+                               by <b>linusw</b> (subscriber, #40300)
+                              [<a href="/Articles/1072403/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linusw" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072403" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At the same time dynamic stacks saving 1-2% of system memory is pretty much shot down. I'm not saying performance and RAM footprint are immediately comparable. But we are perhaps hitting a wall of diminishing returns.<br>
+<a href="https://lore.kernel.org/linux-mm/da9321ad-4198-494e-b9fa-30d69bd29be3@intel.com/">https://lore.kernel.org/linux-mm/da9321ad-4198-494e-b9fa-...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072403/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1072562"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are 1.7% really worth it?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2026 8:20 UTC (Wed)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1072562/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joib" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1072562" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not a kernel developer, but seems to me a better approach would be to finish the mthp/folio/memdesc work, and then one could see to which extent this kind of "virtual" larger base page size would still be useful or needed?<br>
+<p>
+As for the size of this new base page, IIRC some newer x86 CPU's have "contiguous PTE" support for 8 consecutive pages, or 32kB, so maybe that would be a sweet spot?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072562/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1073076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Internal fragmentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2026 17:24 UTC (Fri)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1073076/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1073076" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I made some measurements of how much internal fragmentation would grow with various page sizes and posted it on Usenet &lt;2020Oct9.190337@mips.complang.tuwien.ac.at&gt;  Given that I no longer know a working Usenet archive, I just repost this work here:
+
+<pre>
+I use the following script:
+
+cat /proc/[1-9]*/maps|
+awk '$2~/.w.p/||!$2":"$6 in m {m[$2":"$6]=1; print $1" swap - doit"}'|
+sed 's/-/ /'|
+gforth -e 'variable mem create ps $2000 , $4000 , $8000 , $10000 , create sums 0 , 0 , 0 , 0 , : doit 4 0 do dup ps i th @ naligned over - sums i th +! loop mem +! ; hex stdin include-file decimal : printit mem @ $400 / 8 .r 4 0 do sums i th @ $400 / 8 .r loop ; printit cr bye'
+
+On my desktop this outputs the second of the following lines:
+
+ total       8KB    16KB    32KB    64KB
+ 1040972    6676   22244   56148  124788
+
+The 8KB column tells how many extra KB would be used if the page size
+was 8KB.  Comparing total memory as determined by this script to the
+output of free (555900 without buffers/cache) indicates that, on
+average, only about half of the address space in a VMA is consumes
+memory; so there is also quite a bit of uncertainty about my estimates
+for extra memory.
+
+For the three machines above [desktop (2h uptime, spartan user interface);
+ laptop (54d uptime, Ubuntu, Gnome, 2 users); server (89d uptime, Debian,
+ Gitlab and Jitsi in Docker)], I get today (numbers in KB):
+
+VMAs unique    used     total      8KB    16KB    32KB    64KB   
+ 7552  2333    555964  1033320    6704   22344   56344  125144 desktop
+82836 25276   5346060 15707448   76072  223000  514472 1113672 laptop
+47017 15425 105490636 60186068   40804  134492  319852  708588 server
+
+I have no explanation why used is higher than total on the server.
+
+If you want to get an average VMA size, just divide total by unique.
+
+In any case, even with the considerable uncertainty from partially
+populated VMAs, the extra cost of 8KB or 16KB pages does not appear to
+be large, even on the laptop.
+</pre>
+
+At current RAM prices, not everybody will want to spend an extra 1.1GB on 64KB pages for internal fragmentation, but having the option would be nice, and having some in-between option, too.
+
+<p>L1 TLBs are as small as they are because making them larger also means that they are slower, and at some point the L1 cache access speed is limited by TLB speed.  For highly or fully associative structures (as is often the case for L1 TLBs), power consumption is also an issue.
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1083477"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Internal fragmentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2026 21:30 UTC (Sat)
+                               by <b>nyc</b> (guest, #91222)
+                              [<a href="/Articles/1083477/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nyc" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1083477" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are ways to adapt tail packing, incremental faulting, incremental zeroing, and more to address some of the major internal fragmentation issues. Plus converting things to slab allocations explicitly sized in other terms seamlessly avoids a lot of issues. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1083477/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1077065"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are 1.7% really worth it?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2026 1:05 UTC (Tue)
+                               by <b>nyc</b> (guest, #91222)
+                              [<a href="/Articles/1077065/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nyc" />
+                <input type="hidden" name="return" value="/Articles/1071484/#CommAnchor1077065" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is a notion of TLB reach, which is basically how much memory is being mapped by the translations a TLB is caching. Where this is relevant is in TLBs whose entries' sizes may vary. Fill the TLB with base pages and it won't get far; the larger the page sizes used in the translations, the further the TLB can reach.<br>
+<p>
+Some consumer-oriented vendors defeat the entire point of superpages by having fixed numbers of TLB entries for each translation size. Clearly such TLBs have the amount of memory they can map set in stone regardless of any kernel or userspace behaviour, apart from deliberately pessimally refusing to use some translation sizes.<br>
+<p>
+So it's not just that TLBs are too small. They're also often not organised in ways that would allow kernels and userspace to make the most effective use of them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077065/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

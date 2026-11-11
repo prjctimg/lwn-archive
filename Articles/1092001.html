@@ -1,0 +1,344 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Recent work in memory tiering [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Recent work in memory tiering">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Tiered-memory systems are built with multiple types of memory, each of which has different perf [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Recent work in memory tiering&quot;" href="https://lwn.net/headlines/1092001/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1092274/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Recent work in memory tiering</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 3, 2026</br>
+           </div>
+Tiered-memory systems are built with multiple types of memory, each of
+which has different performance characteristics.  In addition to the usual
+DRAM, a tiered system might also provide faster high-bandwidth memory or
+slower CXL memory.  On these systems, the placement of memory allocations
+has a significant effect on the performance that a workload will obtain.
+While work on tiered-memory improvements has been ongoing for years, it
+feels like the pace has slowed a bit recently.  Even so, there are a few
+efforts underway, but they are facing questions about whether the tiering
+design makes sense.
+<p>
+<h4>Hot-page promotion</h4>
+<p>
+"Demotion" refers to the act of moving a page of data from a faster tier to
+a slower one, while "promotion" is movement in the opposite direction.  A
+page would be most likely to be demoted if the kernel concludes that it is
+not being actively used; promotion would happen when memory that <i>is</i>
+in use happens to be in slow memory.  Demotion decisions are relatively
+easy (it is a similar decision to swapping a page out) and works reasonably
+well, but detecting hot pages in slow memory has proved to be more
+difficult.  So either the kernel ends up leaving hot pages in slow memory,
+or it promotes pages that turn out not to be hot after all; in both cases,
+the result is worse performance.
+<p>
+Bharata B Rao has been working on <a
+href="/ml/all/20260728054356.291998-1-bharata@amd.com">an infrastructure
+for hot-page detection and promotion</a> for some time now; LWN <a
+href="1046249.html">covered this work</a> in 2025.  This patch series
+is built around the idea that there may be multiple sources of data about
+which pages in slow memory are seeing high activity and should be promoted.
+The kernel might generate that data by marking pages as being inaccessible
+and tracking the resulting faults when a workload tries to use them, for
+example.  CXL systems can also support access tracking and reporting,
+providing relatively fine-grained information without adding CPU overhead.
+Rao's proposed "pghot" mechanism integrates tracking data from the
+available sources and uses it to decide which pages should be promoted to
+faster memory.  A new kernel thread, called <tt>kmigrated</tt>, uses this
+data to attempt to move the hottest pages.
+<p>
+The previous article covered the third version of the series; there have
+been five new versions since then.  The core tracking machinery remains
+similar in concept, though various improvements have been made.  This
+subsystem now can use profile data from <a
+href="https://docs.amd.com/r/en-US/57368-uProf-user-guide/Profiling-Concepts">AMD's
+Instruction-Based Sampling</a> and has gained a new "precision mode".  By
+default, pghot uses one byte of memory to track each lower-tier page; in
+precision mode, that overhead expands to four bytes and, among other
+things, enables tracking of which NUMA node is accessing each page.  That
+information allows <tt>kmigrated</tt> to try to promote hot pages to the
+node where they are being used.  That, in turn, enables pghot to
+(optionally) take over much of the work that is currently handled by the
+kernel's NUMA-balancing code.
+<p>
+Andrew Morton started the discussion of the current version by <a
+href="/ml/all/20260728111401.b6d674baf8e56a27c55e0c52@linux-foundation.org">asking</a>
+whether <a href="https://docs.kernel.org/admin-guide/mm/damon/">DAMON</a>,
+which is already in the kernel, could perform this function.  Rao <a
+href="/ml/all/d2a84790-16a0-488c-854a-e135feb2f65c@amd.com">answered</a>
+with an LLM-generated comparison of the two mechanisms, which concluded
+that DAMON could perhaps do the job, but only after being tuned for the
+specific workload, and only after the workload had run for some time.
+DAMON author SJ Park <a
+href="/ml/all/20260806134454.96428-1-sj@kernel.org/">was somewhat
+unimpressed</a> by this response, asking Rao to actually learn about DAMON
+before going any further.  In <a
+href="/ml/all/125de6c4-2fc7-4202-9199-347effe63112@amd.com/">a separate
+response</a> to Morton, Rao described some differences he saw between pghot
+and DAMON; Park <a
+href="/ml/all/20260729135419.87239-1-sj@kernel.org/">disagreed</a> with
+some of them, but also said that some pghot-specific features (such as
+integrating data from multiple sources) were currently being implemented
+for DAMON.
+<p>
+Matthew Wilcox <a href="/ml/all/amjz7kIDuZH6gBx9@casper.infradead.org">had
+a different view</a> of the entire patch set and the ideas that it is
+implementing:
+<p>
+<blockquote class="bq">
+	I don't think we should do this.  I don't think it's a use-case
+	that customers actually want; I think it's something CPU vendors
+	think their customers want.  I've said this repeatedly over the
+	months this patchset has been in development.  I say no.
+</blockquote>
+<p>
+Gregory Price quickly <a
+href="/ml/all/amj3jbvruEiHIZvi@gourry-fedora-PF4VCD3F">responded</a> that
+Meta is "<q>actively interested in this work and helping to drive the
+design of it</q>".  Yongting Lin also <a
+href="/ml/all/20260810033814.83951-1-linyongting@bytedance.com/">expressed
+support</a>, albeit more lukewarmly, for this work.  So there does appear
+to be some interest in this capability, even if it is not widespread.
+<p>
+David Hildenbrand <a
+href="/ml/all/ed9e7308-09c8-4631-a012-940cd6e11bbd@kernel.org/">pointed
+out</a> that, even after eight revisions, there are no review tags for any
+of the patches; he described the series as "<q>far away from being
+mergeable</q>".  This work, he said, has not been perceived as having even
+a medium level of priority, so the memory-management maintainers have not
+yet taken a hard look at it.  The question of whether this use case can be
+adequately handled by DAMON also remains without a definitive answer.  So
+it would appear that pghot is likely to be stuck on the ground floor for
+some time yet.
+<p>
+<h4>Tier-aware memory control groups</h4>
+<p>
+In the pghot discussion, Price <a
+href="/ml/all/an0qJpFYBPL7V-CR@fedora/">mentioned</a> a problem that comes
+up on tiered-memory systems: the first workloads to run fill the faster
+memory with their data; the workloads that come later then end up in slower
+memory because that is all that is left.  Pghot, he said, would allow the
+system to rectify this problem over time.  But there is also interest in
+preventing it from coming about in the first place.
+<p>
+Control groups with the memory controller (often referred to as "memcgs")
+would seem like the logical solution to this problem, but the memory
+controller is not currently designed to handle tiered memory.  It can
+limit a group to a certain amount of memory overall, but cannot control
+where the memory is placed.  So, naturally, the solution would be to add
+awareness of tiering to the memory controller.  There are currently two
+separate patch sets that accomplish that goal.
+<p>
+<a href="/ml/all/20260807202059.2620949-1-joshua.hahnjy@gmail.com">This
+series</a> from Joshua Hahn takes a relatively simple approach to
+configuration.  If a given system has 25% of its memory as DRAM and 75% as
+slower CXL memory, then any given control group will be able to use 25% of
+its memory limit for DRAM, and must use the rest in CXL.  That will prevent
+the first workload that shows up from filling the system's DRAM, leaving
+memory available for others.  The hard and soft limits are both scaled in
+this way, allowing a workload to use more DRAM (if so configured) when
+contention for memory is low.
+<p>
+Implementation of the limits is handled in a number of places.  Most
+obviously, perhaps, is at allocation time, when the system will allocate
+memory from tiers where there is still space available when possible.  If
+that is not possible, and an allocation is placed in a tier with no space
+remaining, then targeted reclaim will be kicked off to remove some pages
+from that tier.  Various other actions (such as page migration) that can
+exhaust a tier's limit will also start reclaim.  Promotion of pages to
+faster tiers will be slowed when the limit is reached.
+<p>
+Meanwhile, Qiqi Liu has posted <a
+href="/ml/all/20260818023121.100613-1-liuqiqi@kylinos.cn">a separate
+solution</a> to this problem.  Like Hahn's series, Liu's sets limits for
+each tier that match the proportions of each memory type in the system.  In
+this series, though, the administrator can adjust those limits if needed.
+Liu's solution does not implement the low limits (the minimum amount of
+memory that is guaranteed to the group), and is based heavily on reclaim to
+enforce the limits.
+<p>
+Either series seems capable of solving the core problem, but the
+maintainers will certainly not want to merge both of them.  Michal Hocko <a
+href="/ml/all/aoQT45_Vu8KZ9rjk@tiehlicka/">asked</a> about the differences
+between the two, while expressing doubt about the goal of adding tier-level
+control.  Hahn, too, <a
+href="/ml/all/20260818154954.805958-1-joshua.hahnjy@gmail.com/">asked about
+the differences</a>, noting that the ability to set per-tier limits in
+Liu's series seemed to be the biggest of those.  Liu <a
+href="/ml/all/20260819132211.366064-1-liuqiqi@kylinos.cn/">responded</a>
+with a more detailed look at the two, and concluded by saying that Hahn's
+approach seemed like the best one to carry forward.  So, while the question
+of whether the kernel should really gain tier-level control in the memory
+controller still needs to be answered, there does appear to be agreement
+among the interested developers on how to get there.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Tiered-memory systems</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1092001/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1092569"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Elegant solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2026 11:17 UTC (Fri)
+                               by <b>aviallon</b> (subscriber, #157205)
+                              [<a href="/Articles/1092569/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aviallon" />
+                <input type="hidden" name="return" value="/Articles/1092001/#CommAnchor1092569" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This really does seem like a very nice solution.<br>
+<p>
+I'd love, however, to be able to give a particular cgroup higher DRAM ratio, or lower if needed.<br>
+<p>
+But that can come in a second time, I guess. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1092569/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1092665"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not swap infrastructure?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2026 14:34 UTC (Fri)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/1092665/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k3ninho" />
+                <input type="hidden" name="return" value="/Articles/1092001/#CommAnchor1092665" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I didn't see questions about using swap infrastructure, including swapability, and adding an interface for cgroups to allow setting preferences for swapping out cgroups to CXL memory and/or NV storage.<br>
+<p>
+With these patches, can I use swap as the slower tier?<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1092665/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1092749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not swap infrastructure?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2026 12:17 UTC (Sun)
+                               by <b>gmprice</b> (subscriber, #167884)
+                              [<a href="/Articles/1092749/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gmprice" />
+                <input type="hidden" name="return" value="/Articles/1092001/#CommAnchor1092749" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Swap infrastructure works fundamentally differently - it places software entries into the page tables, which causes software to fault on access and migrate the data out of the device.<br>
+<p>
+Tiering by contrast simply migrates the pages to a different numa node but otherwise leaves the page table entries alone.<br>
+<p>
+You can do what you want today with cgroup memcontrols (cpus.mems), and if you configure the CXL memory in ZONE_MOVABLE it will only migrate the user data there (leaving kernel data in dram).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1092749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

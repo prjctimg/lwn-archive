@@ -1,0 +1,251 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>In search of faster this_cpu operations [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="In search of faster this_cpu operations">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's this_cpu operations are meant to speed access to per-CPU variables.  They are more [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1072731/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>In search of faster this_cpu operations</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 19, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+The kernel's <a
+href="https://docs.kernel.org/core-api/this_cpu_ops.html">this_cpu
+operations</a> are meant to speed access to per-CPU variables.  They are
+more optimal on some CPUs than others, though.  During a
+memory-management-track session at the 2026 <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a>, Yang Shi proposed a
+fundamental, and somewhat controversial, change to how these operations
+work in order to provide better performance on a wider range of architectures.
+<p>
+<a href="/Articles/1073398/"><img
+src="../_static/images/conf/2026/lsfmm/YangShi-sm.png" alt="[Yang Shi]"
+title="Yang Shi" class="rthumb"></a>
+
+Per-CPU variables are organized as an array, indexed by CPU number, with
+each CPU's data being placed in a separate cache line; that allows CPUs to
+access their private data without locking overhead or contention from other
+CPUs.  On the x86 architecture, a per-CPU access is implemented by
+prefixing the relevant instruction with a segment register, creating a
+single-instruction operation that executes atomically.  Other
+architectures, including Arm, lack segment registers and, as a result, have
+a more complicated implementation.  In particular, the calculation of the
+address and the access of the data behind that address must be done
+separately, turning a per-CPU access into a multi-instruction sequence.
+<p>
+That is a significant difference.  If a multi-instruction sequence is
+preempted partway through, the newly running thread could access the same
+variable, leading to all sorts of unpleasant behavior.  Migration of the
+thread could lead to cross-CPU access, which is also undesirable.  To
+prevent these scenarios, the this_cpu operations must disable preemption on
+the affected architectures, which hurts performance.
+<p>
+Shi's proposal is to reimplement per-CPU variables so that any given
+variable has the same address on every CPU, using per-CPU page tables to
+make that work.  That would eliminate the index calculation and preemption
+would no longer be a problem.  The only problem with this scheme is that
+it would break the <tt>per_cpu_ptr()</tt> macro that is used to initialize
+data across all CPUs.  To solve that problem, per-CPU variables would be
+mapped twice.  The existing global mapping would be retained and used for
+initialization; a second mapping would be specific to each CPU.
+<p>
+Jason Gunthorpe pointed out that, in the past, Linus Torvalds has been
+strongly opposed to using per-CPU page tables in this way.  If his concerns
+are not addressed, Gunthorpe said, this work will not go far.  The
+objection seems to be based on the difficulty of correctly managing
+translation lookaside buffer (TLB) entries associated with those addresses;
+there was some discussion about whether that situation has improved with
+more recent architecture revisions.  It was also pointed out that, while
+this scheme would eliminate the need to disable preemption in some
+situations, any sort of update involving more than one instruction would
+still need to be executed with preemption disabled.
+<p>
+Shi continued, saying that the new implementation does have a cost in the
+form of higher address-space usage; that cost appears to be small, though.
+The per-CPU page tables will need to occupy physical memory; he said that
+cost is about 2MB on a 160-core machine.  Some extra page-table operations
+are needed for the allocation and freeing of per-CPU variables.  There may
+also be a need to allocate a dedicated range of virtual address space,
+which could be a problem on 32-bit machines.
+<p>
+Performance benchmarks were run on a 160-core Arm system; the key
+kernel-build benchmark showed a 13-18% reduction in system time, and ran in
+3-7% less wall-clock time.  The <a
+href="https://wiki.ubuntu.com/Kernel/Reference/stress-ng">stress-ng
+benchmarks</a> showed significant improvements as well.  Brendan Jackman
+expressed surprise at how large those numbers were; avoiding the need to
+disable preemption does not seem like enough to explain the difference.
+Some more investigation into the cause of the speedups is indicated, he
+said.
+<p>
+As time ran out, Ryan Roberts wondered if the <a
+href="/ml/all/20260223163843.GR1282955@noisy.programming.kicks-ass.net/">in-kernel
+restartable-sequences work</a> from Peter Zijlstra might be an alternative
+solution to this problem; Shi was not familiar enough with that work to
+say.  Shi did say that the per-CPU page tables could, in the future, also
+be used for replication of the kernel text across NUMA nodes, providing
+local access across the system.  Jackman said that they could make his
+proposed "mermap" (which was <a href="1072367.html">discussed</a>
+earlier in the conference) work better as well.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Per-CPU variables</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1073395/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1073587"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-CPU PGDs...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2026 19:37 UTC (Tue)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/1073587/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lionel_Debroux" />
+                <input type="hidden" name="return" value="/Articles/1073395/#CommAnchor1073587" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's precedent for using per-CPU PGDs on Linux: PaX and therefore grsecurity have been using per-CPU PGDs, primarily beneath their KERNEXEC (~ x86 SMEP / ARM PXN, without hardware dependencies) and MEMORY_UDEREF (~ x86 SMAP / ARM PAN, again without hardware dependencies) anti-exploitation features, since well over a decade ago, long before CPUs grew some hardware acceleration: there are already occurrences of "PER_CPU_PGD" in a '2010 grsec patch I have lying around.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073587/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1073601"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Does using per-CPU variables in preemptable code make sense?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2026 4:20 UTC (Wed)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1073601/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1073395/#CommAnchor1073601" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I thought that disabling preemption around per-CPU variable access was the caller’s job.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073601/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1073765"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Does using per-CPU variables in preemptable code make sense?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2026 21:57 UTC (Wed)
+                               by <b>yang.shi</b> (subscriber, #133088)
+                              [<a href="/Articles/1073765/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="yang.shi" />
+                <input type="hidden" name="return" value="/Articles/1073395/#CommAnchor1073765" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are two flavors of percpu ops. this_cpu_*() and __this_cpu_*(). It is caller's job to disable preemption for __this_cpu_*(), but this_cpu_*() needs to disable preemption by themselves.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073765/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

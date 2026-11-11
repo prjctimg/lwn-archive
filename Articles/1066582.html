@@ -1,0 +1,449 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Removing read-only transparent huge pages for the page cache [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Removing read-only transparent huge pages for the page cache">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Things do not always go the way kernel developers think they will.  When the kernel gained supp [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1066923/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Removing read-only transparent huge pages for the page cache</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 10, 2026</br>
+           </div>
+Things do not always go the way kernel developers think they will.  When
+the kernel gained support for the creation of read-only transparent huge
+pages for the page cache in 2019, the developer of that feature, Song Liu,
+added <a
+href="https://elixir.bootlin.com/linux/v6.19.11/source/mm/Kconfig#L956">a
+<tt>Kconfig</tt> file entry</a> promising that support for writable huge
+pages would arrive "<q>in the next few release cycles</q>".  Over six years
+later, that promise is still present, but it will never be fulfilled.
+Instead, the read-only option will soon be removed, reflecting how the core
+of the memory-subsystem has changed underneath this particular feature.
+<p>
+The transparent huge pages (THP) feature automatically collects base pages
+into 2MB (on Intel processors) huge pages.  Use of huge pages can be
+beneficial as a way of reducing memory-management overhead and (especially)
+the load on the CPU's translation lookaside buffer (TLB), but only if most
+of the memory contained within the huge pages is actually used.  Initially,
+the THP feature only worked with anonymous memory (program data and such),
+leaving file-backed memory untouched.
+<p>
+There are advantages to using huge pages for file-backed memory as well,
+though, for all of the same reasons, but implementing that support was a
+harder task.  The page cache at that time was true to its name, in that it
+was focused on the caching of individual base pages; there was no huge-page
+awareness at that level.  So, for many years, THP was limited to anonymous
+memory.
+<p>
+Liu's <a
+href="https://lore.kernel.org/all/20190801184244.3169074-1-songliubraving@fb.com/">2019
+patch series</a> sought to change that situation — partly, at least.  This
+series modified the <tt>khugepaged</tt> kernel thread, which is tasked with
+coalescing base pages into huge pages in the background, giving it the
+ability to do the same with file-backed pages.  The page cache remained
+almost entirely unaware of this work happening behind its back.  Even in
+this case, though, support was limited; since writing to a THP introduced a
+number of additional complications, that case was simply disallowed.
+Indeed, only virtual memory areas marked with <tt>VM_DENYWRITE</tt> were
+considered for THP merging.  The only way to set that flag is to create an
+executable text section with <a
+href="https://man7.org/linux/man-pages/man2/execve.2.html"><tt>execve()</tt></a>,
+simply creating a read-only mapping is not enough, so this feature was
+limited to memory containing executable text — which is one place where it
+was expected to do some good.  Even for text, THP merging does not happen by
+default; an <a
+href="https://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>
+call is needed to enable it.
+<p>
+An interesting problem arises if some process opens a file for write access
+while read-only THPs have been created for that file.  In that case, the
+kernel simply kicks all of the file's pages out of the page cache, then
+starts fresh using only base pages.  The feature was marked "experimental"
+at the time, awaiting the write support that, we were promised, was just on
+the horizon.  But that support never materialized, and the configuration
+variable controlling this feature, <tt>CONFIG_READ_ONLY_THP_FOR_FS</tt>, is
+still marked experimental.  Even so, a number of distributions enable it.
+<p>
+It is not surprising for a kernel developer to take a bit longer than
+expected to finish a project, but six years still seems like a fairly long
+time.  One can speculate as to why Liu, who remains active in kernel
+development, never quite got around to tackling the trickiest parts of this
+problem, but the fact is that it never happened, though Collin Fijalkovich
+did manage to merge <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=eb6ecbed0aa2">a
+tweak</a> that allowed the creation of THPs for shared-library code as
+well.  A global pandemic and changes of priorities may well have played
+into this course of events, but there was another significant change in its
+nascent stage at that time.
+<p>
+In December 2020, Matthew Wilcox <a href="849538.html">introduced the
+folio concept</a>; initially, a folio was just a more efficient way of
+handling <a href="619514.html">compound pages</a> in the
+memory-management subsystem, but it quickly became evident that folios were
+rather more widely applicable than that.  Specifically, they have evolved
+into the kernel's way of managing compound pages of just about any size,
+from a single base page to truly huge pages.  They have become the solution
+to the longstanding problem of managing memory in larger units when it is
+more efficient to do so, without the significant memory waste due to
+internal fragmentation that would come from using larger pages everywhere.
+<p>
+In recent years, quite a bit of effort has been put into transforming the
+kernel's page cache into a folio cache (even though the name remains
+unchanged).  It is now capable of handling folios of many sizes.  Among the
+many improvements this change has enabled is making it easier to perform
+large transfers to and from block devices.  For years, the kernel was
+unable to handle filesystems with a block size larger than the system's
+base-page size; now <a href="1009548.html">that capability
+exists</a>, for some filesystems at least.  On some systems, the TLB can
+efficiently handle translations for blocks of eight or 16&nbsp;pages; the
+page cache can now work with those blocks (often called multi-size THPs, or
+mTHPs).
+<p>
+Evolving the page cache to naturally manage large folios seems like a
+better solution than cobbling together THPs behind the page cache's back,
+so it is not surprising that, in recent years, there has not been a lot of
+interest in extending the older THP work.  Instead, development energy has
+gone into improving support for folios.  So it was, in retrospect, only a
+matter of time before somebody came along with a plan to remove the
+<tt>CONFIG_READ_ONLY_THP_FOR_FS</tt> code; that task <a
+href="/ml/all/20260327014255.2058916-1-ziy@nvidia.com">fell to Zi Yan</a>
+in late March.  Yan's series removes the configuration option and, instead,
+enables the creation of read-only THPs for pages backed by a filesystem
+that can handle folios up to the traditional huge-page size.
+<p>
+This idea is popular with the memory-management developers, who see the
+current implementation as a hack that has served its time.  There is a
+small problem, though, as <a
+href="/ml/all/20260330160942.173324-1-r@hev.cc">pointed out</a> by Rui
+Wang: not all filesystems support folios of that size.  In fact, few
+filesystems do; this support is limited to XFS and, in some configurations,
+ext4.  For any other situation, Wang said, this change could create
+significant performance regressions; it should perhaps be delayed until
+filesystem-level support has improved further.
+<p>
+Wilcox, though, <a
+href="/ml/all/acqinu8H5jo3Zw7b@casper.infradead.org/">seems willing</a> to
+pay that price:
+<p>
+<blockquote class="bq">
+	If we leave this fallback in place, we'll never get filesystems to
+	move forward.  It's time to rip off this bandaid; they've got eight
+	months before the next stable kernel.  I've talked to them about it
+	for years.
+</blockquote>
+<p>
+Memory-management developer David Hildenbrand <a
+href="/ml/all/b6596c2c-94de-43f4-b30c-c9361d55e3b8@kernel.org/">agreed</a>,
+and filesystem developer Darrick Wong <a
+href="/ml/all/20260401145357.GL6202@frogsfrogsfrogs/"><i>seemed</i> to
+agree</a> as well.  Only Wang has supported the idea of keeping this
+feature in place for longer.
+<p>
+It is unusual for developers of one subsystem to attempt to force a change
+elsewhere in the kernel in this way, but it is not entirely unprecedented.
+But, if this change goes through, it will indeed cause performance
+regressions for some users, most of whom are in no position to add the
+needed support to their filesystem and may turn out to be a bit disgruntled
+about having been caught in the crossfire.  It seems that this outcome
+would be best avoided if possible.  As it happens, the Linux Storage,
+Filesystem, Memory Management, and BPF Summit is the ideal place for all of
+the relevant developers to discuss a change like this; the <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">next summit</a> happens
+in early May.  With luck, the outcome will be a plan that everybody
+involved can live with.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Folios</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Huge pages</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1066582/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1067225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MADV_COLLAPSE support? </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2026 14:33 UTC (Fri)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/1067225/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andresfreund" />
+                <input type="hidden" name="return" value="/Articles/1066582/#CommAnchor1067225" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right now support for MADV_COLLAPSE seems to, at least for some file systems, be tied to CONFIG_READ_ONLY_THP_FOR_FS.  In my experiments the gains for using huge pages for code can be quite large (e.g. for postgres it can be a 15% increase in read only OLTP) and can't easily be achieved in other ways (you can remap to manually allocated huge pages, but it's fragile as hell and breaks some tooling, binary layout optimization can help some).<br>
+<p>
+Last time I checked, a few months ago,  MADV_COLLAPSE seemed to require CONFIG_READ_ONLY_THP_FOR_FS, even for xfs, despite its support for large folios. Possible that I did something wrong or hit momentary breakage (I did find a thread reporting one sometimes need to retry, but that didn't help).<br>
+<p>
+The other reason to care about MADV_COLLAPSE support, rather than just performance improvement, is that sometimes ending up with huge pages, sometimes not, makes for hellish benchmarking. Particularly because the older binary often ends up with more large pages than a freshly compiled one. <br>
+<p>
+So: Wither MADV_COLLAPSE?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1067229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MADV_COLLAPSE support? </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2026 14:37 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1067229/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1066582/#CommAnchor1067229" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I don't have time to dig in to verify it now but ... the patch series itself essentially replaces <tt>CONFIG_READ_ONLY_THP_FOR_FS</tt> checks with "can the filesystem do PMD-size folios?" checks.  So I am guessing that <tt>MADV_COLLAPSE</tt> should work as expected.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1067231"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MADV_COLLAPSE support? </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2026 15:07 UTC (Fri)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/1067231/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andresfreund" />
+                <input type="hidden" name="return" value="/Articles/1066582/#CommAnchor1067231" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah. That'd mean it'd be more widely usable than before. That'd be great.   I asked a clarification question on the thread...<br>
+<p>
+Thanks for the article and response!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067231/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1067230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writable THPs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2026 15:12 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1067230/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1066582/#CommAnchor1067230" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think Song Liu ever intended to make filesystem-oblivious writable THPs work.  The intent (at least from my side!) was always to make filesystems support arbitrary-sized "pages" ... which turned into folios when it became apparent that we needed a way to distinguish PAGE_SIZE pages from allocated chunks of memory.  So I think it's fair to see "folios now exist" as being the fulfillment of "writable huge pages".<br>
+<p>
+Song's patches were an important part of the process of getting folios going.  It's not the order I would have done it in, but since Song had already done it, it got some of the infrastructure in place that we needed.  We cooperated on this work, after the session at the 2019 LSFMM (<a href="789159.html">https://lwn.net/Articles/789159/</a>) we started a fortnightly phone call which continues to this day (although Song no longer participates).<br>
+<p>
+By the way, the page cache was already aware of THPs before Song's patches.  shmem supported THPs.  It was really filesystems that were (and remain!) the limiting factor.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1067342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Block size</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2026 9:28 UTC (Mon)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1067342/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1066582/#CommAnchor1067342" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Filesystem block size are much less smaller than a huge page, for example xfs max block size is 64KiB. So this will generate much more TLB entries than a huge page of 2MiB. Maybe this won't have any impact in practice but it seems odd to target the block size. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1067482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Block size</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2026 18:00 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1067482/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1066582/#CommAnchor1067482" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you're confused (the article did talk about two things in the same paragraph, rather than splitting them into separate paragraphs).<br>
+<p>
+Folios can contain multiple pages. That has enabled both:<br>
+<p>
+1. Support for block sizes larger than page size<br>
+<p>
+2. Support for using PTEs (and thus TLB entries) which describe chunks of memory intermediate in size between a single page and a PMD size.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1067485"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Block size</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2026 18:08 UTC (Mon)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1067485/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1066582/#CommAnchor1067485" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks, I didn't understand the two use cases. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067485/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,431 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Capsicum: practical capabilities for UNIX [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Capsicum: practical capabilities for UNIX">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The Capsicum capabilities framework has been around for a couple of years now, and support for [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/481903/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Capsicum: practical capabilities for UNIX</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>February 22, 2012</br>
+           </div>
+<p>
+The Capsicum capabilities framework has been around for a couple of years
+now, and support for it was <a
+href="http://www.freebsdfoundation.org/press/FreeBSD%209.0%20Announcement.shtml">added</a>
+to the recent FreeBSD 9.0 release.  Capsicum takes a very different
+approach from other capabilities systems (like Linux capabilities or POSIX
+capabilities), and is geared toward sandboxing applications to limit the
+damage that can be caused by buggy or misbehaving programs.  While the
+FreeBSD support is "experimental", it is available for researchers and
+others to try out.
+</p>
+
+<p>
+Capsicum came out of a collaboration between the University of Cambridge's
+Computer Laboratory and Google.  That resulted in a prototype
+implementation for FreeBSD along with modification of several different
+programs to take advantage of Capsicum.  One of the main applications of
+interest is the Chromium web browser, but several FreeBSD utilities
+(<tt>tcpdump</tt>, <tt>dhclient</tt>, and <tt>gzip</tt>) were also converted, as described in the <a
+href="http://www.cl.cam.ac.uk/research/security/capsicum/papers/2010usenix-security-capsicum-website.pdf">Capsicum
+paper [PDF]</a>. 
+</p>
+
+<p>
+The idea behind Capsicum is to extend the standard Unix APIs by adding ways
+that applications can "self-compartmentalize".  Essentially, applications
+can choose to restrict themselves to a sandbox that will disallow many
+"dangerous" operations, while still allowing them to get their job done via
+the capabilities they allow for themselves or those that are passed in
+using special file descriptors (which are also, perhaps unfortunately,
+called capabilities).  It is, in some ways, conceptually similar to
+programs that drop their privileges using the <tt>setuid()</tt> call but,
+instead of being restricted to what a particular user is allowed to do
+(which is often far more than the application needs), Capsicum allows much
+finer-grained control over what restrictions are in place.
+</p>
+
+<p>
+The starting point for a Capsicum-enabled process is the new
+<tt>cap_enter()</tt> system call.  This is a one-way gate that puts a
+process and any subsequent children into "capability mode".  It turns off
+"ambient authority", which is a term for the normal Unix process model where a process has all of the
+permissions of the UID it is running as.  Capability mode restricts access to any of the global
+namespaces, like the filesystem namespace, PID namespace, network
+namespace, and others. Any system calls that operate on these global
+namespaces are either disallowed entirely, or their arguments are constrained.
+</p>
+
+<p>
+For example, the <tt>sysctl()</tt> call is constrained to only allow around
+30 (of a possible 3000) of the different system parameters to be examined
+via that call.  The shared memory creation call, <tt>shm_open()</tt>, is
+only allowed to create anonymous memory objects, while the
+<tt>openat()</tt> family is restricted to allow access to files at or below
+the directory file descriptor passed in (by essentially disallowing "/" or
+".." at the start of the path).  There are some other miscellaneous
+restrictions that come with capability mode including disallowing the
+loading of kernel modules or the execution of setuid and setgid binaries.
+</p>
+
+<p>
+Capsicum wraps normal file descriptors with additional capability
+information that restricts what can be done with the file.  If
+a capability file descriptor has the <tt>CAP_READ</tt> capability, that's all that can
+be done to it, 
+unlike a file descriptor for a file that is opened read-only which can still be used to
+make metadata changes (via <tt>fchmod()</tt> for example). In order to
+change positions in the file, the <tt>CAP_SEEK</tt> capability is
+required.  A capability file descriptor can also wrap a directory file descriptor, which allows the
+capability set to be applied to all members of that directory.  That would
+allow Apache to set up workers that only have access to a certain subset of
+the web directory hierarchy, or for a sandboxed application to access a
+library path, for example.
+</p>
+
+<p>
+The capability file descriptors can be already open at the time that
+<tt>cap_enter()</tt> is called (and wrapped by a set of capabilities
+specified in an earlier <tt>cap_new()</tt> call) or passed to the process
+using Unix sockets. That means that a fairly simple program can decrease
+its ability to cause harm by setting up the file descriptors it needs and
+then calling <tt>cap_enter()</tt> before performing more "dangerous"
+operations.  The <tt>tcpdump</tt> example given in the paper is
+instructive, as it simply enters capability mode after setting up the packet
+filter (which is a privileged operation), but before entering the
+processing loop.  That way, errors in the packet decoding code are very
+limited in the kind of damage they can cause.
+</p>
+
+<p>
+The simple two-line change to <tt>tcpdump()</tt> did expose a few problems,
+however.  For example the glibc DNS resolver code requires access to the
+filesystem (<tt>/etc/resolv.conf</tt>) and to the network namespace (to
+talk to the DNS server), which led to reduced functionality.  Switching
+<tt>tcpdump</tt> to use a lightweight local resolver restored that feature.
+</p>
+
+<p>
+In addition to the "raw" Capsicum interface using <tt>cap_enter()</tt>, the
+framework provides a <tt>libcapsicum</tt> that can be used to more
+thoroughly isolate the sandboxed processes without each application having
+to do its own start-up management of a sandboxed process.  It handles
+closing all undelegated file descriptors (those that are not meant for the
+sandbox), forking the new sandboxed
+process, flushing the address space using <tt>fexecve()</tt>, and setting
+up a Unix socket that can be used for communication between the privileged
+and unprivileged processes.  None of the examples in the paper use
+<tt>libcapsicum</tt> as it generally requires major changes to the
+application in order to be used, so it may be more suitable for new
+development.   
+
+<p>
+The examples do show that substantial
+improvements in the security of programs can be had with minimal code
+changes, though.  Roughly 100 new lines of code were all that was required
+to use Capsicum in Chromium on FreeBSD, largely because the browser was
+written with privilege separation in mind.  Chromium already uses various
+techniques, depending on the OS, to separate the rendering process from other renderers and the
+rest of the browser.  That made it fairly straightforward to adapt Chromium
+and the paper says that switching to a <tt>libcapsicum</tt>-based
+implementation should not be significantly harder.
+</p>
+
+<p>
+Capsicum is an interesting idea that bears watching as it rolls out in
+FreeBSD.  The 9.0 release only contains the kernel changes required for
+Capsicum but doesn't ship any applications that use the facility.  9.1 is
+slated to have some of those, presumably starting with Chromium.  Beyond
+this brief introduction, those interested should take a look at the paper, <a
+href="http://www.cl.cam.ac.uk/research/security/capsicum/papers/2010usenix-login-capsicum.pdf">this
+article [PDF]</a> from <i>;login:</i> magazine, as well as the <a
+href="http://www.cl.cam.ac.uk/research/security/capsicum/documentation.html">documentation page</a>.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">BSD</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Capabilities</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/482858/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor483341"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capsicum: practical capabilities for UNIX</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 23, 2012 18:36 UTC (Thu)
+                               by <b>ThinkRob</b> (guest, #64513)
+                              [<a href="/Articles/483341/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ThinkRob" />
+                <input type="hidden" name="return" value="/Articles/482858/#CommAnchor483341" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But... but I thought FreeBSD was dying!<br>
+<p>
+Kidding aside, this is a fascinating and welcome improvement to FreeBSD.  It'll be interesting to see how it stacks up against seatbelt on OS X, particularly with regards to use restricting applications that *weren't* written with capabilities restriction in mind.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/483341/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor483347"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capsicum: practical capabilities for UNIX</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 23, 2012 18:41 UTC (Thu)
+                               by <b>giggls</b> (subscriber, #48434)
+                              [<a href="/Articles/483347/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giggls" />
+                <input type="hidden" name="return" value="/Articles/482858/#CommAnchor483347" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As this is indeed very interesting stuff and with lwn beeing a Linux site after all: Any chance that somebody will port this to Linux?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/483347/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor483504"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capsicum: practical capabilities for UNIX</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2012 0:13 UTC (Fri)
+                               by <b>tobiasu</b> (subscriber, #72521)
+                              [<a href="/Articles/483504/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tobiasu" />
+                <input type="hidden" name="return" value="/Articles/482858/#CommAnchor483504" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Afair Google Chrome developers have made a Linux port. Whether it's public already I don't know.<br>
+<p>
+For those interested here is the USENIX talk about Capsicum: <a href="https://www.youtube.com/watch?v=raNx9L4VH2k">https://www.youtube.com/watch?v=raNx9L4VH2k</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/483504/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor505818"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capsicum: practical capabilities for UNIX</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2012 1:08 UTC (Sun)
+                               by <b>jbytau</b> (guest, #75301)
+                              [<a href="/Articles/505818/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jbytau" />
+                <input type="hidden" name="return" value="/Articles/482858/#CommAnchor505818" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+here's a repo from google<br>
+<p>
+<a rel="nofollow" href="https://git.chromium.org/gitweb/?p=chromiumos/third_party/kernel-capsicum.git;a=shortlog;h=refs/heads/capsicum">https://git.chromium.org/gitweb/?p=chromiumos/third_party...</a> <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/505818/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor483935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capsicum: practical capabilities for UNIX</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2012 2:34 UTC (Mon)
+                               by <b>zooko</b> (guest, #2589)
+                              [<a href="/Articles/483935/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zooko" />
+                <input type="hidden" name="return" value="/Articles/482858/#CommAnchor483935" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thank you for writing an informative and readable article on an interesting Free/Open Source technology regardless of whether it runs on Linux.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/483935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor585819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capsicum: practical capabilities for UNIX</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2014 21:55 UTC (Wed)
+                               by <b>rdahlgren</b> (guest, #95523)
+                              [<a href="/Articles/585819/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rdahlgren" />
+                <input type="hidden" name="return" value="/Articles/482858/#CommAnchor585819" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For anyone else finding this article on or after February 2014, a port of the Linux kernel with Capsicum support is available here -&gt; <a rel="nofollow" href="https://github.com/google/capsicum-linux">https://github.com/google/capsicum-linux</a><br>
+<p>
+Additionally, a test-suite is available to verify that your newly built capsicum kernel is functioning as designed -&gt; <a rel="nofollow" href="https://github.com/google/capsicum-test">https://github.com/google/capsicum-test</a><br>
+<p>
+Finally, a fledgling IRC channel is available on Freenode at #capsicum<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/585819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor642960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capsicum Implementation Status: Linux and FreeBSD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2015 10:02 UTC (Sat)
+                               by <b>xose</b> (subscriber, #535)
+                              [<a href="/Articles/642960/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="xose" />
+                <input type="hidden" name="return" value="/Articles/482858/#CommAnchor642960" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a rel="nofollow" href="http://capsicum-linux.org/">http://capsicum-linux.org/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/642960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

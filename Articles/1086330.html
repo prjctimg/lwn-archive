@@ -1,0 +1,1174 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The beginning of a process-builder API [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The beginning of a process-builder API">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The recent discussion on 'spawn templates' raised questions about whether it was time to provid [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1086135/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The beginning of a process-builder API</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 4, 2026</br>
+           </div>
+The recent <a href="1076018.html">discussion on "spawn templates"</a>
+raised questions about whether it was time to provide an alternative to the
+classic Unix <tt>fork()</tt>/<tt>exec()</tt> pattern for process creation.
+One idea that was raised there was to shift the template pattern into an
+interface that could be used to efficiently assemble new processes from
+bare cloth, without duplicating the parent process.  Preferably, that
+interface would be able to implement <a
+href="https://man7.org/linux/man-pages/man3/posix_spawn.3.html"><tt>posix_spawn()</tt></a>.
+Li Chen, the author of the spawn-template work, has now responded with <a
+href="/ml/all/cover.1784204592.git.me@linux.beauty">a patch series</a>
+(written with significant LLM assistance) showing what a process-builder
+API for Linux might look like.
+<p>
+In the Unix model, a call to <tt>fork()</tt> (which ends up being a variant
+of <a
+href="https://man7.org/linux/man-pages/man2/clone.2.html"><tt>clone()</tt></a>
+on Linux systems) creates a copy of the calling process, which involves a
+fair amount of work.  The child then typically modifies its
+environment in whatever ways are necessary — opening or closing files, for
+example — before making a call to <a
+href="https://man7.org/linux/man-pages/man2/execve.2.html"><tt>execve()</tt></a>
+to run a new program.  That latter call ends up throwing away most of the
+work that was done to copy the parent process, which is not entirely
+efficient.  In cases where the intent is to immediately run a different
+program, a better model might be to piece together the new process from the
+beginning, without involving (much of) the parent process's state.
+<p>
+<!-- middle-ad -->
+<h4>Process creation</h4>
+<p>
+In Chen's patch series, the way to do that is to start by creating an empty
+process with a call to the existing <a
+href="https://man7.org/linux/man-pages/man2/pidfd_open.2.html"><tt>pidfd_open()</tt></a>
+system call:
+<p>
+<pre>
+    new_process_fd = pidfd_open(0, PIDFD_EMPTY);
+</pre>
+<p>
+The new <tt>PIDFD_EMPTY</tt> flag requests the creation of a process shell
+that will have its details filled out later.  The return value is a real
+pidfd, but most of the resources associated with a process are not yet
+present.  There is no process ID, no task structure in the kernel, and no
+charge against the parent's process-count resource limit.  Most kernel
+operations that act on a pidfd will refuse to do anything with this one at
+this stage.
+<p>
+The next step is to put together the information that drives the
+construction of the new process; this work is centered around this
+structure:
+<p>
+<pre>
+    struct pidfd_spawn_run_args {
+	__u32 flags;
+	__u32 nr_actions;
+	__aligned_u64 path;
+	__aligned_u64 argv;
+	__aligned_u64 envp;
+	__aligned_u64 actions;
+	__u32 action_size;
+	__u32 reserved0;
+	__u64 reserved[2];
+    };
+</pre>
+<p>
+The <tt>path</tt> field is a pointer to a string containing the path to the
+executable that the new process should run; as described below, it can be
+<tt>NULL</tt> in some cases.  The <tt>argv</tt> and <tt>envp</tt>
+parameters point to the usual argument and environment arrays.  The
+<tt>flags</tt> field must be zero, as must the reserved fields.  Filling in
+those fields (the rest will be covered shortly) provides enough information
+to build and run the process with a call to the first of two new system
+calls:
+<p>
+<pre>
+    int pidfd_spawn_run(int pidfd, struct pidfd_spawn_run_args *args, int arg_size);
+</pre>
+<p>
+Here, <tt>pidfd</tt> is the pidfd for the under-construction process,
+<tt>args</tt> is a pointer to the above structure, and <tt>arg_size</tt> is
+the size of that structure.  If all goes well, this call will create the
+full process and set it running with the indicated program; the return
+value will be the ID of the now fully fleshed-out process.  The original
+pidfd remains valid and attached to this process.  Should some sort of
+error happen, instead, the process shell will be left in a sort of dead
+state, and any further attempts to operate on it will fail.
+<p>
+<h4>Configuration</h4>
+<p>
+Providing an executable image, arguments, and environment is normally just
+the beginning of configuring a new process; a typical application will want
+to set up the process's file descriptors and, perhaps, adjust many other
+things.  That is what the <tt>actions</tt> field of the
+<tt>pidfd_spawn_run_args</tt> structure is for.  It points to an array of
+this structure type:
+<p>
+<pre>
+    struct pidfd_spawn_action {
+	__u32 type;
+	__u32 flags;
+	__u32 fd;
+	__u32 newfd;
+	__u64 reserved[2];
+    };
+</pre>
+<p>
+The <tt>type</tt> field describes an action that should be carried out
+before the process is instantiated and launched.  The actions currently
+defined in this patch set (which are a small subset of what would eventually
+be needed) are: 
+<p>
+<ul class="spacylist">
+<li> <b><tt>PIDFD_SPAWN_ACTION_DUP2</tt></b>: duplicates an existing file
+     descriptor using <a
+     href="https://man7.org/linux/man-pages/man2/dup.2.html"><tt>dup2()</tt></a>.
+     The existing file descriptor should be passed in the <tt>fd</tt>
+     field, while the intended new descriptor goes in <tt>newfd</tt>.
+<li> <b><tt>PIDFD_SPAWN_ACTION_CLOSE_RANGE</tt></b>: closes the range of
+     file descriptors between <tt>fd</tt> and <tt>newfd</tt> (inclusive).
+<li> <b><tt>PIDFD_SPAWN_ACTION_FCHDIR</tt></b>: changes the new process's
+     working directory to the one identified by <tt>fd</tt>.
+</ul>
+<p>
+<tt>PIDFD_SPAWN_ACTION_CLOSE_RANGE</tt> allows the
+<tt>CLOSE_RANGE_CLOEXEC</tt> and <tt>CLOSE_RANGE_UNSHARE</tt> flags
+supported by the <a
+href="https://man7.org/linux/man-pages/man2/close_range.2.html"><tt>close_range()</tt></a>
+system call; <tt>flags</tt> must be zero for the other two actions.  The
+<tt>nr_actions</tt> field in the <tt>pidfd_spawn_run_args</tt> structure
+indicates how many actions are present, while <tt>action_size</tt> is the
+size of the <tt>pidfd_spawn_action</tt> structures.  These actions will be
+carried out before the executable image is located, meaning that changing
+the working directory affects how a relative path to that image is
+resolved.
+<p>
+If any of the actions fail at <tt>pidfd_spawn_run()</tt> time, the entire
+system call will fail and the new process will not be launched.
+<p>
+The second new system call is an alternative configuration interface for
+some aspects of the new process:
+<p>
+<pre>
+    int pidfd_config(int pidfd, unsigned int cmd, char *ukey, char *value,
+    		     int aux);
+</pre>
+<p>
+This system call is meant to be useful beyond the spawn functionality; in
+this patch set, though, it can only do one thing.  With a <tt>cmd</tt> of
+<tt>PIDFD_CONFIG_SET_STRING</tt>, it can set a string-based parameter to
+the given <tt>value</tt>.  The only such parameter in this set is
+<tt>PIDFD_CONFIG_KEY_PATH</tt>, which sets the path to the executable to
+run.  This call must be made if the <tt>path</tt> pointer passed to
+<tt>pidfd_spawn_run()</tt> will be <tt>NULL</tt>.  If a non-<tt>NULL</tt>
+path <i>is</i> passed to that system call, it will override a path
+configured with <tt>pidfd_config()</tt>.
+
+<p>
+<h4>What's missing</h4>
+<p>
+This series is meant to be a proof of the concept that would help the
+community decide whether the overall direction makes sense or not.  So it
+does not implement much of what would be wanted in the final result.  As
+mentioned above, the set of available actions is much smaller than it would
+eventually need to be.  To be able to implement <tt>posix_spawn()</tt>, the
+kernel would have to support actions to define signal handling, control
+scheduler parameters, open files, and more.  For the most part, these are
+just a matter of programming once the form of the desired interface is
+established.
+<p>
+The other big gap is that <tt>pidfd_spawn_run()</tt> does not actually
+create a new process from scratch; instead, the implementation is based on
+<tt>vfork()</tt> internally.  In theory, it should be possible to replace
+the implementation transparently, with the only change visible to user
+space being better performance, once the API is agreed upon.  In practice,
+that may not be a small job.  The kernel only ever creates two
+special-purpose processes (<tt>init</tt> and <tt>kthreadd</tt>) from
+scratch; the machinery to do that for the general case does not exist.
+That, too, is a matter of programming — perhaps a fair amount of it.
+<p>
+First, though, the API must be agreed upon.  The series was posted on
+July&nbsp;16, but has only garnered a single review comment as of this
+writing.  It will need to attract a lot more eyeballs before a fuller
+implementation can be considered.  A number of people have been asking for
+this kind of process-creation interface for years; now would be a good time
+for them to take a look to see whether this proposal is close to what they
+have in mind.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">System calls/clone()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1086330/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1087075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A better fork</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 14:06 UTC (Tue)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/1087075/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magfr" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087075" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This could, at a first glance, also serve as a better fork. A fork where you can set up file descriptors to be closed or renumbered atomically or perform all the other tasks if you just support a special action which replaces the current implicit action of "launch this file" with "return as fork would have done but only after all actions finished".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1087094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Should take an FD to the executable</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 14:10 UTC (Tue)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1087094/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087094" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The path field is a pointer to a string containing the path to the executable that the new process should run</span><br>
+<p>
+This really should also take an FD to the executable...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087114"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Should take an FD to the executable</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 14:27 UTC (Tue)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1087114/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087114" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; &gt; The path field is a pointer to a string containing the path to the executable that the new process should run</span><br>
+<span class="QuotedText">&gt; </span><br>
+<span class="QuotedText">&gt; This really should also take an FD to the executable...</span><br>
+<p>
+I tend to agree with this - but should that be restricted to only O_PATH fds referencing existing files on disk, or could one also consider e.g. a memfd (possibly requiring it to be sealed) where e.g. a JIT previously put the result of a run-time compilation? The latter could be quite useful in some circumstances (but also quite useful for hiding malware in non-obvious ways, so YMMV).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087114/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087620"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Should take an FD to the executable</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 7, 2026 9:27 UTC (Fri)
+                               by <b>justincormack</b> (subscriber, #70439)
+                              [<a href="/Articles/1087620/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="justincormack" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087620" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can already exec a memfd, you can pass the procfs path to the fd.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087620/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1087121"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Should take an FD to the executable</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 14:51 UTC (Tue)
+                               by <b>vetse</b> (subscriber, #143022)
+                              [<a href="/Articles/1087121/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vetse" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087121" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I recall an article about execveat causing problems with comm being set unhelpfully, which would presumably also happen here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087121/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Should take an FD to the executable</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 14:56 UTC (Tue)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1087122/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087122" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right, but I'd think also passing the path for displaying purposes should hopefully allow to set that properly<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1087131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More multiplexing, why?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 17:18 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1087131/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087131" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is yet another multiplexing syscall with its own set of quirks. Please, don't do that.<br>
+<p>
+It's _fine_ to do multiple syscalls. No need to cram everything into one giant call. Just allow the process to remain in the "spawning" state after `pidfd_spawn` and have a separate call to actually launch it.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087133"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More multiplexing, why?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 17:29 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1087133/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087133" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Agreed. We already have a good mechanism for running multiple system calls in a batch for performance: io_uring. We don't need *another* one.<br>
+<p>
+Also, ideally this shouldn't be starting from the parent set of file descriptors, or at least shouldn't *only* operate that way. Ideally, it should be able to start from nothing and install only the desired file descriptors.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087133/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087190"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More multiplexing, why?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 10:09 UTC (Wed)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/1087190/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k3ninho" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087190" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;We already have a good mechanism for running multiple system calls in a batch for performance: io_uring.</span><br>
+<p>
+I was under the impression that races and Time-of-Check/Time-of-Use windows drive the need for batched syscalls under the demand for increased security. Here, they need to be batched into transactions for clear fail-and-no-change or succeed-and-progress-forward goals.<br>
+<p>
+Maybe, I'm wrong there and my impression is wrong.<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087190/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More multiplexing, why?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 15:49 UTC (Wed)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1087379/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087379" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't even think you need something as sophisticated as io_uring. You could make a syscall that spawned an empty process with a few parameters:<br>
+<p>
+* envp<br>
+* argv<br>
+* location+length of statically linked binary (program loader), or filename/file descriptor perhaps<br>
+* location+length of data segment of instructions<br>
+* flags (ofcourse)<br>
+<p>
+Then the program loader could interpret the information in the data segment as a list of commands how to configure the new process. It could be passed data the same way the command are structured in io_uring, but it could be anything. You could make a special shell-like language specifically to configure new processes. It would still inherit a lot of state from the parent but no memory.<br>
+<p>
+Like:<br>
+<p>
+mapfd 3 1<br>
+close_range 3-<br>
+signal 15 clear<br>
+<p>
+... etc...<br>
+<p>
+Afterward the process would simply execve the actual target program. This requires only a single syscall to create an empty program with some data passed in. It's basically posix_spawn, but moving all the extra structs into a separate memory block to be processed by a userspace program. I think setuid/setcap are the only things that are not obvious.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1087150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More multiplexing, why?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 20:20 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1087150/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087150" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I've said on LKML over the years, I just don't get the undying fascination kernel people have with multiplexers and ioctls. I think there's an intuitive appeal to object-orientation, to hierarchical divisions of responsibility, and while this intuition is good *in general*, I think it hurts us in UAPI. System call numbers aren't precious.<br>
+<p>
+Also, you can still do *_ops structs and object-orientation with explicit system calls. You can have myobj_foo, myobj_bar, myobj_qux, etc. dispatch through ops structures even if they're exposed as separate top-level calls, so IMHO, there's no real tidiness advantage to a multiplexer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1087149"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 20:16 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1087149/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087149" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wholly support the goal of providing an extensible build-and-launch process API and encouraging its use over fork/exec and posix_spawn. But does the *kernel* need to provide this API?<br>
+<p>
+Imagine you had a special process-launch helper (say, a souped-up /usr/bin/env) that you could spawn, give process-building instructions, and, when done, let run? And this process would do all the environment configuration you wanted, then execve the final binary, reporting over an inherited pipe any errors in the setup process?<br>
+<p>
+ISTM the Linux kernel is already too big a TCB and that we'd do well to implement new functionality where possible in userspace and userspace libraries, leaving to the kernel the jobs only a privileged executive can do.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087149/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087152"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 21:05 UTC (Tue)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1087152/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087152" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I think this does need to be in kernelspace for both performance and functionality reasons.</p>
+<p>The <a href="1076018.html">previous discussion that inspired this one</a> was specifically about performance of code that spawns several helper processes, in the UNIX tradition of &quot;do one thing and do it well.&quot; If the way to make things work is to run a userspace helper that then execs the actual userspace binary, that will make things strictly slower from the status quo.</p>
+<p>On the functionality side, the only way you could have the userspace helper implement preserving/renumbering file descriptors is to have the helper inherit every single file descriptor and then choose which ones to close. This runs into the same problem as we currently have with the lack of O_CLOFORK, i.e., there is a period of time where another process on the system, marching at its own pace, has a file open because it happened to be open at the time that that process was spawned. Even if the parent process has since closed the file descriptor, the underlying file is still open. This impacts both things like when a flush to disk happens and also e.g. whether you can exec the file without running into ETXTBSY. A spawn-like syscall has the ability to atomically (from the perspective of userspace) create a new process that never has unwanted file descriptors open.</p>
+<p>(I guess you can technically get this right in userspace if you have a clone flag that only preserves stdio, and you redirect stdio to a UNIX socketpair, and you pass fds over that socket and have the helper install them in the right places. But that is complicated, and I also recently learned that it fails if you compile a kernel without networking support since sockets are networking.)</p>
+<p>We do already have fork/exec, which is actually very well designed under the constraint that you want all the complexity to be in userspace; it gets you full flexibility to run any syscall between fork and exec and to start with the entire parent process's state to borrow from as you wish. The goal of this new interface is to solve the problems that are unavoidable with that approach.</p>
+<p>BTW, I think there is a somewhat stronger argument to move execve into userspace. The only thing that it does right now that you can't really do from userspace is set /proc/self/exe correctly. Other than that, the task of opening a file, mapping in the executable segments, unmapping everything currently in memory, and jumping to the start address is pretty straightforward from userspace, and there are both complexity and functionality arguments for moving ELF parsing out of the kernel. (The obvious downside is now you get fun cases like running a static or emulated binary that doesn't know how to parse the executables in /usr/bin. If this functionality is in the kernel, it's guaranteed to be available to all processes equally easily.)</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087152/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 22:13 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1087156/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087156" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;I think this does need to be in kernelspace for both performance and functionality reasons.</span><br>
+<p>
+This sounds like the perfect job for by new invention which a abbreviate as:<br>
+BPFBPFBPF<br>
+<p>
+(BPF-Blazingly-Performant-Fast-Blanket-Process-Forking)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1087158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2026 22:19 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1087158/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087158" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it has to be a proper kernel API. Otherwise, it'll end up being unusable in generic code because of all the complexities of namespacing, labeling, privileges, etc.<br>
+<p>
+It will not be able to achieve all the same semantics purely in the userspace. And an "empty shell" process is an incredibly powerful primitive in its own right. I can see tons of possible use cases. <br>
+<p>
+For example, you can safely fill in the process environment (env vars, FDs, etc) in a privileged context without actually running it. Then you can pass the process descriptor to a confined runner that actually launches it with all the proper namespacing.<br>
+<p>
+I can also see eventually doing it in reverse, have a running process and create its suspended "snapshot". It would make the "zygote" pattern actually useful for processes with multiple threads.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 0:25 UTC (Wed)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1087165/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087165" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  unusable in generic code because of all the complexities of namespacing, labeling, privileges, etc.</span><br>
+<p>
+It continually disappoints me that the kernel has to do things that are really the job of userspace because in many domains in which Linux is used, userspace is so brittle and hard to modify that even linking to glibc is considered risky.<br>
+<p>
+I don't think I buy a performance argument for a kernel-mode process builder: you're running the dynamic linker interpreter anyway (all your binaries are PIE, right? Right??). The interpreter has to load the actual program anyway,  and I don't see why the interpreter couldn't be made to do a bit of process setup before transferring control to the main program. There are multiple ways to get correctness too.<br>
+<p>
+But deployment? Yeah, I can see how that can be hard in some godforsaken Kubernetes hell. That's a good, if tragic, ecological argument for doing this kernel-side. That said, I can't wait for ten years of being unable to use this feature because gvisor won't implement it or some provider has seccomp-ed out every system call invented since 1995.<br>
+<p>
+It shouldn't be this way. It doesn't have to be this way. And if I were building an OS from scratch, I'd strictly adhere to the rule that *everything* that could *plausibly* be outside the kernel *is* outside the kernel. But that's not the OS we have.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087183"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 8:46 UTC (Wed)
+                               by <b>pwfxq</b> (subscriber, #84695)
+                              [<a href="/Articles/1087183/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pwfxq" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087183" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; if I were building an OS from scratch, I'd strictly adhere to the rule that *everything* that could *plausibly* be outside the kernel *is* outside the kernel</span><br>
+<p>
+A micro-kernel?<br>
+<p>
+&lt;/sarcasm&gt;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087183/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1087184"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 8:52 UTC (Wed)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1087184/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087184" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It shouldn't be this way. It doesn't have to be this way. And if I were building an OS from scratch, I'd strictly adhere to the rule that *everything* that could *plausibly* be outside the kernel *is* outside the kernel. But that's not the OS we have.</span><br>
+<p>
+Welcome to Hurd. ;-)<br>
+<p>
+<a href="https://www.debian.org/ports/hurd/">https://www.debian.org/ports/hurd/</a><br>
+<a href="https://wiki.gentoo.org/wiki/Project:Hurd">https://wiki.gentoo.org/wiki/Project:Hurd</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087184/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1087412"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2026 1:55 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1087412/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087412" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's problematic to do 100% robustly without having true microkernel infrastructure.<br>
+<p>
+In particular, it's impossible to tell if the wrapper process crashed or if it was the target executable. And there's no reliable way to distinguish between stuck processes and just very slow processes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087412/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1087185"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The _one_ thing I'd like to see even in a microkernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 9:05 UTC (Wed)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1087185/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087185" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Imagine you had a special process-launch helper (say, a souped-up /usr/bin/env) that you could spawn, give process-building instructions, and, when done, let run? And this process would do all the environment configuration you wanted, then execve the final binary, reporting over an inherited pipe any errors in the setup process?</span><br>
+<p>
+You'd still need an additional syscall to spawn that helper program. (Otherwise you'd do the current fork/execve dance anyway, and then a helper doesn't improve your situation.)<br>
+<p>
+You'd need some form of IPC in order to get that process to do what you want, and that IPC has to be powerful enough to be able to transfer file descriptors from your process to that process. (One of the main things the proposed spawning API does is give the user control over which file descriptors are in the initial set of descriptors passed to the new program.)<br>
+<p>
+The operation itself would not be atomic - while the helper program is running, you do already have a subprocess, but if execve happens to fail in that program, that process ends, and error handling becomes way harder for the main process (especially if you have multiple threads and another thread has a general wait() running). Sure, that situation is the same as currently, but when designing something new you'd want to improve upon the existing.<br>
+<p>
+You have to rely on that helper program existing/working in the moment you want to create a process (unlike e.g. a shared library in userspace where starting your program doesn't start up if it's not available / broken), this makes this more error-prone.<br>
+<p>
+Finally, you'd still construct the helper program first, which definitely is a performance hit has compared to immediately starting the requested program.<br>
+<p>
+Even from a microkernel perspective, managing processes and memory management are _the_ two key features that a microkernel should provide in the kernel directly. I believe a specific "start a new process with the following resource configuration" functionality is _the_ one functionality that would belong in a microkernel, and not a userspace helper.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087185/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1088553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smelling blood in the water,</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 9:21 UTC (Thu)
+                               by <b>ksandstr</b> (guest, #60862)
+                              [<a href="/Articles/1088553/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ksandstr" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1088553" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Even from a microkernel perspective, managing processes and memory management are _the_ two key features that a microkernel should provide in the kernel directly. I believe a specific "start a new process with the following resource configuration" functionality is _the_ one functionality that would belong in a microkernel, and not a userspace helper.</span><br>
+<p>
+Empirically false; on the contrary it's entirely feasible to do POSIX on top of a microkernel that knows neither process nor file. Such kernels[0] instead abstract address spaces, threads, memory mappings[1], and exception handling, with these being mediated from system level to lesser privilege by synchronous IPC that provides client atomicity. Process spawning external to the microkernel then configures the new process' pager (such as a systemwide memory server), and any filesystems implementing the files it maps, to define the new program; and this is the equivalent of calling an arbitrarily complex spawn67() over IPC. That extends to non-files such as sockets and the like.<br>
+<p>
+This seems like a lot of hair splitting, but the kernel-to-system divide runs in the very definition of a microkernel. Nothing in that detail applies to monolithic kernels either: they enjoy a similar API freedom internally and so lack the gains from going usermode, but are weighed down by their POSIX externals if they went anyway.<br>
+<p>
+As for solving file descriptor TOCTOU in a process with unruly threads (e.g. syscalls that started before the spawn() call) messing with open files during a running syscall, it's simple enough to retard spawn() first and then halt other threads for its duration at the point where they'd access any file. (mutexes would do in a pinch.) Lighter methods may be possible, but that one is a complete solution albeit on the petri dish scale.<br>
+<p>
+[0] Where "kernel" is the supervisor component, "system" is privileged non-POSIX user mode, and "user" (or "app") is cat(1) inna terminal window, its loader, the terminal program, ..., and the horse they rode in on.<br>
+[1] And even that is more a matter of portability and security (i.e. defense in depth), where an alternative would allow privileged programs to writably map their own page tables and those of other programs. Such "exokernel" optimization is long dead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1087195"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Anything that can be userspace should be userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 11:45 UTC (Wed)
+                               by <b>grmnsftphr</b> (subscriber, #178591)
+                              [<a href="/Articles/1087195/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="grmnsftphr" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087195" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;ISTM the Linux kernel is already too big</span><br>
+<p>
+There's the longtime systemd kernel that's even much bigger and will at some time encompass all known programs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087195/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087197"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unsubstantiated systemd bashing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 11:59 UTC (Wed)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1087197/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087197" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could we please not? This feels like it's 2015 all over again.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087197/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1087321"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 13:17 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1087321/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087321" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      You seem to be determined to stir up old flame wars and be generally disruptive in the comments; I have asked you a few times now to stop.  Don't do this anymore.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087321/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1087367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Would it be better to generalize existing calls?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2026 15:01 UTC (Wed)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1087367/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087367" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is great work, but an idea I think deserves more consideration is to generalize existing Unix system calls so they can operate on another process.  For example open() would get an extra argument giving the process id; the parent process could use it to open files in the child.  dup2() and chdir() could also operate on another process.  And so on.  This seems more like the "Unix way".  (Of course these new more general syscalls would need a new name, but in spirit they are the same primitives we already know.)  After creating the child process and setting up its files, a final start_process() call would make it start running.<br>
+<p>
+Even if the implementation were restricted, so that you can only start opening files in another process if you are its direct parent, it's running as the same user, and it hasn't yet started executing, that would still give a cleaner way to express the actions without the need for a new structure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087419"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Would it be better to generalize existing calls?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2026 7:17 UTC (Thu)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1087419/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1087419" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I've had the very same idea. <code>proxy_syscall(pidfd, number, ...)</code> or something.</p>
+<p>Code could also be injected into the child with ptrace().</p>
+<p>But I think the whole back-and-forth between the parent and the child somehow works against the goal, making process creation less efficient?</p>
+<p>So the next logical step might be to batch the remote operations.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087419/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1088547"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Capabilities</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2026 2:14 UTC (Thu)
+                               by <b>jdub</b> (subscriber, #27)
+                              [<a href="/Articles/1088547/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jdub" />
+                <input type="hidden" name="return" value="/Articles/1086330/#CommAnchor1088547" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems like a missed opportunity to take some design inspiration from capabilities (not Linux "capabilities", real ones), especially given much of the juggling involves file descriptors…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1088547/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

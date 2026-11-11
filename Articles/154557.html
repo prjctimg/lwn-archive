@@ -1,0 +1,170 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Nested classes [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Nested classes">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The device model/sysfs 'class' subsystem is a mechanism which allows different kernel subsystem [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/153544/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Nested classes</h1>
+<div class="Byline">[Posted October 5, 2005 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+The device model/sysfs "class" subsystem is a mechanism which allows
+different kernel subsystems to export device-independent interfaces to user
+space.  With a recent kernel, a number of interesting class hierarchies
+can be found.  For example, <tt>/sys/class/net</tt> represents all of the
+network interfaces in the system, <tt>/sys/class/sound</tt> shows the audio
+devices, and <tt>/sys/class/graphics</tt> can be used to find frame
+buffers.
+<p>
+
+<img src="../_static/images/ns/kernel/class-net.png" width=212 height=106
+alt="[Network class diagram]" hspace=2 border=0 align="right">
+
+The class API has changed little since it was documented in <a
+href="http://lwn.net/Articles/31370/">this LWN driver porting article</a>.
+Kernel code registers a <tt>class</tt> structure to create a directory in
+<tt>/sys/class</tt>, then populates it with <tt>class_device</tt> objects.
+This API has worked for some time, but it has its limitations; it forces a
+two-level class-&gt;device structure which is unable to represent all of
+the relevant data structures in the kernel.  For many class hierarchies,
+such as the network device class tree shown in the diagram to the right,
+two levels is sufficient.  Other subsystems, however, have had trouble with
+this limitation.
+<p>
+
+<img src="../_static/images/ns/kernel/class-block.png" width=342 height=125
+alt="[Block class diagram]" border=0 hspace=2 align="left">
+
+Consider, for example, the block subsystem, as represented by the
+simplified diagram to the left.  The block subsystem deals in block
+devices, of course, and those are represented in the second layer of the
+diagram.  Each block device, however, can contain partitions, which are
+(virtual) block devices in their own right.  Putting all of those
+partitions in the 
+top layer of the block class hierarchy would lose the relationship between
+those partitions and the physical devices where they live; the deeper
+hierarchy truly does make sense.  There are also other 
+objects, such as the request queue, which need to be present in the class
+tree.  The fact that the class
+subsystem cannot represent this structure is one of the reasons why the
+block layer has its own sysfs subtree, under <tt>/sys/block</tt>, even
+though it logically belongs under <tt>/sys/class</tt>.
+<p>
+
+This issue recently came to a head when Dmitry Torokhov reworked the input
+subsystem to make use of sysfs.  The input class tree also fails to
+fit neatly into the class subsystem, though for slightly different
+reasons.  The input layer can export multiple interfaces to the same
+device; a touch screen can show up as a serial device, as an event
+generator, or as a mouse, for example.  Even a straightforward mouse can
+appear by itself, or as part of the multiplexed "mice" device.
+<p>
+
+As a way of representing the structure of the input subsystem, Dmitry
+implemented a "subclass" mechanism.  Various objections to the
+implementation were raised, however, and Greg Kroah-Hartman went off to
+design a solution he liked better.  His <a
+href="http://lwn.net/Articles/153697/">patch</a> has now been posted for
+review; it is also part of the -mm tree.
+<p>
+
+Greg's solution does not involve subclasses at all; instead, the
+<tt>class_device</tt> structure has acquired a new <tt>parent</tt> field.
+The function which creates <tt>class_device</tt> structures has a new
+prototype:
+<p>
+<pre>
+    struct class_device *class_device_create(struct class *cls,
+					     struct class_device *parent,
+					     dev_t devt,
+					     struct device *device, 
+					     char *fmt, ...);
+</pre>
+<p>
+The <tt>parent</tt> argument is new.  If it is non-<tt>NULL</tt>, the new
+<tt>class_device</tt> will be placed under the parent <tt>class_device</tt>
+in sysfs, rather than directly under the class itself.  Needless to say,
+this change breaks all users of the class subsystem; if it goes into the
+mainline, all out-of-tree code using classes will have to be updated.
+<p>
+This interface should work reasonably well in the block case, where
+partitions can truly be thought of as child devices.  Dmitry is <a
+href="/Articles/154562/">less pleased with it</a> for the input subsystem,
+however.  He would like to be able to set up different hotplug handlers for
+lower-level entries, but, since those handlers are set up at the class
+level, an implementation without subclasses does not provide that
+capability.  There are other objections as well; the parent mechanism makes
+it a little harder to set up the sort of hierarchy Dmitry would like to
+create, for example.
+<p>
+
+As of this writing, there has been no further discussion of the interface.
+There is a distinct chance that it could change before it makes its way
+into the mainline.  In one way or another, however, support for a deeper
+<tt>/sys/class</tt> is likely to be merged.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Device model</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Sysfs</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/154557/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2005, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

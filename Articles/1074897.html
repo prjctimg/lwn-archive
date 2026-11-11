@@ -1,0 +1,1329 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Reconsidering x32 — again [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Reconsidering x32 — again">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The x32 ABI was meant to be the best of both worlds, providing the expanded registers and instr [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1074951/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Reconsidering x32 — again</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 1, 2026</br>
+           </div>
+The <a href="https://en.wikipedia.org/wiki/X32_ABI">x32 ABI</a> was meant
+to be the best of both worlds, providing the expanded registers and
+instruction set of the x86-64 architecture while preserving the lower
+memory use of 32-bit systems.  The Linux kernel has supported x32 since the
+3.4 release in 2012.  The initial excitement around x32 did not last,
+though, and kernel developers are considering removing that support — and
+not for the first time.  Even the most unloved features tend to have a few
+users, though, making removal hard.
+<p>
+The 64-bit x86 CPU architecture brought a number of long-desired features,
+including more registers, better system-call support and, of course, the
+ability to support larger virtual address spaces.  There is a cost to that
+last feature, though; the size of addresses (and, thus, pointers) doubled
+from four to eight bytes.  That change inevitably increases the amount of
+memory used by a program and, importantly, the amount of cache required to
+hold the pointed-to values.  Since cache utilization has a huge effect on
+the performance of many programs, that extra cache footprint hurts.
+<p>
+The idea behind x32 is to provide all of the x86-64 features, but to use
+32-bit addresses and data types, bringing the memory and cache footprint
+back down.  Supporting this ABI required work in the kernel, but also at
+the toolchain level; the result was expected to be the fastest x86 ABI
+available.  Evidence for that speedup was scarce when <a
+href="456731.html">x32 kernel support was under development</a> in
+2011 but, <a href="548838.html">by 2013</a>, some realistic benchmark
+results were being posted, and some distributors were beginning to work on
+support.
+<p>
+<!-- middle-ad -->
+
+Despite its apparent advantages, though, x32 never really took off.  One
+can speculate on the reasons why that happened.  Perhaps processor speed
+and cache sizes increased enough to mitigate the cost of 64-bit pointers.
+Most applications are not so performance sensitive that it is worth the
+trouble to support another ABI.  The applications that broke with 64-bit
+pointers were quickly fixed.  Memory use has grown to the point that it is
+challenging to shoehorn even a basic "hello world" app into the 2-3GB of
+virtual address space that 32-bit pointers afford.  Other possible
+explanations surely exist as well.
+<p>
+Also noteworthy is that many distributions never supported this ABI, making
+it unavailable to a lot of users.  Having to build one's own kernel (and
+possibly toolchain as well) can be a strong impediment to experimenting
+with an alternative ABI.  Debian and Gentoo did add x32 support; Ubuntu
+also supported x32, but <a
+href="https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1994516/comments/21">dropped
+it</a> in 2023, citing a lack of demand and concerns about the additional
+attack surface created by enabling that ABI (which has <a
+href="584020.html">had vulnerabilities</a> in the past).  Modern
+Debian kernels retain x32 support, but it is only enabled when the
+<tt>syscall.x32=y</tt> boot option is provided.
+<p>
+In 2018, Andy Lutomirski <a
+href="/ml/linux-kernel/CALCETrXoRAibsbWa9nfbDrt0iEuebMnCMhSFg-d9W-J2g8mDjw@mail.gmail.com/">proposed</a>
+removing support for the x32 architecture, saying that it was largely
+unused and the necessary system-call interface added a lot of complexity to
+the kernel.  An extensive discussion ensued.  Linus Torvalds <a
+href="/ml/linux-kernel/CAHk-=wi_Kp=3XmGDdzmadzFSPFvuL+aAJ6ZPAR=o4z=KwYT2vw@mail.gmail.com/">remarked</a>
+that the main use of x32 was "<q>extreme benchmarking</q>", and said he
+would not be opposed to removing support if there were no complaints.
+<p>
+But, naturally, there were complaints.  Thorsten Glaser <a
+href="/ml/linux-kernel/Pine.BSM.4.64L.1812112150480.21176@herc.mirbsd.org/">was
+reluctant</a> to lose his x32 Debian desktop.  Richard Purdie <a
+href="/ml/linux-kernel/1bcacee85afc8e4864be6c9a4a7fcc52511b41bd.camel@linuxfoundation.org/">pointed
+out</a> that the Yocto Project supported x32 and occasionally got bug
+reports.  Rich Felker <a
+href="/ml/linux-kernel/20181211233316.GN23599@brightrain.aerifal.cx/">said</a>
+that GCC performance benefits from an x32 build and that the ABI is useful
+for catching portability problems.  Others expressed an interest in
+preserving the ABI as well.  In the end, while the groundswell of support
+for x32 was not huge (and John Paul Adrian Glaubitz, the maintainer of the
+Debian x32 port, even <a
+href="/ml/linux-kernel/70bb54b2-8ed3-b5ee-c02d-6ef66c4f27eb@physik.fu-berlin.de/">stated
+his non-opposition</a> to the change), the idea of removing it was dropped,
+and that support remains in current kernels.
+<p>
+On May 23, though, Sebastian Andrzej Siewior <a
+href="/ml/all/20260523093734.A3AR7reJ@linutronix.de">reopened the
+discussion</a> around removing it.  There is, he said, "<q>practically no
+real use for x32</q>" and that the performance benefits it offers are not
+compelling enough to cause users to adopt it.  He suggested removing the
+configuration symbol that must be set to build x32 support into the kernel.
+If enough time passes without complaint, then all of the code implementing
+that support could be removed as well.
+<p>
+The reaction this time around has been more subdued — so far, at least.
+H. Peter Anvin did not oppose phasing out the x32 ABI,  <a
+href="/ml/all/10BF3F18-4709-43D6-979C-49067707F1C1@zytor.com">noting</a>
+that it "<q>happened too late to actually be able to become useful</q>".
+He mostly took issue with Siewior's suggestion that the x32-specific
+system-call numbers could be reused, which is not a huge concern in any
+case, since system-call numbers are not in short supply.  The x32 ABI 
+still does not appear to be entirely unused, though.  Sam James <a
+href="/ml/all/878q95m214.fsf@gentoo.org">said</a> that Gentoo still has
+some x32 users and Neal Gompa <a
+href="/ml/all/GKHPxxboS_S8edPsWyCWEg@gompa.dev">pointed out</a> that PLD
+Linux has an actively supported port: "<q>So it isn't broadly used indeed,
+but it's used enough that it's probably worth being slightly more careful
+about deciding to remove it</q>".  Glaubitz <a
+href="/ml/all/afa7ec338c931cc6fba15e2d37fcbbfc7670e3d5.camel@physik.fu-berlin.de">said</a>
+that the Debian port is still maintained; "<q>even Rust works there</q>".
+<p>
+Those comments notwithstanding, the response to Siewior's proposal has
+seemingly been one of overwhelming indifference.  The people most aware of
+x32 support in the kernel are the ones who have to maintain it, and there
+has been a distinct lack of developers offering to help with that task.
+The returns from maintaining this ABI would appear to be diminishing.  Even
+so, kernel developers are generally reluctant to remove support for
+features that are actively in use.  So, even though almost nobody wants it
+(and many actively want it gone), x32 support may yet live on in the
+kernel.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">x32</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1074897/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1075773"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Could this break user space?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 14:53 UTC (Mon)
+                               by <b>jpeisach</b> (subscriber, #181966)
+                              [<a href="/Articles/1075773/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jpeisach" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075773" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What about 32-bit software that's running in, Wine, for example?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075773/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1075781"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Could this break user space?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 14:58 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1075781/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075781" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Removing x32, if it happens, will not break the ability to run pure 32-bit software.  X32 is really best seen as a sort of special case of 64-bit support.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075781/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1075783"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Could this break user space?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 15:05 UTC (Mon)
+                               by <b>smcv</b> (subscriber, #53363)
+                              [<a href="/Articles/1075783/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smcv" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075783" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+32-bit code on x86 is mostly the ABI variously known as i386, i586, i686 or IA-32, the same one that worked on old 32-bit Intel and AMD CPUs (Pentium 4 or older). 32-bit Wine in typical distros is an i386 binary, so is Steam, so are old 32-bit games. They'd be unaffected by removing x32: if that wasn't true, then they already wouldn't work on x86_64 Debian without special kernel command-line options.<br>
+<p>
+In theory someone could be relying on the ability to run legacy x32 binaries, but in practice everyone releasing x86 binary-only software ships it as i386 or x86_64, and in practice only (a large subset of) open-source or at least source-available code gets compiled for x32.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075783/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1075786"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Could this break user space?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 15:39 UTC (Mon)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/1075786/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tux3" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075786" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+About Wine, I think it ships a new WoW64 mode that can run on a 64bit host without even any 32bit libraries or 32bit syscalls. <br>
+So your modern 32bit Wine installation is a bunch of 64bit ELFs, and the NT syscalls far jump to 64bit mode with ye old Heaven's Gate.<br>
+<p>
+I believe on ARM this actually lets you run 32bit Windows apps without any 32bit support from the host, since the x86 instructions are JIT-ed anyways.<br>
+On x86 I believe (?) the kernel only needs to leave a 32bit descriptor laying around in the GDT, you could maybe remove all other IA32 support and Wine might keep working?<br>
+(Of course all of this is still unrelated to x32)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075786/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1075804"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Could this break user space?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 17:21 UTC (Mon)
+                               by <b>smcv</b> (subscriber, #53363)
+                              [<a href="/Articles/1075804/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smcv" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075804" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; About Wine, I think it ships a new WoW64 mode that can run on a 64bit host without even any 32bit libraries or 32bit syscalls.</span><br>
+<p>
+It does, but not all Wine builds use it. As far as I know, Proton 11 on x86 still uses 32-bit x86 code to run 32-bit Windows binaries - presumably there were concerns about the WoW64 mode's maturity.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075804/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1075816"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Could this break user space?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 17:47 UTC (Mon)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1075816/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joib" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075816" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAIU Proton 11 supports WOW64, but it's not the default, you need a PROTON_USE_WOW64=1 environment variable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075816/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1075788"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Could this break user space?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 15:43 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1075788/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075788" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Software built for Windows must be built for the Windows x86 or x64 ABIs, which are unrelated to x32. WINE needs Linux AMD64 libraries for x64 ABI support and (for versions where the WoW64 work in Wine is not done) Linux i386 libraries for x86 ABI support.
+<p>Linux's x32 ABI is a special case of Linux's AMD64 where the ABI designers have declared that the top 33 bits of all 64 bit pointers are always going to be the same - either all 1s, or all 0s, and C's <tt>long</tt> type is 32 bit instead of 64 bit. Other than those two differences (with all of the ripple-through this causes), the ABI is the same as AMD64 - the CPU is in long mode, you have access to RAX through R15 (with RSP, RBP etc) instead of EAX through ESP, segmentation doesn't work etc.
+<p>Making the top 33 bits of every pointer the same means that loading and storing pointers can just store the bottom 32 bits of the 64 bit pointer, and load with sign extension, to recover the 64 bit pointer the CPU works with. This was supposed to reduce memory use (halving the RAM used by pointers) and speed things up by reducing cache footprint, but in practice never did by enough to make it worth having.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075788/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1075795"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why does x32 need kernel support?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 16:33 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1075795/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075795" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The performance benefits of x32 are mostly in user space, with lower memory usage for pointers and so better cache use.  Why can't it call the normal 64-bit system calls?  If a pointer has to be passed, make the most significant word zeroes.  In other words the 32-bit address space is embedded at the bottom of the 64-bit space.  It would be the C library that has to have special support, not the kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075795/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1075798"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why does x32 need kernel support?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 17:02 UTC (Mon)
+                               by <b>jepler</b> (subscriber, #105975)
+                              [<a href="/Articles/1075798/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jepler" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075798" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'd be tempted to ask the same question. I assume smarter people than me concluded it was a necessity, but the reasons are not clearly laid out in any of these late discussions.<br>
+<p>
+It seems like userspace can deal with the layout of kernel structures for e.g., ioctl, though it might be quite messy.<br>
+<p>
+The kernel prepares a few mappings for every process: heap, vvar, vdso, and stack in my /proc/self/maps. It would need a flag to say to locate these below the 4G (2G?) limit instead.<br>
+<p>
+But I suppose the startup code for some "altx32" could allocate its own main stack, the runtime include trampolines for vdso, and entirely eschew use of brk() for memory allocation.<br>
+<p>
+If you did all that -- do you really need different syscalls? Well, mmap(NULL, ...) needs to return below the 32-bit limit, for one. How many more syscalls allocate address space or return pointers? Whatever implements shmat() is another one. Can you fix all these by making a PROT_NONE mapping for the whole memory range above the 32-bit limit, and then these routines simply get to hunt for a low address?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075798/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1075801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why does x32 need kernel support?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 17:14 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1075801/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075801" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      If you look at <a href="456731.html">the 2011 x32 article</a> you'll see that Linus asked the same question.  From that article: "<q>There are legitimate reasons why some of the system calls cannot be shared between the x32 and 64-bit modes. Situations where user space passes structures containing pointers to the kernel (<tt>ioctl()</tt> and <tt>readv()</tt> being simple examples) will require special handling since those pointers will be 32-bit. Signal handling will always be special.</q>"
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1075814"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why does x32 need kernel support?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 17:49 UTC (Mon)
+                               by <b>linuxrocks123</b> (subscriber, #34648)
+                              [<a href="/Articles/1075814/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linuxrocks123" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075814" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Okay, but ... just hack the compiler to create a longptr type equivalent to uint64_t that can be zext-assigned from a 32-bit void*, right?  And then fix up glibc to declare the necessary structs with that type.<br>
+<p>
+I've always thought you could probably do this by messing with glibc and gcc a little and that a whole new kernel ABI really wasn't necessary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075814/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076033"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why does x32 need kernel support?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2026 3:30 UTC (Wed)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1076033/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076033" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+Eh, not really. Consider readv as specified by POSIX:
+</p>
+<blockquote>
+<pre>
+ssize_t readv(int fildes, const struct iovec *iov, int iovcnt);
+</pre>
+</blockquote>
+<p>
+where POSIX specifies that struct iovec has at least the following members:
+</p>
+<blockquote>
+<pre>
+void   *iov_base  Base address of a memory region for input or output.
+size_t  iov_len   The size of the memory pointed to by iov_base.
+</pre>
+</blockquote>
+
+<p>
+That unambiguously states that <code>typeof/sizeof/alignof(((struct iovec *)0)-&gt;iov_base/len)</code> are that of <code>void */size_t</code>, not <code>my_magic_64_but_32_ptr/my_magic_64_but_32_size_t</code>. But yet they need to do something special. Now maybe you do some horrible thing where you pretend to C that they're the 32-bit types, but really under the hood they end up as the 64-bit ones, and pray people aren't doing things using those types (e.g. <code>typedef typeof(((struct iovec *)0)-&gt;iov_base) my_void_ptr; my_void_ptr *p = malloc(sizeof(my_void_ptr)); *p = ...</code> would presumably get very out-of-bounds-y very quickly, but by the letter of POSIX should be completely legal).
+</p>
+
+<p>
+Maybe though in practice that's all ok, and you even go as far as making sure they're magic for the purposes of C++ overloading, templates, name mangling, etc., so you can't tell they're not the 32-bit ones. But then msgsnd and msgrcv (NB: *not* the more typical sendmsg and recvmsg) come along and make everyone even sadder. Take msgsnd for example (msgrcv is the same fundamental API); POSIX defines it like so:
+</p>
+<blockquote>
+<pre>
+int msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
+</pre>
+</blockquote>
+<p>
+where it has this to say:
+</p>
+<blockquote>
+<p>
+The application shall ensure that the argument msgp points to a user-defined buffer that contains first a field of type long specifying the type of the message, and then a data portion that holds the data bytes of the message. The structure below is an example of what this user-defined buffer might look like:
+</p>
+<pre>
+struct mymsg {
+    long   mtype;       /* Message type. */
+    char   mtext[1];    /* Message text. */
+}
+</pre>
+</blockquote>
+
+<p>
+There's no fudging with magic types in system headers you can do to get around this one. As a programmer POSIX says you are the one who has to write the type of the first field as long, in a structure passed to the kernel. So you really are stuck with having the kernel know to differentiate x32 from standard x86_64.
+</p>
+
+<p>
+Also mmap and things like shmat need to return pointers in the first 4 GiB of the address space, but I suppose implicitly adding MAP_32BIT to every request for certain processes isn't as heavyweight as having separate types floating around.
+</p>
+
+<p>
+As for why I know this? Because Linux got it wrong and used the 64-bit syscall msgsnd/msgrcv. It broke fakeroot on x32, I went down the rabbit hole, and submitted <a href="https://lore.kernel.org/all/20201012014837.14305-1-jrtc27@jrtc27.com/">https://lore.kernel.org/all/20201012014837.14305-1-jrtc27@jrtc27.com/</a> to fix it. Seems that never got merged in the end though so it's still broken... just shows you how little x32 and/or those APIs are used.
+</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076033/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1075799"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Do hyperscalers use x32?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 16:50 UTC (Mon)
+                               by <b>ms-tg</b> (subscriber, #89231)
+                              [<a href="/Articles/1075799/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ms-tg" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075799" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm wondering, if there are measurable performance benefits from running in 64bit mode but with only half the pointer and register size due to cache impacts and lower memory usage -- wouldn't those benefits disproportionately matter to organizations that manager their own infrastructure and deploy applications in vast quantities often as containers squeezed into hosts for maximum efficiency?<br>
+<p>
+If that's true, I'm wondering whether the "big tech" / "hyperscalar" orgs have..,<br>
+- a) Measured it and found - no real-world performance improvement<br>
+- b) Measured it and found - the increased complexity in their own infrastructure was more expensive than the gains from any performance improvements at scale<br>
+- c) Measured it and found - the increased security surface risk outweighed any performance improvements at scale<br>
+- d) Never measured it - for various reasons is not of interest<br>
+- e) Currently using it! Simply haven't spoken up in these discussions - it saves meaningful money at scale<br>
+<p>
+Super curious!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075799/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1075990"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Do hyperscalers use x32?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2026 14:53 UTC (Tue)
+                               by <b>notriddle</b> (subscriber, #130608)
+                              [<a href="/Articles/1075990/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="notriddle" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075990" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Measured it and found - the increased security surface risk outweighed any performance improvements at scale</span><br>
+<p>
+By “security surface risk,” do you mean the reduced number of ASLR bits, or do you mean the less-tested configuration? Because the testing seems solvable, at least in theory, but reduced effectiveness of ASLR is inherent to having a smaller address space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075990/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1075992"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Do hyperscalers use x32?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2026 15:38 UTC (Tue)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/1075992/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiederm" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075992" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nit.<br>
+<p>
+One of the big advantages of x32 is that code is able to use all 16 x86-64 registers and that parameters to functions are passed in registers just like normal x86-64.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075992/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1076216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Do hyperscalers use x32?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2026 21:11 UTC (Wed)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/1076216/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ejr" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076216" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Similarly, what of tighter / smaller container images?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1075828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Devices with limited RAM</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 19:06 UTC (Mon)
+                               by <b>marekm</b> (subscriber, #174682)
+                              [<a href="/Articles/1075828/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marekm" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075828" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the past (years ago when there was a working x32 Debian installer briefly available) I have actually used x32 on some devices with 64-bit CPU but limited RAM, like PC Engines APU series boards.  Nice low power boards (fully open firmware, coreboot instead of the proprietary BIOS, serial console, no power wasted for the unused graphics) but 4 GiB of RAM chips (even with ECC!) soldered permanently, no way to replace the DIMM with a larger one.  Good for uses such as routers, or GPS-synced NTP servers (including precise timestamping with a little hardware hack to connect 1PPS to one of the i210AT NIC pins).  I've seen quite significant memory savings when running BGP with full Internet routing tables.<br>
+<p>
+RAM is getting more expensive again (thanks to AI) so it might make sense to reconsider the x32 ABI for such embedded, industrial, non-desktop uses.  Also good for real VMs, using more RAM on the shared host but more secure (better separated) than containers affected by the recently found local privilege escalation vulnerabilities.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1075841"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dropping Drepper's ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2026 21:23 UTC (Mon)
+                               by <b>gghh</b> (subscriber, #102105)
+                              [<a href="/Articles/1075841/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gghh" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075841" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please remove it, just don't tell Ulrich Drepper<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075841/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1075869"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Use case</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2026 8:48 UTC (Tue)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1075869/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1075869" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Memory use has grown to the point that it is challenging to shoehorn even a basic "hello world" app into the 2-3GB of virtual address space that 32-bit pointers afford. </span><br>
+<p>
+I'd say it's especially true if you need performance, because you want to cache disk access or frequent computations. So I expect these prefer to use more than 4GiB for that. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1075869/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1076245"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 10:53 UTC (Thu)
+                               by <b>hailey</b> (subscriber, #174368)
+                              [<a href="/Articles/1076245/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hailey" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076245" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Most of this discussion is about the performance impact of x32 - which might only be small depending on your use case. But the biggest benefit by far is that apps with pointer-heavy heaps (ie. OO/dynamic runtimes) see dramatic memory savings - close to half.<br>
+<p>
+My real world experience with Mastodon (a Ruby on Rails application) is that app processes slim down from 650 MB to 350 MB. This makes a very real difference on the lower end - you can host your stuff on a cheaper VPS.<br>
+<p>
+It's unfortunate that distribution support isn't really there for x32.  I ended up going back to x86-64 for my Mastodon server in the end - not because there were any problems with x32, but because I bumped the Ruby version and couldn't be bothered to manually compile everything again.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076245/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 13:55 UTC (Thu)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/1076367/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arnd" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076367" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The memory savings should not be that different from regular 32-bit x86, which is much more widely available and better tested. If you don't care about the extra performance from x32, there is really no point in using it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076378"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 15:45 UTC (Thu)
+                               by <b>marekm</b> (subscriber, #174682)
+                              [<a href="/Articles/1076378/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marekm" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076378" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At some point in the future, regular 32-bit x86 might be phased out, as almost all current hardware is already 64-bit capable, and few working 32-bit only machines will remain.  With some distros already dropping support, I guess it could be a few years from now, likely before 2038.<br>
+<p>
+A lot of hardware with 64-bit CPUs but non-expandable RAM exists and is not limited to the APU boards I mentioned previously, another example are the last Intel-based Apple MacBooks which could still be supported by Linux (with a lightweight desktop environment) long after no longer being supported by macOS.  So having x32 around may be good for reducing e-waste - of course it's not what the big tech companies want, as less e-waste means less shiny new stuff sold.  After years of "RAM is cheap" thinking (it was cheap, until recently) maybe it's time to go back to lean software.  Niklaus Wirth famously wrote about it over 30 years ago but a lot of it is still relevant today.<br>
+<p>
+<a href="https://berthub.eu/articles/posts/a-2024-plea-for-lean-software/">https://berthub.eu/articles/posts/a-2024-plea-for-lean-so...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076378/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076517"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 11:56 UTC (Fri)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1076517/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076517" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      If we want to reduce waste, and want to support machines with little memory, the way to go is to not phase out i386 support.  i386 is still the <a href="https://popcon.debian.org/">second most popular Debian platform</a>, with 5184 submissions at the time of this writing compared to 2 for x32.  And that will not only reduce the waste of machines with non-expandable memory, it will also reduce the waste of machines that do not support AMD64.
+
+<p>Everything that x32 can do can also be done with i386, except "extreme benchmarking", but not everything that can be done with i386 can be done with x32.  E.g., I have a number of i386 binaries; if the support for i386 is deleted (the eventual result of phasing out), they will stop working.  I expect that not that many people have x32 binaries lying around.  We also have some i386 machines that have no AMD64 (and thus no x32) support still running (but they run on old software).
+
+<p>Even if some distros drop support for i386, there are fortunately other distros that continue supporting it.  And if i386 and its RAM savings are so unimportant that it is dropped, then people will drop x32 as well.  Or is there a distribution that supports x32, but not i386?
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076517/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076663"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 15:18 UTC (Fri)
+                               by <b>marekm</b> (subscriber, #174682)
+                              [<a href="/Articles/1076663/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marekm" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076663" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As for the Debian statistics, x32 has had its peak around 2017 before the sharp decline (from 18 down to 2).  I suspect it may be correlated with the brief availability of a working installer.  I was in this situation myself, on some low-memory hardware (thin-client PC with 64-bit CPU and 1 GiB of RAM, used as a router) after the disk (CompactFlash card) died and there was no easy way to reinstall simply because the installer was not available anymore, and the way around it (use chroot from full x86-64 system) was not realistic on this limited hardware, full x86-64 was too memory-hungry so I had to go back to i386 until the hardware was finally retired (going from 1Gb to 10Gb Ethernet).  Would certainly have reinstalled x32 if it was still as easy as it was the first time (back when the working Debian installer was available).<br>
+<p>
+Comparing x32 with i386, having more CPU registers available makes it easier for the compiler to generate better code, using less memory (smaller pointers) also means fewer cache misses and more speed again, I don't think it's just extreme benchmarking.  If some mistakes were made in the original x32 ABI design, the current low usage means it might be good time to fix them (even with a flag day, breaking some compatibility would only affect very few users) if that's what it takes to save x32.<br>
+<p>
+Old hardware aside, one modern use case is running many VMs where each one is allocated some part of memory from the shared host (full VM guests as in XCP-NG, not containers).  Lower memory usage means more such VMs without compromising isolation between the guests, containers no longer being as safe as they were thought to be (I admit I never really liked containers, even before the recent storm of local privilege escalation CVEs).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076663/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076675"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 16:40 UTC (Fri)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1076675/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076675" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+Comparing x32 with i386, having more CPU registers available makes it easier for the compiler to generate better code, using less memory (smaller pointers) also means fewer cache misses and more speed again
+</blockquote>
+
+x32 does not have smaller pointers than i386.  Memory use is similar, and cache misses are therefore similar, too.  Yes, the speed benefit of the additional registers exists, but obviously has not been enough to get people to use x32.  The register-based calling convention of x32 compared to a stack-based one for i386 is another speed benefit, but again, the benefit was not enough for x32 to reach orbit; the gravity of i386 and AMD64 is just too strong (if you leave i386, you land on AMD64), and the thrust from the benefits of x32 too little.
+
+<p>As for a new ABI, that would not reach orbit, either; and anyway, I am not aware of mistakes in the x32 ABI.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076675/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1076514"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 10:52 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1076514/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076514" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The memory savings should not be that different from regular 32-bit x86, which is much more widely available and better tested. </span><br>
+<p>
+Every time I have to use 32-bits software on Linux, I need to go on the internet and find some obscure, highly distro-specific "multilib" package installation instructions. Every time I land on some pages that warn that some people want that to disappear too. That they haven't succeeded yet but that they will keep trying.<br>
+<p>
+You have a good point though because regular x86 is useful to run "ancient" software that has never been ported. For instance: (WINE, steam,...) That is obviously not the case with x32. If we had to pick one then x86 seems much more "practical" and useful. So, assuming that:<br>
+<p>
+- the _computing_ benefits of x32 have been found to be negligible, especially for legacy software.<br>
+- the _memory_ benefits of any 32-bits solution are not negligible<br>
+- "Pure 64" hardware/  CPUs will never be mainstream<br>
+<p>
+... then yes: maybe distros and everyone else should better focus on x86 "multilib" and make that experience more consistent, user-friendly, reliable and generally better supported.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076514/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076516"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 11:41 UTC (Fri)
+                               by <b>malmedal</b> (subscriber, #56172)
+                              [<a href="/Articles/1076516/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="malmedal" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076516" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; the _computing_ benefits of x32 have been found to be negligible</span><br>
+<p>
+Have they? I haven't tried x32 myself, but when we first got 64bit sparc I noticed that when we compiled perl and python in 64bit mode they ran at half speed on the same machine. Though I suppose if you're running a scripting language you don't care too much about performance. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076516/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076606"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 13:05 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1076606/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076606" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Though I suppose if you're running a scripting language you don't care too much about performance.</span><br>
+<p>
+I think this is key and why "extreme benchmarking" was mentioned. You can always find some micro-benchmark to make any optimization shine, but what difference does that make _in real-life_? More often than not: very little. If it did, that then bottleneck would  most likely have already been looked at and probably been optimized in some other way already.<br>
+<p>
+Memory usage tends to be a very different story, more like a "tragedy of the commons".<br>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076606/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1076369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory savings are dramatic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 14:10 UTC (Thu)
+                               by <b>gghh</b> (subscriber, #102105)
+                              [<a href="/Articles/1076369/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gghh" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076369" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; ended up going back to x86-64 [...] because I bumped the Ruby version and couldn't be bothered to manually compile everything again.</span><br>
+<p>
+Precisely this! I'm reading a lot phd-level comments about performance this, performance that, which thanks very much, everyone knows all that stuff. Both the PhDs and I are reading the same blog posts from the last two decades, no new info.<br>
+<p>
+But reality is x32 didn't happen. Move on. I did follow from a distance over the years, now looking at WP which says talks about making an x32 of sorts are as old as 2003, even Donald Knuth dispensing wisdom in 2008 saying x86-64 is "idiotic" (thanks Don appreciated), HPA presented x32 at Plumbers in 2011 saying "kernel ready, it's fast, distros please adopt", some glibc support merged in 2016, and here we are. x32 is MIA.<br>
+<p>
+Now, looking forward to replies with tutorials for deploying LAMP on x32 debian (not).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1076839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Applications don't really need x32</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 7:16 UTC (Mon)
+                               by <b>koflerdavid</b> (subscriber, #176408)
+                              [<a href="/Articles/1076839/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koflerdavid" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076839" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Many applications don't need that much memory in the first place, at least not all the time, therefore it is often possible to get away with using 32bit pointers and don't incur the overhead of always using full 64bit ones. C++ or Rust could do it seamlessly with smart pointers and an arena allocator.<br>
+<p>
+However, one of the most important programming languages is already taking full advantage of this. Since Hotspot aligns Java objects to 8 bytes, the lower 3 bits of any pointer are always zero. This allows the JVM to use 32bit pointers as long as the heap size is less than 32GB. That's plenty for the usual application server where each workload ought to have an upper memory limit, and it seems advisable to run multiple of them behind a reverse proxy to take advantage of this optimization.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076991"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Applications don't really need x32</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 15:32 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1076991/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1076991" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Worth noting, on that point, that the need for x32 is "I have pointers that cross the kernel-space/user-space boundary, where I'd prefer them to be 32 bit, not 64 bit, and I'm happy to fail if I need more than 32 bits of VA space".
+<p>If you don't do much across the kernel-space/user-space boundary, you can do what the JVM does without needing x32. If you can expand above 4 GiB total VA space reasonably, you can't use x32, but you can switch from 32 bit "compressed" pointers to 64 bit and back at runtime under the AMD64 ABI, and you can also do any of the useful tricks from the segmented memory era if you want to (e.g. different offset for code and data pointers, "special" pointers that are always 64 bit even when others are 32 bit, and so on).
+<p>So arguably, the only benefit of x32 is with applications that can be guaranteed at compile time to never need 64 bit address space, do a lot of syscalls with embedded pointers, and benefit significantly from the data structure footprint reduction of 32 bit pointers but can't use a JVM-style compressed pointer representation. Put like that, and it's clear why x32 didn't take off.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076991/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1077068"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Applications don't really need x32</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2026 8:03 UTC (Tue)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1077068/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1077068" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is also the whole headache that a lot of domain values we use tend to be large enough that 32bit overflow is a real possibility but not large enough that 64bit overflow is (e.g. integer ID values of all kinds). So staying in 32bit, even if you don't need the memory, needs a whole lot more effort getting those pieces correct.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077068/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1077457"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CONFIG_COMPAT is good enough for 32bit userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2026 12:54 UTC (Thu)
+                               by <b>dave4444</b> (subscriber, #127523)
+                              [<a href="/Articles/1077457/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dave4444" />
+                <input type="hidden" name="return" value="/Articles/1074897/#CommAnchor1077457" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would have loved to see x32 take off, but alas it did not.<br>
+<p>
+CONFIG_COMPAT provides the same pointer memory savings, but not the register, instruction, and syscall benefits of x32 or x64 allowing unmodified 32bit userspace environment to run on a 64bit kernel.  A good compromize for legacy programs and pointer-heavy applications that can survive with 4GB virutal address space.<br>
+<p>
+CONFIG_COMPAT is also useful on many embedded ARM systems that happen to have 64bit cores, but small amounts of RAM, the userspace memory savings are usually worth it.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077457/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

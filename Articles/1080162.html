@@ -1,0 +1,1042 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Two LLM-assisted memory-management patch sets [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Two LLM-assisted memory-management patch sets">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel community (like many other free-software projects) has recently seen a large influx  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1080836/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Two LLM-assisted memory-management patch sets</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 2, 2026</br>
+           </div>
+The kernel community (like many other free-software projects) has recently
+seen a large influx of patches developed with the assistance of large
+language models (LLMs).  Those patches tend to come from developers who
+were previously unknown to the community.  At the moment, though, the
+memory-management developers are evaluating two large patch sets, developed
+with LLM assistance, that were submitted by established and well-respected
+developers.  The rather different reception accorded to that work may give
+insights into how LLM-generated contributions will be handled going
+forward.
+<p>
+<h4>Reliable 1GB allocations</h4>
+<p>
+As a Linux system runs, it tends to fragment its memory, making the
+allocation of large, physically contiguous chunks of memory difficult.
+Much work has been done over the years to improve this situation; the
+kernel tries hard to avoid fragmentation, and to actively defragment memory
+as needed.  Larger allocations are more reliable than they once were.
+Still, allocation challenges can, for example, make it harder for the
+system to provide 2MB PMD-level huge pages than would be ideal.
+<p>
+Given that difficulty, it might seem that reliable allocation of PUD-level
+(1GB) huge pages is an impossible goal.  But, as Rik van Riel said in the
+<a href="/ml/all/20260520150018.2491267-1-riel@surriel.com">cover
+letter</a> to a 40-part patch series, there are workloads that can gain
+significant performance benefit from the use of 1GB huge pages, if they can
+succeed in obtaining them.  The only way to reliably allocate regions of
+that size in current kernels is to use the <a
+href="https://docs.kernel.org/admin-guide/mm/hugetlbpage.html">hugetlbfs</a>
+subsystem, which reserves memory for this purpose at boot time.  Hugetlbfs
+is inflexible, though; its reserved pages cannot be used for other
+purposes, and it cannot reserve additional pages if the workload needs
+them.  The system administrator can only hope that the reservation set up
+at boot time is suitable for all workloads the system may subsequently run. 
+<p>
+Van Riel's patch set attempts to make 1GB allocations more reliable without
+the need for the hugetlbfs reservation.  It takes a number of approaches to
+reach that goal, but the core idea is the management of memory in units
+known as "super page blocks".  The kernel breaks memory into page blocks
+now, and it manages them in ways designed to combat fragmentation.  One of
+the key techniques is to segregate allocations that can be moved from those
+that cannot.  For example, most user-space memory is movable, it is just a
+matter of changing all of the relevant page-table entries to match.  On the
+other hand, allocations for the kernel's own use generally cannot be moved.
+By keeping the two types separate, the kernel maximizes its chances of
+creating entire free page blocks by moving the pages within them elsewhere.
+<p>
+Page blocks work reasonably well when it comes to helping the page
+allocator provide PMD-level huge pages.  But they are much smaller than the
+1GB target that Van Riel is trying to hit; on the system used to write this
+article, page blocks are configured to be 4MB in size.  In a typical
+system, some page blocks will be used for movable allocations, while others
+will hold unmovable allocations.  The movable blocks can, at need, be
+emptied out to create more PMD-level huge pages.  But it only takes a
+single unmovable page block to render its entire containing 1GB huge page
+unmovable and, as a result, permanently fragmented.
+<p>
+The addition of super page blocks gives the page allocator another level of
+visibility into the use of memory.  If a request comes in to allocate an
+unmovable page, the allocator will attempt to allocate from an unmovable
+page block as before.  Should there be no such page blocks with free memory
+available, though, the allocator will need to pick a new page block to
+allocate from.  Van Riel's patch set will cause the allocator to attempt to
+select that page block from a super page block that already holds other
+unmovable allocations.  In other words, the segregation of movable and
+unmovable allocations is now done at the 1GB scale, increasing the chances
+that 1GB huge pages can be created and allocated at need.
+<p>
+There are a number of other techniques that are employed to help this
+overall policy succeed.  Consider, for example, a virtually mapped
+kernel-space allocation (as might be obtained with <tt>kvmalloc()</tt>)
+requiring several pages.  This allocation is not movable, and thus should
+be put into an unmovable super page block.  If there are no such blocks
+with that many contiguous pages available, the allocator would naturally
+pick a new super page block, thus "tainting" it and making it unmovable.
+If, however, the allocation can be satisfied from existing unmovable super
+page blocks by splitting it into smaller chunks, the allocator will do
+that.
+<p>
+The patches in this series carry an Assisted-by tag indicating that the
+Claude Opus LLM was used in their creation.  As noted above, though, van
+Riel is not a new developer needing LLM assistance to be able to put
+together a kernel patch.  His <a
+href="https://lwn.net/1998/0716/#:~:text=Rik%20van%20Riel%27s">first
+mention in LWN</a> was with regard to a discussion on memory fragmentation
+— in 1998; he <a
+href="https://web.archive.org/web/20000521171334/http://www.surriel.com/zone-alloc.html">proposed</a>
+the addition of a zoned memory allocator, which subsequently came to be.
+He is the sort of developer who is likely to get the benefit of the doubt
+when it comes to choices of tools.
+<p>
+This particular patch series has not been entirely well received, though,
+despite the fact that its goal — reliable allocation of 1GB huge pages — is
+widely supported.  The most pointed criticism was surely <a
+href="/ml/all/aj9yrlB0TrlYCLlf@lucifer">this lengthy message</a> from
+Lorenzo Stoakes, who took issue with the organization of the series and the
+code within it.  "<q>The series is completely unmergeable as it stands. Not
+even close</q>."  Other parts of the series were described as "<q>code war
+crimes against __rmqueue_smallest()</q>" or "<q>something you expect to see
+on a 1990's PHP website, not in core mm code</q>".  He concluded with:
+<p>
+<blockquote class="bq">
+	OK with all that said - to be absolutely clear - I respect you a
+	great deal, and I KNOW you're (much, much) better than this.
+<p>
+	And, to repeat, this idea is very exciting and I _want_ to see this
+	land.
+<p>
+	But I feel you've rather let the LLM run amok and it's selling you
+	(very, very) short, given just how smart and capable you are.
+</blockquote>
+<p>
+Van Riel <a
+href="/ml/all/528e3a5fbc27c9dc7a098121c32b7679b4c9962a.camel@surriel.com">answered</a>
+that he never expected the code to be merged in its current form, and that
+he had really been hoping for feedback on the overall design before
+reimplementing it in a form that could be considered for merging.  The
+massive dump of LLM-generated code has gotten in the way of that process,
+though.  Developers want to look at the implementation of a design to
+understand how it works in practice, and that has proved difficult for them
+to do in this case.  This work will have to be redone, with more human
+attention paid, before it can be seriously considered, even at the design
+level.
+<p>
+<a name="uffd"></a>
+<h4>Working-set tracking for virtual-machine guest memory</h4>
+<p>
+Virtual machines (VMs) are subject to two levels of memory management.
+They handle their own memory internally, but there is also host-level
+management that tries to ensure that the system's physical memory is used
+efficiently by all of the running VMs.  The host-level task is easier if
+the VM manager (hypervisor) has visibility into which pages a given VM is
+actually using; that information can be used to reclaim the colder pages
+(or to move them to slower memory).  But that information tends to be
+locked away inside the VM itself.
+<p>
+<a href="/ml/all/20260629120749.566063-1-kirill@shutemov.name">This patch
+series</a> from Kiryl Shutsemau is meant to make that usage information
+more readily available to VM managers.  It adds a new registration mode to
+the <a
+href="https://man7.org/linux/man-pages/man2/userfaultfd.2.html"><tt>userfaultfd()</tt></a>
+system call that will cause the protections (at the host level) on the
+indicated range of pages to be marked as "no access".  At registration
+time, it is possible to choose between two alternatives for what happens
+when the virtual machine does access one of those pages.  If the synchronous
+mode has been selected, the VM manager will receive a message from the
+kernel and, after having noted the fault, can resolve it with another
+request back to the kernel.  In the asynchronous mode, the kernel resets
+the permissions without notification to the VM manager.  At a later time,
+the manager can scan the page range to see which pages have been accessed.
+<a href="/ml/all/20260629120749.566063-16-kirill@shutemov.name">This
+documentation patch</a> describes the feature in more detail.
+<p>
+These patches, too, include an Assisted-by tag naming Claude Opus.
+Shutsemau does not have Van Riel's longevity in the kernel community; having
+made <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=e621e69137b2">his
+first contribution</a> to the 2.6.25 kernel in 2008, he is a relative
+newcomer.  Still, his track record is long enough to make it clear that,
+once again, he is entirely capable of understanding the work that he is
+submitting to the community.
+<p>
+This series has been through seven revisions and significant changes
+resulting from the reviews that were received.  In contrast to how Van
+Riel's work was received, in none of those reviews was the role of the LLM in
+the creation of the work raised as a concern.  In response to the second
+revision, though, Andrew Morton <a
+href="/ml/all/20260508103220.aa46427b6f4c5d0247d2afb0@linux-foundation.org">did
+ask</a> for information about how the LLM was used; Shutsemau <a
+href="/ml/all/af5eALk9yO8pPcHv@thinkstation">responded in detail</a>.  Much
+of the tool's role was in validating ideas:
+<p>
+<blockquote class="bq">
+	For this particular project there was quite a bit of path-finding.
+	I had a phase where I bounced ideas off Claude. It helped me
+	understand the problem space better and formulate possible
+	solutions.  Rubber ducking on steroids.
+<p>
+	Once it's clear _what_ to do, we formulate a plan on _how_. It also
+	involves back and forth.
+<p>
+	Once the plan was done, I gave the go-ahead on executing it.
+</blockquote>
+<p>
+The most time-consuming part of the process, he said, was reviewing the
+resulting code; that involved restarting the process from the beginning
+more than once.  It took "<q>maybe between 8 and&nbsp;10</q>" rounds to
+obtain code that he was happy with — before then feeding the whole series,
+along with a different set of prompts, to an LLM for review.
+<p>
+This workflow has seemingly produced a viable patch set that makes
+significant changes to the core memory-management code.  The key to
+success, relative to the work previously described above, would appear to
+be the investment of substantial amounts of human time to get the tool to
+do the job properly, and in dealing with the remaining problems afterward.
+The care seemingly taken to ensure that the patches were up to the level of
+quality that the community expects by the time they hit the mailing lists
+appears to have made all the difference.
+<p>
+Shutsemau did not say whether that whole process was more efficient than
+simply doing the job without LLM assistance, but he does seem inclined to
+use that process again in the future.
+<p>
+The end of Shutsemau's message was a request for other developers to share
+their process for working with LLMs, but there were no responses.  In
+truth, when it comes to significant work on the core kernel, he would
+appear to be one of the pioneers.  The path toward success that he
+described, though, does not seem to be an easy one; anybody who is hoping
+to use an LLM as a quick way to become a kernel developer would do well to
+take note of what is likely to become the biggest success story (for kernel
+code) so far.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/Large language models</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Large allocations</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Virtualization</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.2</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1080162/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1081014"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Things you should and should not do</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 2, 2026 17:08 UTC (Thu)
+                               by <b>mvollrath</b> (subscriber, #183387)
+                              [<a href="/Articles/1081014/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mvollrath" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081014" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It sounds like van Riel did the thing you should never do: sending a half-baked AI-assisted email to anyone in a professional (or any) capacity.  To get feedback on design seems like a job for a thoughtfully crafted RFC, before any code is shared in bulk.  An AI can still assist with this, you just need to respect the audience.  Anytime you switch gears from talking to an LLM to talking to people, if you haven't taken the time to clean it up, you're putting it on someone else to pick through it.<br>
+<p>
+Shutsemau did put in the time, treating the LLM as a collaborator (who is available and fast but not always correct) building understanding throughout the process instead of a machine that magically makes code from an idea you had.  This plays better with how LLMs fundamentally work and demonstrates understanding of the strengths and weaknesses of the tool.  The tighter the feedback loop, the better.  It's more like pair programming than throwing a task over the wall.  Mind that, unlike pair programming with a real person, half of the shared understanding dissipates into a formless mass of information.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081014/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 8:10 UTC (Fri)
+                               by <b>rweikusat2</b> (guest, #117920)
+                              [<a href="/Articles/1081053/">Link</a>] (19 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rweikusat2" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081053" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'll stop subscribing to LWN unless you stop this mindless LLM marketing. I'm not interested in being sold these "warez."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081063"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 10:49 UTC (Fri)
+                               by <b>Karellen</b> (subscriber, #67644)
+                              [<a href="/Articles/1081063/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Karellen" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081063" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just to counter this, I am against LLMs in general, and perplexed at their uptake by Free Software projects. But I am still interesting in finding out which projects are using them, and why, and getting a well-researched outside view of what results those projects are actually seeing. Then, if I do end up in a discussion about LLMs my position can be well-grounded and doesn't necessarily come across as plain ranting. Although I can often end up doing that anyway, at least it will be well informed ranting :-) I appreciate the reporting.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081063/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081073"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 12:21 UTC (Fri)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1081073/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081073" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We're really not mindlessly pro-LLM.<br>
+<p>
+But whether you approve of the use of LLMs or not, there is certainly a lot of LLM-related news happening right now. Open source projects dealing with debates over their development policies is definitely in our typical topic area, even when doing so involves discussing LLMs. And we continue to cover plenty of non-LLM-related news.<br>
+<p>
+That said, of course you're entitled to stop subscribing if you no longer find value in our news coverage; we'll be sad to see you go, but we do very much appreciate the support that you've given us so far.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081073/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 19:51 UTC (Fri)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1081207/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081207" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think LLMs are the most interesting thing to happen in software development in a long time. I don't know how this will all turn out, but I do know that LWN will keep me informed of the impact. The comments here are (mostly) at least well informed, even if I don't agree with them.<br>
+<p>
+Keep up the reporting.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081189"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 13:41 UTC (Fri)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/1081189/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vbabka" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081189" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Calling this well-researched article "mindless LLM marketing" is frankly an insult to Jon and the rest of the LWN team and completely uncalled for.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081189/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081190"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 13:51 UTC (Fri)
+                               by <b>ljsloz</b> (subscriber, #158382)
+                              [<a href="/Articles/1081190/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ljsloz" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081190" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I personally find the blanket 'LLMs are bad and evil and I don't want to hear any more' approach to be actively harmful.<br>
+<p>
+By taking a position which is contradicted by reality on the ground (they are effective, there are suitable ways of using them, they do provide a productivity boost albeit far less than claimed), you lose any ability to do anything about the extremely negative aspects (slop, climate impact, imperiling of the entire world economy).<br>
+<p>
+Because you essentially put yourself in a fantasy world rather than dealing with reality which is messy, doesn't clearly have 'good' and 'bad' and requires nuanced thought.<br>
+<p>
+Naturally we all want to be emotionally satisfied by binary thinking. But that's just not how the world is.<br>
+<p>
+I gently suggest that you pay attention to those actually doing the work and experiencing the realities and who are taking risks to push back on the negatives, rather than immediately jumping to an emotional position.<br>
+<p>
+And to suggest that Jon or LWN or the team in any way blindly promotes AI is so at odds with the facts (including LWN being repeatedly DDoS'd by AI scrapers) it's silly.<br>
+<p>
+You should keep your subscription because, as an actual kernel developer, I can tell you that LWN is the _only_ press I've seen be consistently accurate and insightful on linux, the kernel, and open source as a whole. It's not even close.<br>
+<p>
+We should all remain very grateful for the work Jon + the team does here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081190/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081222"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 12:26 UTC (Sat)
+                               by <b>aimannajjar</b> (subscriber, #184277)
+                              [<a href="/Articles/1081222/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aimannajjar" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081222" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seriously, LWN seems compromised. Well, Big Tech has been trying to change Linux philosophy for awhile, maybe they finally did it?  Look at Ubuntu acting exactly like Microsoft. Now we've got a bunch of Satya Nadellas as maintainers. Too much pragmatism does have a cost<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081222/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081226"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 14:51 UTC (Sat)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1081226/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081226" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I have to admit to being entirely mystified by these comments.
+<p>
+These tools are being used.  One of the points of this article was that they are being used to create code at the core of the kernel.  Should we pretend that this is not happening?  Somehow I don't think that would serve our readers well.  LLMs will not go away just because we choose to ignore them.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081226/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 15:19 UTC (Sat)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1081228/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081228" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's definitely been an increase in trolling and outright hysteria, it's something I've been having to take time to deal with too.<br>
+<p>
+I think people's feelings on the AI companies at the forefront are entirely understandable (and I share a lot of those!); I wonder if it would help to highlight what's been going on with open weights LLMs. The latest open weights LLMs are starting to match or maybe even surpass the closed ones, the open software stacks are becoming much more capable, and the hardware required is going to quickly drop in price by an order of magnitude - the DRAM bubble will pop, there's a ton of fabs coming online now or very soon, and it's early days for the hardware architectures still. The only remaining piece we're dependent on giant corporations for is training, and not for long on that one, I think.<br>
+<p>
+Back in the early, early days of open source it was hard to get access to hardware - you needed to be affiliated with a university, or a company - or even a good compiler. It took time for stuff to get cheaper, and to democratize (and then turn into a different sort of lovely chaos). The development of AI is a bit reminiscent of that...<br>
+<p>
+The world is always changing, the current situation is never a permanent state of affairs :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081238"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 16:50 UTC (Sat)
+                               by <b>aimannajjar</b> (subscriber, #184277)
+                              [<a href="/Articles/1081238/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aimannajjar" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081238" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I apologize if I came across too harsh. I understand you are just reporting on LLM use in Linux kernel. While I think my comment was uncalled for, I think Linux maintainers might be missing some crucial aspect regarding the "public perception of AI" and how that might impact Linux image, especially when people are migrating their desktops to it. Microsoft, and to lesser extent Microsoft, made these mistakes and the backlash was strong.<br>
+<p>
+I believe much of the toxicity in AI discourse is due to the persistent "human-replacement" talking point championed by Big Tech CEOs, and their recurrent doubling-down on creating false hype by misrepresenting technical "achievements". <br>
+<p>
+All experienced programmers know that all LLM agents will inevitably (and repeatedly) choke in any serious non-localized code change requests, we also know there is no serious "national security risks" with Mythos or Fable, we also know that LLMs will not "self-improve themselves" in any meaningful way using this technology, not when they cannot even guarantee production databases safety without humans in the loop.<br>
+<p>
+Additionally all serious financial experts know that tech layoffs were not due to "AI productivity gains" but rather due to the irresponsible spending adventures and COVID-era fall outs.<br>
+<p>
+Yet despite all that, Big Tech, with assistance from media and US government, is insisting on inflicting lasting damage on 1) real humans, 2) societal stability and 3) even small open-source projects by creating an extremely false narrative that does not reflect true capabilities and benefits of LLM agents.<br>
+<p>
+When a large trusted open-source project is seen helping (in any way) those Big Tech's clearly-dark and psychotic ambitions, I think many people will feel disillusioned by such a free helping hand. <br>
+<p>
+I agree local models will feel like a good converging point of this messy journey, even cloud LLM services becoming a commodity service and not the hyped "gold mine" being portrayed is a satisfying end result to see. But I don't think the toxicity will go away that easily, not when Big Tech, US media and government are still acting like a psychotic propaganda machine - and certainly not when hundred of thousands of people are still suffering from economic downfalls of that irresponsible behavior by those elites.<br>
+<p>
+This is all to say, even if we wanted to be pragmatic about LLM use in Linux kernel, the toxicity that will come with that should be taken into account, especially when for the first time ever, the Year of the Linux Desktop is within reach.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081238/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081240"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 16:53 UTC (Sat)
+                               by <b>aimannajjar</b> (subscriber, #184277)
+                              [<a href="/Articles/1081240/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aimannajjar" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081240" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+* Sorry, meant to say  "Microsoft, and to a lesser extent Canonical, .. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081240/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081242"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 17:21 UTC (Sat)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1081242/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081242" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+100% agree with everything you have to say about Big Tech, and I could add a lot more of my own :)<br>
+<p>
+But I was interested in AI long before the AI companies came along, because understanding how consciousness and our own minds work is even more fascinating to me than understanding how computers work; it builds on a lot of mathematics and computability theory going back 100 years or more, and takes it to the next level, and I find it absolutely beautiful.<br>
+<p>
+And now we've got AIs that are legitimately capable of doing useful work, and I'm getting to see the realization of some of my own old ideas, and doing my own research (with the little time I have left over after bcachefs) into things that I wanted to be working on 20 years ago but never thought we'd crack. And in my own work, things that a year ago clearly needed to happen but looked like 10+ year projects (converting bcachefs to Rust, so I can keep making it more reliable and bulletproof, then formal verification) are now... completely tractable.<br>
+<p>
+This is bloody amazing!<br>
+<p>
+Yes, big tech absolutely sucks, and it's gotten worse over the course of my career, I'm seeing that too. But don't let it dominate your worldview and get you down.<br>
+<p>
+The basic spirit of open source and free software was that individuals can make a difference, freely collaborating, just trying to make things better, and that hasn't changed. We'll always still be here, as long as we keep it alive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081242/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081256"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 22:16 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1081256/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081256" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; All experienced programmers know that all LLM agents will inevitably (and repeatedly) choke in any serious non-localized code change requests, we also know there is no serious "national security risks" with Mythos or Fable, we also know that LLMs will not "self-improve themselves" in any meaningful way using this technology, not when they cannot even guarantee production databases safety without humans in the loop.</span><br>
+<p>
+First, we don't actually know that LLMs can't self-improve. Fifteen years ago we also "knew" that things like natural-language queries and machines passing the Turing test is just a crazy talk.<br>
+<p>
+Second, even _with_ the current limitations the LLMs are still powerful tools. If nothing else changes and the LLM development stays frozen forever, existing models _already_ require significant adjustments in the development process.<br>
+<p>
+So yeah, LWN providing overview of AI effects on the kernel development is very interesting and important.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081256/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081267"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 23:44 UTC (Sat)
+                               by <b>aimannajjar</b> (subscriber, #184277)
+                              [<a href="/Articles/1081267/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aimannajjar" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081267" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+LLMs can't self-improve because they're shown to be highly unreliable, i.e they hallucinate with high degree of confidence. Being both non-deterministic and highly unreliable is clear evidence they lack "intelligence" that is required to achieve self improvement.<br>
+<p>
+Many pioneer researchers have said LLM as a technology is a dead-end for the stated goal of those AI companies, including things like AGI, and the so-called self-improvement.<br>
+<p>
+LLMs are useful as tools, correct - too bad they didn't market them as such, I guess?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081267/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081268"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2026 0:57 UTC (Sun)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1081268/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081268" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have you met the average human? :)<br>
+<p>
+Humans guess, confabulate and outright hallucinate all the time. Tracking how well we know the things we think we know and why is a skill that takes effort to develop, and many never develop at all.<br>
+<p>
+The big obstacle with LLM self-learning is a thing called the credits problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081268/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081271"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2026 2:28 UTC (Sun)
+                               by <b>aimannajjar</b> (subscriber, #184277)
+                              [<a href="/Articles/1081271/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aimannajjar" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081271" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah but humans can recognize when they have made a mistake and self-correct. The ones who are stuck in a hallucination cycle typically require medical intervention or end up in a self-destructive loop if they refuse help :) <br>
+<p>
+LLMs can happily continue iterating with compounding hallucinations, not only that, LLMs that are trained on other LLM output degenerate and done repeatedly it leads to model collapse. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081271/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081272"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2026 5:40 UTC (Sun)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1081272/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081272" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Yeah but humans can recognize when they have made a mistake and self-correct. The ones who are stuck in a hallucination cycle typically require medical intervention or end up in a self-destructive loop if they refuse help :)</span><br>
+<p>
+You've never seen an LLM realize it made a mistake and self-correct?<br>
+<p>
+<span class="QuotedText">&gt; LLMs can happily continue iterating with compounding hallucinations, not only that, LLMs that are trained on other LLM output degenerate and done repeatedly it leads to model collapse. </span><br>
+<p>
+That's the credits problem I was referring to.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081272/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 6, 2026 6:41 UTC (Mon)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/1081369/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anselm" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081369" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+Calling what LLMs do “hallucination” is misleading because in humans, hallucinations are issues with spurious <em>input</em> processing whereas with LLMs, “hallucinations” are an <em>output</em> problem. A more appropriate technical term would be “bullshitting” (as per Harry G. Frankfurt) – the model just produces output regardless of its veracity, because LLMs have no knowledge, or concept of “correct” or “wrong”; all they're designed to do is to come up with a probable continuation of their output stream given their weights and context.
+</p>
+<p>
+Of course bullshitting is something that some people do, too, but it's not generally considered a desirable trait in one's friends.
+</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081376"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 6, 2026 13:13 UTC (Mon)
+                               by <b>aimannajjar</b> (subscriber, #184277)
+                              [<a href="/Articles/1081376/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aimannajjar" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081376" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's an interesting perspective and I agree with it. Generally speaking, anthropomorphizing those models is the most annoying thing those companies have chosen to do, Anthropics literally is now talking about models ability to "dream". <br>
+<p>
+I've seen research papers by AI labs on "How to detect when AI lie", I asked the researcher presenting the paper "how is lying different from hallucinating?" - he answered (paraphrasing): "in the first the model is aware of the correct answer but is choosing to give the wrong answer". Those companies are suffering from an advanced form of psychosis when they think models have "choices" or "intentions". What's wrong with just saying "failure" or "error" like any other software?<br>
+<p>
+I think it reveals something deeper about their view of the world, and their visions for it. It also explains the reckless spending chasing AGI and the toxic AI fear-mongering, which of course all is backfiring now.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081376/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081528"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To state this again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 6, 2026 14:56 UTC (Mon)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1081528/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1081528" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Humans have more or less consistent personality. If you find that someone to be technically inept you will ignore them.<br>
+They have stake in their professional reputation.<br>
+<p>
+On the other hand, LLM are totally unpredictable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081528/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1082513"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">HugeTLB CMA</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2026 12:37 UTC (Mon)
+                               by <b>prati0100</b> (subscriber, #160597)
+                              [<a href="/Articles/1082513/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="prati0100" />
+                <input type="hidden" name="return" value="/Articles/1080162/#CommAnchor1082513" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Hugetlbfs is inflexible, though; its reserved pages cannot be used for other purposes</span><br>
+<p>
+That's not exactly true. Since cf11e85fc08c ("mm: hugetlb: optionally allocate gigantic hugepages using cma"), released in v5.7, you can back hugetlb pages with CMA, which lets them be used for things like page cache, anon memory, etc. So while the memory can't be used for everything (no unmovable allocations for example), it isn't completely wasted either.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082513/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,345 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The hierarchical constant bandwidth server scheduler [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The hierarchical constant bandwidth server scheduler">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The POSIX realtime model, which is implemented in the Linux kernel, can ensure that a realtime  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1025077/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The hierarchical constant bandwidth server scheduler</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 18, 2025</br>
+           </div>
+The <a
+href="https://pubs.opengroup.org/onlinepubs/7908799/xsh/realtime.html">POSIX
+realtime model</a>, which is implemented in the Linux kernel, can ensure
+that a realtime process obtains the CPU time it needs to get its job done.
+It can be less effective, though, when there are multiple realtime
+processes competing for the available CPU resources.  The <a
+href="/ml/all/20250605071412.139240-1-yurand2000@gmail.com">hierarchical
+constant bandwidth server</a> patch series, posted by Yuri Andriaccio with
+work by Luca Abeni, Alessio Balsini, and Andrea Parri, is a modification to
+the Linux scheduler intended to make it possible to configure systems with
+multiple realtime tasks in a deterministic and correct manner.
+<p>
+The core concept behind POSIX realtime is priority — the highest-priority
+task always runs.  If there are multiple processes at the same priority,
+the result depends on whether they are configured as <tt>SCHED_FIFO</tt>
+tasks (in which case the running task gets the CPU until it voluntarily
+gives it up) or as <tt>SCHED_RR</tt> (causing the equal-priority tasks to
+share the CPU in time slices).  This model allows a single realtime task to
+monopolize a CPU indefinitely, perhaps at the expense of other realtime
+tasks that also need to run.
+<p>
+In an attempt to improve support for systems with multiple realtime tasks,
+the <a
+href="https://docs.kernel.org/scheduler/sched-rt-group.html">realtime group
+scheduling</a> feature was added to the 2.6.25 kernel in 2008 by Peter
+Zijlstra.  It allows a system administrator to put realtime tasks into
+control groups, then to limit the amount of CPU time available to each
+group.  This feature works and is used, but it has never been seen as an
+optimal solution.  It is easy to misconfigure (the documentation warns that
+"<q>fiddling with these settings can result in an unstable system</q>"),
+complicates the scheduler in a number of ways, and lacks a solid
+theoretical underpinning.
+<p>
+Kernel developers are not always strongly motivated by theoretical proofs,
+preferring to observe how real-world systems actually behave.  But a
+certain amount of rigor can be appropriate in the realtime realm.  If a
+realtime system is being used to, for example, guide a motor vehicle on a
+busy highway, it's important that said system quickly obtain its needed CPU
+time when that time is needed.  "It appears to work most of the time" is
+not deemed sufficient for such applications.
+<p>
+What realtime group scheduling is aiming for is called a "constant
+bandwidth server" (CBS) scheduler.  In such a system, each task is
+characterized by two parameters: the amount of CPU time it needs (the
+"worst-case execution time") and how often it needs that time (the
+"period").  In a properly configured system, the scheduler can ensure that
+every realtime task gets the CPU time it needs when it needs that time.
+There <i>is</i> a CBS scheduler in the kernel now, in the form of the
+deadline scheduler (see <a href="/Articles/743946/">this article</a> by the
+much-missed Daniel Bristot de Oliveira for details), but this scheduler is
+not hierarchical, and requires realtime tasks to be written specifically
+for it.
+<p>
+The hierarchical CBS server is an extension of the CBS concept to allow
+multiple realtime tasks to be organized (and controlled) in a hierarchy —
+specifically, the control-group hierarchy on Linux systems.  It was first
+described in <a
+href="http://retis.sssup.it/~lipari/papers/lipariBaruah2001-1.pdf">this
+2001 paper by Giuseppe Lipari and Sanjoy Baruah</a>.  The actual implementation,
+of course, is somewhat removed from an academic paper, but it relies on
+that paper's theoretical underpinnings.
+<p>
+When running under the hierarchical constant bandwidth server, each control
+group has two knobs to control the resource reservation:
+<tt>cpu.rt_period_us</tt> (the period) and <tt>cpu.rt_runtime_us</tt> (the
+required CPU time); both knobs are expressed in microseconds.  If
+<tt>cpu.rt_period_us</tt> is set to <tt>1000000</tt>, and
+<tt>cpu.rt_runtime_us</tt> is set to <tt>100000</tt>, then the tasks placed
+within that control group will be entitled to 100ms of CPU time every
+second, or 10% of one CPU overall.  Within the group, tasks will compete
+with each other using the normal priority rules.
+<p>
+To implement this guarantee, the hierarchical CBS scheduler reuses a
+mechanism that was first added for a different purpose: the <a
+href="/Articles/934415/">deadline server</a>.  It has long been deemed
+important to set aside a small amount of CPU time for normal-priority tasks
+to run, even if a realtime task wants all of the time it can get.  That
+small window of time can be used, for example, to regain control of a
+system if a realtime task has gone off the rails and will not release the
+CPU.
+<p>
+Implementing this behavior has proved challenging in the past; for years, a
+throttling mechanism was used to push realtime tasks out of the CPU for 5%
+(by default) of the available time.  This exclusion would happen, though,
+even if nothing else needed to run, causing the CPU to go idle when a
+realtime task was runnable.  This behavior irritated developers enough that
+a solution was eventually found.
+<p>
+That solution was to create a special task called a "deadline server" that
+would run under the deadline scheduler.  Deadline tasks have the highest
+priority of all under Linux, with the ability to push aside even POSIX
+realtime tasks.  The deadline server is configured to run in such a way
+that it is entitled to 5% of the available CPU time (50ms out of every
+second); it uses that time to run tasks in the normal-priority run queues.
+If there are tasks waiting to run, the deadline server ensures that they
+get a chance; if, instead, there are no runnable tasks, the deadline server
+just gives up the CPU, making it available for any realtime tasks that may
+be competing for it.
+<p>
+Deadline servers, thus, were added to ensure that non-realtime tasks could
+run, but they can also be pressed into service for realtime tasks.  When a
+control group is configured to run under the hierarchical CBS server, a
+deadline server is set up to run for the execution time and period
+configured for that group.  When the deadline server runs, it will schedule
+the tasks within that group in the usual way, ensuring that the group as a
+whole gets the resources assigned to it, even if there are higher-priority
+realtime tasks trying to run elsewhere in the system.
+<p>
+The algorithm described in the paper only envisions a two-level
+control-group hierarchy, with the root group being one of those levels.
+That should suffice for most real-world realtime applications; excess
+complexity does not help in the design of a correctly functioning realtime
+system.  Even so, <a
+href="/ml/all/20250605071412.139240-10-yurand2000@gmail.com">the final
+patch</a> in the series modifies the implementation to allow deeper
+control-group hierarchies.  Only the leaf groups (those with no child
+groups) are able to contain realtime tasks, though.  Given the use of
+absolute CPU-time and period values in CBS, multiple layers of control do
+not make sense the way they do with normal (non-realtime) group scheduling. 
+<p>
+The end result is a solution that is, hopefully, more deterministic than
+realtime group scheduling while having less of an impact on the scheduler's
+code.  One positive indication in the latter regard is that the patch
+series, after removing the existing realtime group code, adds the new
+functionality while reducing the size of the scheduler by nearly
+400&nbsp;lines.
+<p>
+This work was <a href="/Articles/1021332/#hcbs">discussed</a> at the 2025 Power
+Management and Scheduling in the Linux Kernel Summit, so there should be a
+general consensus on the direction that it is taking.  The number of
+comments on the posted series, as of this writing, is small; that will
+probably change over time as other developers get a chance to look at the code.
+In any case, a change of this nature is likely to take a while before it is
+considered ready for the mainline kernel; as always, one should never
+assume that a deadline applies to the acceptance of realtime patches.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Realtime</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Realtime</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1024757/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1025896"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shallow hierarchy: phew!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2025 1:20 UTC (Thu)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1025896/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1024757/#CommAnchor1025896" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <br>Jonathan Corbet wrote
+<blockquote>
+The algorithm described in the paper only envisions a two-level control-group hierarchy, with the root group being one of those levels. 
+</blockquote>
+
+<p>That's a <i>really</i> good thing: Solaris 9 resource manager used a multi-level hierarchy, and we were constantly having to figure out what the control files meant... which was not always what you would think they said (:-))
+
+<p>My team was a beta-tester of the Solaris 10 resource manager, which had a flat hierarchy under the root. The files meant what they said. That was far better!
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025896/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025922"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shallow hierarchy: phew!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2025 11:07 UTC (Thu)
+                               by <b>rhbvkleef</b> (subscriber, #154505)
+                              [<a href="/Articles/1025922/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rhbvkleef" />
+                <input type="hidden" name="return" value="/Articles/1024757/#CommAnchor1025922" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Even so, the final patch in the series modifies the implementation to allow deeper control-group hierarchies. Only the leaf groups (those with no child groups) are able to contain realtime tasks, though. Given the use of absolute CPU-time and period values in CBS, multiple layers of control do not make sense the way they do with normal (non-realtime) group scheduling. </span><br>
+<p>
+How do you feel about this then? I think this is a reasonable strategy to retain meaning within the hierarchical structure of the current cgroups.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025922/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025926"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shallow hierarchy: phew!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2025 13:29 UTC (Thu)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1025926/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1024757/#CommAnchor1025926" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree, we could see integration issues with the current multi-level cgroups tree. The latter is still tricky, but not misleading (:-))<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025926/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1026330"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shallow hierarchy: phew!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2025 20:44 UTC (Fri)
+                               by <b>aviallon</b> (subscriber, #157205)
+                              [<a href="/Articles/1026330/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aviallon" />
+                <input type="hidden" name="return" value="/Articles/1024757/#CommAnchor1026330" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe one use case would be to allow containers to have their own realtime tasks.<br>
+Would this implementation allow that?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1026330/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

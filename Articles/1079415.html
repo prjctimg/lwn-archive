@@ -1,0 +1,429 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The kernel's iomap layer [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The kernel's iomap layer">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Conversations about the kernel's filesystem implementations often involve a layer called 'iomap [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1080836/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The kernel's iomap layer</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 6, 2026</br>
+           </div>
+Conversations about the kernel's filesystem implementations often involve a
+layer called "iomap", but relatively few people can reliably say what iomap
+actually is.  That is just the kind of gap that LWN exists to fill.  In
+short, iomap handles the mapping between data in the filesystem space
+(identified by a file of interest, and an offset within that file) and in
+the storage space (which may be a memory location, or a set of blocks on a
+storage device).  Using that mapping, iomap handles a long list of common,
+filesystem-related tasks, allowing a lot of boilerplate code to be removed
+from individual filesystem implementations.
+<p>
+The iomap code was first <a
+href="https://git.kernel.org/linus/ae259a9c8593">introduced as such</a> by
+Christoph Hellwig for the 4.8 kernel release in late 2016, but much of that
+functionality was based on an earlier implementation by Dave
+Chinner in the XFS filesystem.  It has grown over the years as filesystems
+have been converted over and new functionality has been added.  The current
+implementation consists of a dozen files in the <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/fs/iomap"><tt>fs/iomap</tt></a>
+directory.  It is implemented as two broad layers, a low-level mapping
+between files and their backing store, which is used by higher-level code
+to implement much of the functionality that a filesystem needs.
+<p>
+<h4>The storage mapping</h4>
+<p>
+Every file implemented by a filesystem, with few exceptions, is a
+representation of a series of bytes stored on a persistent medium somewhere.
+Much of the work a filesystem comes down to implementing operations
+expressed in terms of files and offsets by moving data between memory and
+that persistent media.  A key part of this task is managing the mapping
+between those two domains.
+<p>
+In the earlier days of Linux, this mapping was represented by <a
+href="930173.html">buffer heads</a>, but they suffer from a number of
+problems.  As a direct mapping between a disk block and an equally sized
+region of memory, buffer heads are not designed for today's large files and
+extent-based filesystems.  It is difficult to generate large, efficient
+<span class="nobreak">I/O</span> operations when the data involved is
+represented by buffer heads.  A single contiguous extent on disk might
+require hundreds of buffer heads, each managing a single block, which must
+be reassembled into a small number of <span class="nobreak">I/O</span>
+operations.
+<p>
+With iomap, a mapping that might have involved a large number of buffer
+heads can, instead, be expressed with a single <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/iomap.h#L117"><tt>iomap</tt>
+structure</a>:
+<p>
+<pre>
+    struct iomap {
+	u64			addr; 		/* disk offset of mapping, bytes */
+	loff_t			offset;		/* file offset of mapping, bytes */
+	u64			length;		/* length of mapping, bytes */
+	u16			type;		/* type of mapping */
+	u16			flags;		/* flags for mapping */
+	struct block_device	*bdev;		/* block device for I/O */
+	struct dax_device	*dax_dev; 	/* dax_dev for dax operations */
+	void			*inline_data;
+	void			*private;	/* filesystem private */
+	u64			validity_cookie; /* used with .iomap_valid() */
+    };
+</pre>
+<p>
+To simplify things a bit, an instance of this structure says that the range
+of a file starting at <tt>offset</tt> bytes and continuing for
+<tt>length</tt> bytes is stored at <tt>addr</tt> on the underlying device
+which, in turn, is identified by <tt>bdev</tt> (for normal block devices),
+<tt>dax_dev</tt> (for persistent-memory DAX devices), or the memory range at
+<tt>inline_data</tt>.  The <tt>type</tt> field describes what kind of
+mapping is actually represented:
+<p>
+<ul class="spacylist">
+<li> <tt>IOMAP_MAPPED</tt> indicates a normal mapping from the file to
+     space on the persistent storage device.
+<li> <tt>IOMAP_INLINE</tt>, instead, is a mapping between the file and
+     the memory pointed to by <tt>inline_data</tt>.  This sort of mapping
+     might be used for tiny files where the file data can be stored in the
+     file inode itself.
+<li> <tt>IOMAP_HOLE</tt> means that the underlying storage has not been
+     allocated — that there is no mapping at all.  It is only valid for
+     read operations, and the result is that a read from this range will
+     return zeroes.
+<li> <tt>IOMAP_DELALLOC</tt> also says that the mapping does not exist, but
+     that it will be created at a future time.
+<li> <tt>IOMAP_UNWRITTEN</tt> says that the mapping exists, but that the
+     backing store has not been written and may contain random (or
+     sensitive) data.  Reads from this range will return zeros rather than
+     going to the backing store.
+</ul>
+<p>
+There is <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/iomap.h#L36">an
+extensive set of <tt>flags</tt></a> that can be set by the filesystem to
+affect how the <span class="nobreak">I/O</span> is done, mark a shared
+mapping that must be copied on write, and more.
+<p>
+These <tt>iomap</tt> structures must be filled in by the filesystem
+implementation in response to requests from the iomap layer.  Those
+requests will be received by way of a couple of callbacks supplied by the
+filesystem:
+<p>
+<pre>
+    struct iomap_ops {
+	/*
+	 * Return the existing mapping at pos, or reserve space starting at
+	 * pos for up to length, as long as we can do it as a single mapping.
+	 * The actual length is returned in iomap-&gt;length.
+	 */
+	int (*iomap_begin)(struct inode *inode, loff_t pos, loff_t length,
+			unsigned flags, struct iomap *iomap,
+			struct iomap *srcmap);
+	/*
+	 * Commit and/or unreserve space previous allocated using iomap_begin.
+	 * Written indicates the length of the successful write operation which
+	 * needs to be commited, while the rest needs to be unreserved.
+	 * Written might be zero if no data was written.
+	 */
+	int (*iomap_end)(struct inode *inode, loff_t pos, loff_t length,
+			ssize_t written, unsigned flags, struct iomap *iomap);
+    };
+</pre>
+<p>
+Before an operation starts, <tt>iomap_begin()</tt> will be called to inform
+the filesystem that the indicated region of the file is about to be read or
+written.  The file involved is identified by <tt>inode</tt>, with
+<tt>pos</tt> and <tt>length</tt> indicating the range of the file that the
+operation will affect.  The <tt>flags</tt> parameter has <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/iomap.h#L194">a
+number of options</a> describing what is about to happen, including:
+<p>
+<ul class="spacylist">
+<li> <tt>IOMAP_WRITE</tt>: the given range will be written to, so space
+     must be allocated (if not already present).  The absence of this flag
+     implies a read operation.
+<li> <tt>IOMAP_ZERO</tt>: zero out a range of the file.
+<li> <tt>IOMAP_DIRECT</tt>: a direct-<span class="nobreak">I/O</span> operation, avoiding the page
+     cache, is called for.
+</ul>
+<p>
+The <tt>iomap_begin()</tt> function must fill in the provided
+<tt>iomap</tt> structure with a suitable mapping for at least the first
+byte of the requested operation; obviously, it is better to map a much
+larger range if that can be done with a single mapping.  The
+<tt>srcmap</tt> parameter exists for cases where data for the operation
+(imagine a small write that requires reading a block before writing a
+portion of it) must be read from a different device.
+<p>
+The <tt>iomap_end()</tt> function will be called when the operation
+completes; the <tt>written</tt> parameter will contain the number of bytes
+that were actually written.  This callback is to allow filesystems to clean
+up after an operation, account for allocated blocks, and release any blocks
+that were not actually written.
+<p>
+<h4>Filesystem I/O</h4>
+<p>
+The mappings as described above are only useful if the kernel can use them
+to actually perform <span class="nobreak">I/O</span> and implement filesystem functionality in general.
+Iomap provides a lot of functions that can help in this regard; they are,
+as a general rule, immaculately undocumented, requiring filesystem
+developers to dig through the source to discover them and figure out how to
+use them.  Whether this state of affairs might have slowed the iomap
+conversion is left for the reader to conclude.
+<p>
+Filling in all of that documentation is rather beyond the scope of what
+this article can achieve, but an example can be illustrative.  Consider the
+case of buffered reads.  If an application calls <a
+href="https://man7.org/linux/man-pages/man2/read.2.html"><tt>read()</tt></a>
+on a file, there are a number of things that need to happen, including
+allocating space in the page cache, locating the data on disk, reading the
+data into the page cache, and copying it to the user-space buffer.  The
+kernel's virtual filesystem layer handles many of those details, but there
+are pieces that the filesystem must implement.
+<p>
+For buffered <span class="nobreak">I/O</span>, the filesystem must provide a <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/fs.h#L401"><tt>struct
+address_space_operations</tt></a> with a number of callbacks to implement
+specific operations.  One of those, used for read operations, is
+<tt>read_folio()</tt>:
+<p>
+<pre>
+    int (*read_folio)(struct file *file, struct folio *folio);
+</pre>
+<p>
+The <tt>folio</tt> structure describes the memory into which the data
+should be read; it also contains the details of the file that the folio
+maps, the folio's offset within the file, and its length.  The filesystem
+should respond by performing the actual read and marking the folio as being
+current.  That might involve performing several <span class="nobreak">I/O</span> operations if the folio
+spans multiple, non-contiguous blocks on the backing device.
+<p>
+A filesystem implementation can implement most of the work of
+<tt>read_folio()</tt> with a call to <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/fs/iomap/buffered-io.c#L585"><tt>iomap_read_folio()</tt></a>,
+but it is not quite that simple; there is a certain amount of glue that
+must be applied in the filesystem's <tt>read_folio()</tt> callback first.
+That includes the definition of an <tt>iomap_read_ops</tt> structure:
+<p>
+<pre>
+    struct iomap_read_ops {
+	int (*read_folio_range)(const struct iomap_iter *iter,
+				struct iomap_read_folio_ctx *ctx, size_t len);
+	void (*submit_read)(const struct iomap_iter *iter,
+			    struct iomap_read_folio_ctx *ctx);
+        /* ... */
+    };
+</pre>
+<p>
+The <tt>read_folio_range()</tt> operation will do the work of creating a
+single read operation, perhaps only covering a portion of a larger request.
+If <tt>read_folio_range()</tt> is synchronous, there is no need for a
+<tt>submit_read()</tt> callback; otherwise that function should be provided
+to actually start the read operations. The arguments to both functions are
+an <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/iomap.h#L233"><tt>iomap_iter</tt></a>
+structure that contains, among other things, the current read position, and
+the <tt>ctx</tt> argument, which is an instance of this structure type:
+<p>
+<pre>
+    struct iomap_read_folio_ctx {
+	const struct iomap_read_ops *ops;
+	struct folio		*cur_folio;
+	struct readahead_control *rac;
+	void			*read_ctx;
+	loff_t			read_ctx_file_offset;
+    };
+</pre>
+<p>
+This structure should be created in the filesystem's <tt>read_folio()</tt>
+implementation; <tt>cur_folio</tt> should be set to the <tt>folio</tt>
+argument passed in, and <tt>ops</tt> to the filesystem's
+<tt>iomap_read_ops</tt> structure.  Happily, many filesystems do not
+actually have to create their own <tt>iomap_read_ops</tt>; the iomap layer
+has implementations of its own for the common cases.  So, for example, a
+disk-based filesystem could use <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/fs/iomap/bio.c#L152"><tt>iomap_bio_read_ops</tt></a>
+rather than supplying its own.
+<p>
+With the appropriate structures in place, a <tt>read_folio()</tt>
+implementation comes down to a call to <tt>iomap_read_folio()</tt>:
+<p>
+<pre>
+    void iomap_read_folio(const struct iomap_ops *ops,
+	  		  struct iomap_read_folio_ctx *ctx,
+			  void *private);
+</pre>
+<p>
+Here, the <tt>ops</tt> structure is, finally, the set of mapping operations
+that were described some time back.  The iomap layer will use those
+operations to map the read onto one or more ranges in the file's backing
+store, then use the provided read operations to read those ranges into the
+provided folio.
+<p>
+The above sequence of calls looks something like this:
+<p>
+<blockquote>
+  <img src="../_static/images/2026/iomap-sequence.png" alt="[Call sequence diagram]"
+       class="photo">
+</blockquote>
+<p>
+The iomap layer hides a lot of the complexity that comes with implementing
+a filesystem, but a fair amount still leaks through; much of it has been
+craftily glossed over here.  For example, the <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/pagemap.h#L1331"><tt>readahead_control</tt>
+structure</a> in <tt>struct iomap_read_folio_ctx</tt> provides the
+parameters for readahead operations, which may bring in a set of blocks
+speculatively in the hope of accelerating future reads.
+<p>
+Buffered-write operations are implemented, in <tt>struct
+address_space_operations</tt>, by the <tt>writepages()</tt> callback.
+There is a similar impedance-matching task to be done here.  The <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/iomap.h#L438"><tt>iomap_writeback_ops</tt>
+structure</a> provides a set of low-level callbacks to implement writes;
+that should be stored in an <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/include/linux/iomap.h#L469"><tt>iomap_writepage_ctx</tt>
+structure</a>, then passed to <a
+href="https://elixir.bootlin.com/linux/v7.1.1/source/fs/iomap/buffered-io.c#L1944"><tt>iomap_writepages()</tt></a>.
+<p>
+Many other filesystem operations have iomap support; these include direct
+<span class="nobreak">I/O</span>, DAX <span class="nobreak">I/O</span>,
+seeking within files, handling page faults, file truncation, swap-file
+activation, and more.  The above snide comments notwithstanding, there is
+<a href="https://docs.kernel.org/filesystems/iomap/index.html">some
+documentation for iomap</a> included with the kernel; it was <a
+href="https://git.kernel.org/linus/a7ca193bc9b6">added to the 6.11
+release</a> by Darrick Wong, who was drawing on work from a number of
+developers.
+<p>
+<h4>In conclusion</h4>
+<p>
+The iomap subsystem is far from complete, with new work being merged in
+almost every development cycle.  Recent changes include support for files
+with <a
+href="https://docs.kernel.org/filesystems/fsverity.html">fs-verity</a>
+integrity protection, the ability to generate and verify <a
+href="https://deepwiki.com/songtao-vip/linux-block/8.2-t10-protection-information">T10
+protection information</a>, better readahead support, and more.  There is,
+of course, also the occasional <a
+href="/ml/all/2026062550-CVE-2026-53165-7592@gregkh/">security fix</a> to
+take care of.  There is work underway that may cause the
+<tt>iomap_begin()</tt> and <tt>iomap_end()</tt> callbacks described above
+to be replaced with <a
+href="/ml/all/20260701000949.1666714-1-joannelkoong@gmail.com">an
+iterator-based API</a> and to <a
+href="/ml/all/20260629120124.25223-1-changfengnan@bytedance.com">improve
+direct-I/O performance</a>.  Filesystem conversions continue, with work on
+converting the <a
+href="/ml/all/20260518114705.9601-1-linkinjeon@kernel.org/">exfat</a> and
+<a href="/ml/all/cover.1782422707.git.jbingham@gmail.com/">minix</a>
+filesystems to use iomap under consideration now.  In other words, iomap is
+a fairly typical busy core-kernel subsystem.
+<p>
+All told, implementing a filesystem involves a certain amount of complexity
+that cannot be abstracted away entirely.  The iomap layer does, however,
+handle a lot of the low-level details that every filesystem must take care
+of.  Use of iomap also makes features like large-folio support work with
+little additional effort.  So it is not surprising that, over the years,
+most actively maintained filesystems have, at least partially, transitioned
+to iomap.
+<p>
+(Thanks to Steinar H. Gunderson for suggesting this topic.)<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/iomap</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1079415/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1081739"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Iomap documentation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2026 8:15 UTC (Wed)
+                               by <b>jkoolstra</b> (subscriber, #180288)
+                              [<a href="/Articles/1081739/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jkoolstra" />
+                <input type="hidden" name="return" value="/Articles/1079415/#CommAnchor1081739" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks Jonathan for this article. We have been in need of better documentation for iomap, the current kernel docs are quite confusing. I am sure better documentation will help convert more filesystems :)<br>
+Best, Jori.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081739/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

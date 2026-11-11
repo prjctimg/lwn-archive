@@ -1,0 +1,239 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>User trace events, one year later [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="User trace events, one year later">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel has a well-developed mechanism for the control of tracing of events in  kernel space [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/927806/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>User trace events, one year later</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 3, 2023</br>
+           </div>
+The kernel has a well-developed mechanism for the control of tracing of
+events in 
+kernel space.  Developers often want to be able to trace user-space
+activity as well, using the same interfaces, but that mode is rather less
+well supported.  One year ago, <a href="889607.html">an attempt to
+add an API</a> for the control of user-space trace events ran into trouble
+and has never been fully enabled.  Now, Beau Belgrave is back with <a
+href="/ml/linux-kernel/20230328235219.203-1-beaub@linux.microsoft.com/">a
+reworked API</a> that may finally result in this mechanism becoming
+generally available.
+<p>
+User-space trace events, like those in the kernel, tend to be inactive most
+of the time; nobody is listening, so no data should be generated.  In the
+kernel, inactive tracepoints are patched out of the binary entirely, but
+that sort of run-time patching is not readily available in user space.  So
+user-space code must actually check whether a given trace event is enabled
+and, if so, produce the requisite data.  Since any given event is almost
+certainly inactive, that check should be as fast as possible.
+<p>
+In 2022, the API proposed by Belgrave required programs to map a special
+page into their address space with <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>.
+Each event registered with the kernel would be assigned a byte within that
+mapped page; whenever an event was activated, the kernel would store a
+non-zero value in the appropriate byte.  The program could then check that
+byte whenever a tracepoint was hit to determine whether the tracing data
+should be produced.
+<p>
+There were a few complaints about that API.  The use of a whole byte to
+store a single bit of information was called out as being wasteful.  The
+loss of seven bits of memory may not seem like a heavy cost, but the real
+problem was with cache utilization.  Using a single bit for each event
+would allow the number of event flags stored in a cache line to be
+increased by a factor of eight.  Since those flags might be checked
+frequently in a program's hottest paths, cache efficiency can make a
+significant difference in the overall cost of supporting tracing.  The need
+to map a single page also does not sit well with libraries that might
+support tracing independently of the programs they are linked into.
+<p>
+These complaints came late in the development process, after the code had
+been pulled into the tracing tree.  The patches found their way into the
+5.18 kernel release despite the criticisms, but the whole mechanism was
+marked "broken" in the kernel configuration system.  As a result, the
+user-events interface is not enabled by default and is not built into most
+kernels today.
+<p>
+The new API does away with the mapped page entirely.  To register an event
+with the kernel, a program should open
+<tt>/sys/kernel/tracing/user_events_data</tt> and issue a
+<tt>DIAG_IOCSREG</tt> <a
+href="https://man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>
+call, passing this structure as an argument:
+<p>
+<pre>
+    struct user_reg {
+	__u32 size;
+	__u8 enable_bit;
+	__u8 enable_size;
+	__u16 flags;
+	__u64 enable_addr;
+	__u64 name_args;
+	__u32 write_index;
+    };
+</pre>
+<p>
+The size of the <tt>user_reg</tt> structure itself should be stored in
+<tt>size</tt>; that will allow the kernel to provide backward compatibility
+should this structure grow in the future.  The <tt>ioctl()</tt> call will
+register a location at <tt>enable_addr</tt> that is <tt>enable_size</tt>
+bytes in length; that size must be four or eight bytes on a 64-bit system.
+The bit within that value that controls the event is described by
+<tt>enable_bit</tt>; the kernel will set or clear that bit (without
+disturbing the rest of the value) whenever the event is activated or
+deactivated.  The <tt>flags</tt> value should be zero, and
+<tt>name_args</tt> points to a string that describes the data returned by
+the trace event using <a
+href="https://www.kernel.org/doc/html/latest/trace/user_events.html#command-format">this
+format</a>.
+<p>
+On successful registration, the kernel will store a value into
+<tt>write_index</tt> that should be used whenever the program generates
+data for the given event.  There is another operation
+(<tt>DIAG_IOCSUNREG</tt>) that can be used to unregister an event
+<p>
+The new API allows the event-enable bits to be packed densely if that suits
+an applications needs.  Otherwise, each bit could be placed into its own
+value, with the other bits in each used for other purposes, perhaps by
+user-space tracers.  The result is a more flexible API that, with luck,
+addresses the criticisms that were aimed at its predecessor.
+<p>
+This work is in its tenth revision as of this writing; the last few rounds
+have only brought relatively minor changes.  That would suggest that
+reviewers are happy with the API at this point.  The work <a
+href="/ml/linux-kernel/20230329194516.146147554@goodmis.org/">appears to be
+poised</a> to head upstream during the 6.4 merge window, accompanied by <a
+href="/ml/linux-kernel/20230329194554.139185152@goodmis.org/">a patch</a>
+noting that the new API "<q>appears to be as stable as it will be without
+the use of a crystal ball</q>" and finally removing the "broken" marking
+from the configuration option.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Tracing</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/927595/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor928820"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User trace events, one year later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2023 8:41 UTC (Wed)
+                               by <b>jtepe</b> (subscriber, #145026)
+                              [<a href="/Articles/928820/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jtepe" />
+                <input type="hidden" name="return" value="/Articles/927595/#CommAnchor928820" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      What happens with the old API?
+
+<blockquote> "The patches found their way into the 5.18 kernel release despite the criticisms, but the whole mechanism was marked "broken" in the kernel configuration system. As a result, the user-events interface is not enabled by default and is not built into most kernels today."</blockquote>
+
+From what I understand the kernel goes out of its way not to break user space. So once an API has been published, it should be very hard to remove/replace it again.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/928820/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor928830"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Old API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2023 13:28 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/928830/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/927595/#CommAnchor928830" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The "not break user space" part is key.  The fact that this option was marked as "broken" makes it highly unlikely that any users of the old API exist to be broken.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/928830/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

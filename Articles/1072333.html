@@ -1,0 +1,349 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Revisiting mshare [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Revisiting mshare">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Linux can share memory between processes, but each process (almost always) has its own set of p [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1071536/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Revisiting mshare</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 13, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+Linux can share memory between processes, but each process (almost always)
+has its own set of page tables.  In situations where vast numbers of
+processes are sharing a memory region, the combined size of the page
+tables can exceed that of the shared memory itself.  There has, thus, long
+been an interest in enabling unrelated processes to share page tables
+referring to shared memory.  Anthony Yznaga is the latest developer to try
+to push this idea (known as "mshare") forward; he described the status of
+that work in a memory-management-track discussion at the 2026 <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a> (LSFMM+BPF).
+<p>
+
+<a href="/Articles/1072355/"><img
+src="../_static/images/conf/2026/lsfmm/AnthonyYznaga-sm.png" alt="[Anthony Yznaga]"
+title="Anthony Yznaga" class="rthumb"></a>
+
+This is not the first (or second) time that page-table sharing has made it
+onto the LSFMM+BPF agenda; it was most recently <a
+href="974512.html">discussed in 2024</a>, when Khalid Aziz updated
+the group on the proposal.  Aziz has since retired, and Yznaga has picked
+up the work.
+<p>
+The overall shape of this patch series has not changed; sharing starts when
+a process creates a shared memory region by creating a file in a special
+<tt>msharefs</tt> filesystem.  That region is created along with its own <a
+href="https://elixir.bootlin.com/linux/v7.0.5/source/include/linux/mm_types.h#L1123"><tt>mm_struct</tt>
+structure</a>, which is used to manage the page tables for the region.
+Each sharing process can then attach to this region by opening and mapping
+the <tt>msharefs</tt> file, resulting in the creation of a special virtual
+memory area (a "window VMA") representing that region in the process's
+address space.  Page faults and other memory-management operations, upon
+encountering the window VMA, follow the pointer to the special
+<tt>mm_struct</tt> and operate on the page tables there.
+<p>
+At least, that is how things looked in 2024, and again in 2025 when Yznaga
+posted <a
+href="/ml/linux-mm/20250820010415.699353-1-anthony.yznaga@oracle.com/">an
+updated version of the patch set</a>.  In the session, though, he let it be
+known that, while the implementation of mshare is substantially the same,
+the API has switched back to system-call form, as had been the case with
+earlier versions.  Back then, a single <tt>mshare()</tt> system call had
+been proposed; now there is a whole set of them.  The shared region is now
+created with <tt>mshare_create()</tt>:
+<p>
+<pre>
+    int mshare_create(unsigned int flags);
+</pre>
+<p>
+This call will return a file descriptor representing the new region; the
+only supported <tt>flags</tt> value is <tt>O_CLOEXEC</tt>.  The size of the
+region must subsequently be set with an <a
+href="https://man7.org/linux/man-pages/man2/truncate.2.html"><tt>ftruncate()</tt></a>
+call.  A call to <tt>mshare_attach()</tt> will map the shared region into
+the calling process's address space:
+<P>
+<pre>
+    int mshare_attach(int fd, unsigned int offset, unsigned int size,
+    		      void *addr, unsigned int flags);
+</pre>
+<p>
+(Note that Yznaga did not show the types of the parameters on his slide, so
+I have filled in something plausible).  There is an <tt>mshare_map()</tt>
+to do the equivalent of an <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>
+call, setting up backing store for the addresses within the shared region.
+There are various other calls, including <tt>mshare_advise()</tt> and
+<tt>mshare_protect()</tt>, to control the management of this region.
+Yznaga did not go into details about how other processes find and attach to
+this region.
+<p>
+<!-- middle-ad -->
+
+The ownership model of the shared region has changed somewhat, in that the
+process calling <tt>mshare_create()</tt> is the owner for the life of the
+process; when that process exits or closes the file descriptor, the region
+disappears and mappings in other processes are removed.  This change, he
+said, simplifies control-group accounting, makes the lifetime of the region
+clear, and provides a target for the out-of-memory killer should things
+reach that point.
+<p>
+Yznaga concluded with a summary of problems he is working on now.
+Page-table walking is a big challenge he said, especially getting the
+locking between the window VMAs and the mshare region's VMA correct.  The
+resident-set-size statistics for mshare-using processes are wrong; the
+information for the shared region is stored in the special
+<tt>mm_struct</tt> and not exposed anywhere.  The current design requires
+the process that created the region to stick around; there would be value
+in some sort of ownership-transfer mechanism so that the creator could hand
+the region off and exit.
+<p>
+He is also looking for more potential use cases for this feature.  Jason
+Gunthorpe mentioned high-performance-computing processes that need to share
+resources, so it would be good to show that this feature can work for that
+use case.  Another participant mentioned <a
+href="https://source.android.com/docs/core/runtime/zygote">the Android
+Zygote process</a>, which serves as the parent for all apps in the system.
+There is quite a bit of sharing between those processes, and thus potential
+benefit from mshare, but any changes made by a process to the region should
+not be visible to other attached processes, so it would be necessary to
+unshare page tables in that case.
+<p>
+Another participant asked how TLB flushing is handled in the shared region.
+There is, Yznaga answered, a linked list of all processes sharing the
+region; when a TLB flush happens, that list is traversed and each process
+is flushed individually.  Gunthorpe observed that this list sounded a lot
+like an MMU notifier; Yznaga said that he had tried using notifiers, but
+they did not work in that case.
+<p>
+Matthew Wilcox noted that allowing each process to map the shared region at
+a different virtual address increases the complexity of the feature;
+perhaps requiring the region to be mapped at the same address everywhere
+would be a useful simplification?  The response in the room made it clear
+that this was not a popular idea.  The session ended with Wilcox suggesting
+that, once the feature finally lands, it will be possible to remove the
+page-table sharing implemented by the <a
+href="https://docs.kernel.org/admin-guide/mm/hugetlbpage.html">hugetlbfs
+subsystem</a>, which is currently the only way to get this kind of sharing
+on Linux systems.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Page-table sharing</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1072333/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1072644"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Different VAs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2026 14:06 UTC (Wed)
+                               by <b>IAmLiterallyABee</b> (subscriber, #144892)
+                              [<a href="/Articles/1072644/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="IAmLiterallyABee" />
+                <input type="hidden" name="return" value="/Articles/1072333/#CommAnchor1072644" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How can they share page tables if the memory is mapped at different virtual addresses? The offset into the table determines the address. Are they only sharing OS structures and not the architectural page tables?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072644/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1072645"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Different VAs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2026 14:18 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1072645/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1072333/#CommAnchor1072645" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The shared region has to have PMD alignment, so the offsets will be the same even though the base address differs.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072645/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1072843"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Alias mappings</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2026 13:39 UTC (Thu)
+                               by <b>fw</b> (subscriber, #26023)
+                              [<a href="/Articles/1072843/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fw" />
+                <input type="hidden" name="return" value="/Articles/1072333/#CommAnchor1072843" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ I wonder if this allows to create alias mappings that are still copy-on-write and compatible with fork. This would allow transparent coloring of pointers without hardware support for address masking. This would be quite interesting to malloc implementations because it can help with determining allocation metadata efficiently during deallocation. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072843/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1073358"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ownership</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 18, 2026 13:05 UTC (Mon)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1073358/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1072333/#CommAnchor1073358" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; when that process exits or closes the file descriptor, the region disappears and mappings in other processes are removed.</span><br>
+<p>
+What happen if another process is accessing the region while the owner process close it ? And does it mean that the non owner process should make a check that the region is still existing before each access (with some kind of lock?)  ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073358/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1073403"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ownership</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 18, 2026 16:02 UTC (Mon)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1073403/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1072333/#CommAnchor1073403" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wasn't present for that talk, but as I understand it, this is the point of flushing the TLB when the page tables change: either the other process accesses the page before the TLB is flushed (and the address is present in the TLB), and the access succeeds, or it accesses the page after the TLB is flushed, and has to walk the page tables. The updated page tables will show that the area isn't mapped, and the process will get a segmentation fault, just as it would for any other inaccessible memory. If application authors don't want to get segmentation faults, they should ensure their programs don't do that, using whatever technique they'd like (locking, static verification, etc.).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073403/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

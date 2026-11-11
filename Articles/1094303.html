@@ -1,0 +1,669 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Thread-identity switcheroo for io_uring [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Thread-identity switcheroo for io_uring">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The io_uring subsystem is all about asynchronous execution; applications count on it to not blo [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Thread-identity switcheroo for io_uring&quot;" href="https://lwn.net/headlines/1094303/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1094841/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Thread-identity switcheroo for io_uring</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 17, 2026</br>
+           </div>
+The <a
+href="https://man7.org/linux/man-pages/man7/io_uring.7.html">io_uring
+subsystem</a> is all about asynchronous execution; applications count on it
+to not block — unless explicitly requested to.  Within io_uring, maintaining
+the "never blocks" guarantee has sometimes been a challenge, given that
+many paths in the kernel were never designed for asynchronous execution.
+This problem has been worked around, but at a significant cost to
+performance.  Now, io_uring maintainer Jens Axboe has posted <a
+href="/ml/all/20260911154148.644489-1-axboe@kernel.dk">an RFC patch set</a>
+with a somewhat radical (and potentially scary) solution to the problem.
+<p>
+A process in user space can submit one or more operations to io_uring by
+describing them in submission-queue entries (SQEs) in the submission ring,
+then calling <a
+href="https://man7.org/linux/man-pages/man2/io_uring_enter.2.html"><tt>io_uring_enter()</tt></a>.
+The kernel will initiate processing on all of the entries that were placed into
+the ring.  If possible, the kernel will execute them immediately within the
+<tt>io_uring_enter()</tt> call.  For example, if a read request can be
+satisfied with data that is already in the page cache and the user-space
+buffer is entirely resident within RAM, then the requested data can be
+copied immediately without blocking.
+<p>
+In cases where blocking <i>is</i> required, though, things become more
+complicated.  Many of the I/O paths within the kernel have asynchronous
+support built into them; they will carry a new request as far as it can go,
+and finish the job elsewhere within the kernel once the blocking operation
+has completed.  There are other operations, though, that lack this support;
+these include the io_uring equivalent of system calls like <a
+href="https://man7.org/linux/man-pages/man2/fsync.2.html"><tt>fdatasync()</tt></a>,
+<a
+href="https://man7.org/linux/man-pages/man2/statx.2.html"><tt>statx()</tt></a>,
+some <a
+href="https://man7.org/linux/man-pages/man2/openat.2.html"><tt>openat()</tt></a>
+paths (the <tt>O_NONBLOCK</tt> flag notwithstanding), and others.  The
+io_uring code must take extra care when implementing these operations, lest
+<tt>io_uring_enter()</tt> block partway through processing a set of
+submitted operations.
+<p>
+In current kernels, any operation that <i>might</i> cause
+<tt>io_uring_enter()</tt> to block is handed off to a separate worker
+thread for execution.  That allows the submitting thread to continue; the
+separate worker can block, if need be, without holding up anything else.
+This handoff is not free, though; the kernel must wake a waiting worker
+thread and perform a context switch, among other costs.  If the operation
+does indeed block, those costs may not be significant in the end.  In many
+cases, though, the operation can be completed without blocking.  In such
+cases, the extra overhead becomes a significant part of the overall cost of
+executing the request.  Since developers who turn to io_uring are usually
+doing so in search of improved application performance, the cost of
+avoiding blocking that might not happen anyway hurts.
+<p>
+One solution to the problem would be to rework all of the system-call paths
+in the kernel to be non-blocking.  That has been done, in some cases, over
+the years, but it is not an easy or quick task.  An alternative — the one
+that Axboe has chosen — is to proceed with a potentially blocking operation
+then handle cases that actually block without blocking the submitting
+thread.
+<p>
+Detecting operations that do indeed block requires a change to the
+scheduler.  A new flag (<tt>PF_IO_HANDOFF</tt>) is added to the
+<tt>flags</tt> field of the <a
+href="https://elixir.bootlin.com/linux/v7.2.5/source/include/linux/sched.h#L826"><tt>task_struct</tt>
+structure</a> that represents a thread.  If a thread is about to block for
+any reason and it has that flag set, the scheduler will make a call to a
+new function called <tt>io_uring_task_sleeping()</tt>.  Hooking into the
+scheduler in this way allows io_uring to be informed about blocking that
+happens anywhere in the kernel, without having to modify the actual code
+paths involved.
+<p>
+Once io_uring knows that an operation is going to block, it must do
+something about the situation.  One option, in theory, would be to unwind
+whatever work had been done up to the blocking point, then to restart the
+operation in a worker thread.  But, since this blocking can happen almost
+anywhere in the kernel, that is not really an option.  As a general rule,
+once io_uring has started a requested operation involving kernel code paths
+that are not designed to avoid blocking, it must see that operation through
+to the finish.
+<p>
+Axboe's solution is "thread identity handoff".  When the scheduler informs
+io_uring about a thread that is about to block, io_uring responds by
+selecting a worker thread from its thread pool.  Rather than hand the
+ongoing work over to that thread (which is not possible at this point), the
+code exchanges the identities of the two threads.  The worker thread is
+made to look like the original submitting thread in every way, including
+its thread ID, signal-handling setup, and more; that thread then continues
+processing the submission ring before, eventually, returning to user space.
+The thread that returns from <tt>io_uring_enter()</tt> has a different
+<tt>task_struct</tt> than the one that made the call, but everything else
+(hopefully) looks the same.
+<p>
+Meanwhile, the original thread, which was about to block executing an
+operation, takes on the worker thread's identity, then proceeds to block as
+usual.  When it wakes, it will continue the operation through completion,
+then take its place in the worker-thread pool.  The end result is that
+potentially blocking operations can be executed by the submitting thread
+and, if they can run without actually blocking, be handled entirely there.
+The cost of bringing in a worker thread is only paid if the operation
+really does block.
+<p>
+It sounds simple enough, but this kind of identity exchange is fraught with
+potential land mines.  Before the two threads involved can exchange their
+<tt>task_struct</tt> structures, the kernel must make absolutely sure that
+nothing else in the kernel holds references to those structures.
+Otherwise, something will eventually be done with a reference to the wrong
+<tt>task_struct</tt>, an outcome that will do nothing to reduce the strain
+on all of the people trying to keep up with the stream of kernel CVEs.
+That is a result that is deemed to be worth avoiding.
+<p>
+Preventing it means being sure, before starting an operation that might
+block, that the submitting thread will be able to hand off its identity if
+the need arises.  There is a long list (found in the definitions of
+<tt>thread_handoff_allowed()</tt> and <tt>thread_handoff_compatible()</tt>
+in <a href="/ml/all/20260911154148.644489-2-axboe@kernel.dk">this
+patch</a>) of conditions that would prevent a handoff and require the
+operation to be executed in the old way.  For example, if the
+thread is being traced with <a
+href="https://man7.org/linux/man-pages/man2/ptrace.2.html"><tt>ptrace()</tt></a>,
+then the tracer holds a reference to its <tt>task_struct</tt>.  By the same
+logic, if the thread in question is tracing any other tasks, those tasks
+hold references, so the thread cannot perform a handoff.  Other conditions
+that will prevent a handoff include using perf events, having futex
+ownership tracked in the kernel, running under a realtime scheduler,
+holding a <a href="/Articles/861251/">core scheduling</a> cookie,
+performing a <a
+href="https://man7.org/linux/man-pages/man2/vfork.2.html"><tt>vfork()</tt></a>,
+and several others.  This determination seems like the scariest, most
+fragile part of this series.  The <tt>task_struct</tt> is widely available,
+so it is hard to know that all of the possibilities for possible references
+in the kernel have been covered — before one even begins to worry about the
+addition of new references in the future by developers who are not thinking
+about io_uring at all.
+<p>
+The potential payoff is large, though.  The cover letter includes a number
+of benchmark results.  For some quick, non-blocking operations, the
+improvements can be huge; an <tt>fsync()</tt> benchmark run on a tmpfs
+filesystem showed a nearly 700% improvement.  Other improvements are more
+modest, and some of the tests that always block show regressions.  The
+worst regressions tended to be with a higher queue depth — when there is a
+longer list of operations all being submitted at once.  Immediately pushing
+each of those operations into a worker thread allows them to be worked on
+in parallel, while processing them up to the blocking point in the
+submitting thread serializes that work, slowing it down.  Axboe said that
+he has ideas for addressing that problem, but he is unsure whether they are
+worth pursuing because, he said, applications that perform these operations
+tend not to have high queue depths to begin with.
+<p>
+Axboe clearly does not expect to merge this series in the near future; he
+is more concerned with determining whether the overall approach has any
+chance of being viable.  Comments have been limited so far.  Peter Zijlstra
+<a
+href="/ml/all/20260914114656.GC3500130@noisy.programming.kicks-ass.net/">pointed
+out</a> that one of the other conditions blocking identity handoff — if the
+thread involved is running with a shadow stack — will prevent the use of
+the feature on most deployed systems; Axboe <a
+href="/ml/all/73837a51-e163-4b4e-8be2-4cdc044393b8@kernel.dk/">thinks</a>
+that the shadow stack can be moved with the rest of the thread's identity.
+Beyond that, it seems that developers are still mostly digesting this
+series that, as Gabriel Krisman Bertazi <a
+href="/ml/all/87tsnv1ynh.fsf@mailhost.krisman.be">said</a>, is "<q>really
+cool and seems like very dangerous thing</q>".  If this series can convince
+developers that the "dangerous" part has been dealt with, it may eventually
+lead to significantly better io_uring performance for a number of workloads.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">io_uring</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1094303/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1095053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2026 16:21 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1095053/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095053" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Reminds me how the Go runtime rotates logical threads among physical threads as they're about to make system calls<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1095058"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Green threads FTW!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2026 17:18 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1095058/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095058" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So now we'll have a full-blown green threading runtime in the kernel!<br>
+<p>
+Forget kernel Rust, kernel Go is the future.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095058/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1095358"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maybe with a dedicated io_uring executor thread pool?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2026 0:46 UTC (Sat)
+                               by <b>himi</b> (subscriber, #340)
+                              [<a href="/Articles/1095358/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="himi" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095358" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This sounds like a really cool idea, but it also sounds *really* dangerous in the context of a kernel that wasn't designed with this execution model in mind - if task_struct was a black box accessible only through a clearly defined API then *maybe*, but it's a big grab-bag of stuff used for so many things that dealing with all the potential issues doesn't sound like it'd be practical.<br>
+<p>
+That said, if you set up a pool of dedicated user-space threads (presumably as part of io_uring_setup(2)) which were managed by the io_uring subsystem I expect it would be possible to make it work. Set up the dedicated threads with constraints applied that prevent anything that could cause issues, and them make it so that they're the *only* threads able to call io_uring_enter() - essentially trading some functionality (at least in the code you can run in the dedicated threads) for the ability to use this execution model. If there are significant performance gains I'm sure you'd find people happy to make that trade . . .<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095358/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1095372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">run away</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2026 6:17 UTC (Sat)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1095372/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095372" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It sounds simple enough</span><br>
+<p>
+No. No, it really doesn't. It sounds like a maintenance nightmare.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1095382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">run away</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2026 9:13 UTC (Sat)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/1095382/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k3ninho" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095382" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;&gt; It sounds simple enough</span><br>
+<p>
+<span class="QuotedText">&gt;No. No, it really doesn't. It sounds like a maintenance nightmare.</span><br>
+<p>
+I read it with the dry sarcasm of 'your grumpy editor' and believe there's deep skepticism here. I, too, am running away to the safety of Nope and possibly spending winters in Hard No.<br>
+<p>
+(Maybe a process that initiates io_uring work is okay with having its task_struct wibbled like this and we can be explicit about the maintenance of a shadow task_strict_ring_io, creating a thread pool with evergreen runners for these processes and moving them over from task_struct to task_struct_ring_io when setting up -- and back when tearing down. You might even define task_struct_ring_io as a macro or codegen from task_struct to get clear debugging and isolate other uses of task_struct data from these unpredictable changes during runtime. I prefer explicit over implicit, you see.)<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1097539"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is non-blocking a thing?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2026 11:37 UTC (Wed)
+                               by <b>rwmj</b> (subscriber, #5474)
+                              [<a href="/Articles/1097539/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rwmj" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1097539" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if the basic assumption, that some operations are non-blocking, is even true any longer.  In modern hardware, even reading from memory could miss the cache and take hundreds of cycles to complete, in other words, blocking (in a sense) at the hardware level.  It seems as if it's better just to assume eveything is blocking and use a separate thread to handle all io_uring requests.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1097539/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1095386"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Copying good ideas from fibrils or syslets?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2026 10:19 UTC (Sat)
+                               by <b>mokki</b> (subscriber, #33200)
+                              [<a href="/Articles/1095386/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mokki" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095386" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Jens mentioned past attempts 20 years ago. These two from 2007 immediately popped back to my mind:<br>
+Fibrils: <a href="220897.html">https://lwn.net/Articles/220897/</a><br>
+Syslets:  <a href="221913.html">https://lwn.net/Articles/221913/</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095386/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1095419"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2026 16:06 UTC (Sat)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/1095419/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magfr" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095419" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How common are blocking operations in the kernel context?<br>
+Would it be (more) reasonable to stop allowing new blockers in and start working towards a fully asynchronous kernel, similarly to how the BKL was removed?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095419/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1095492"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 20, 2026 23:47 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1095492/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1095492" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Blocking operations are incredibly common. Every mutex or semaphore (unless you trylock). Memory allocation will block. I/O submissions can be synchronous (depends how you set it up). We want to block the task if it's dirtied too much memory so the system has time to do write back.<br>
+<p>
+If anything, the RT kernel takes us further from being non-blocking. Spinlocks are turned into mutexes so there are more blocking points than there used to be.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095492/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1096225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 23, 2026 18:24 UTC (Wed)
+                               by <b>alkbyby</b> (subscriber, #61687)
+                              [<a href="/Articles/1096225/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alkbyby" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1096225" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My understanding is yes those potentially blocking locations are very common, but actual blocking on them is not. Thus the massive benefit of this approach.<br>
+<p>
+BTW I am curious why this is not doing slightly different, but seemingly safer approach. Instead of switching at the blocking site, do a very efficient coroutine-like switch at the io_uring_enter (including current task_struct). The kind Google fibers stuff was supposed to be, just already inside kernel-space. I.e. fiber_switchto "atomically" puts the caller to sleep while switching to running the switchto target, bypassing as much scheduling logic as possible.<br>
+<p>
+Then if this worker thread is finished quickly, it switches back. And it it blocks, then the scheduler "magic" wakes up the original thread. Yes, a little more overhead. Because some degree of context switching happens every time. But such a switch is ideally just jumping stacks and saving/restoring general purpose registers. So just a few tens of nanoseconds. And could be (more) immune to "is it safe to swap identities" questions.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1096225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1096309"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not a synchronous switchto?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 24, 2026 11:14 UTC (Thu)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/1096309/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiederm" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1096309" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please read the patch discussion.<br>
+<p>
+I suggested that and he was quite receptive to the idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1096309/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1096840"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2026 20:32 UTC (Fri)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/1096840/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alison" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1096840" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      A recent article in the not-paywalled ACCU  journal <em>Overload</em> by Lucian Teodorescu (https://accu.org/journals/overload/32/181/teodorescu) discussed the related concept of "thread hopping":
+
+<p>what can the original thread do in the meantime?<br></br>
+
+Well, this may be a bit counterintuitive to the reader, but an adequate option is to go to the thread pool and continue the work there. That is, we essentially switch the threads. The original thread will continue to execute whatever the worker thread has, while the worker thread will continue to execute everything on the main flow after the await point. We also call this behaviour <em>thread hopping</em>.<br></br>
+
+A simplified view of a thread is that it consists of a set of registers (most importantly an instruction pointer, IP, and a stack pointer, SP) plus a stack memory region associated with it. During the lifetime of the thread, the stack pointer register keeps changing within the stack region. Thread hopping essentially swaps important registers between threads, allowing a thread to point to the stack region created by another thread.<br></br>
+
+A good technique to implement thread hopping is to use stackful coroutines</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1096840/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1096277"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wow!:)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 24, 2026 4:51 UTC (Thu)
+                               by <b>maniax</b> (subscriber, #4509)
+                              [<a href="/Articles/1096277/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="maniax" />
+                <input type="hidden" name="return" value="/Articles/1094303/#CommAnchor1096277" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I haven't read about something as fun as this in a long while :) It's simple, elegant, and if the task_struct referencing issue can be worked around, it'd be one of the coolest hacks that have happened in the Linux kernel in the last few years, I think :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1096277/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

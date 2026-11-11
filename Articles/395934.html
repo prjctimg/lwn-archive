@@ -1,0 +1,575 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>An interesting DNSSEC amplification [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="An interesting DNSSEC amplification">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" A recent report clearly demonstrates that computer security is not exempt from the 'law of uni [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/395457/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>An interesting DNSSEC amplification</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>July 14, 2010</br>
+           </div>
+<p>
+A recent report clearly demonstrates that
+computer security is not exempt from the "law of unintended consequences".
+As DNSSEC (Domain Name System Security Extensions) is rolled out, we will
+likely see various kinds of unanticipated problems in that system which is
+meant to secure the internet name resolution process.  One of the concerns
+about DNSSEC has always been the amount of additional traffic it would
+generate, as well as the processing burden on DNS servers&mdash;both of
+those came into play here.
+</p>
+
+<p>
+The <a
+href="http://www.cisco.com/web/about/ac123/ac147/archived_issues/ipj_13-1/131_dnssec.html">report
+from Cisco</a> reads a bit like a detective story.  A particular DNS server
+saw a sudden 2-3x increase in its traffic, which at first glance appeared
+to be some kind of denial of service (DoS) attack.  Further investigation
+showed that the query rate jumped from tens of queries per second (qps) to around
+3000 qps.  Because it was a DNSSEC signed zone, each query required two
+responses&mdash;a key resource record (DNSKEY RR) and a signature RR (RRSIG
+RR)&mdash;totaling more than 1K in size.  That led to response traffic of
+35 megabits per second (3000+ queries x 1K+ bytes).
+</p>
+
+<p>
+When a small amount of data can be sent that generates a much larger
+response, there is an "amplification" effect going on.  That means that an
+attacker can use much less of a resource, bandwidth say, than the victim
+must use to respond.  So, a small bandwidth investment, spread out over a large number
+of attackers (in a DDoS, distributed DoS), can easily cause a victim to generate
+more traffic than it can handle.  Because DNS typically uses UDP to eliminate
+the connection establishment overhead of TCP, it also makes it easier for
+attackers, as they don't need to use state-tracking resources on their end.
+These kinds 
+of amplification attacks are well-known for the existing DNS. It is also
+understood that DNSSEC adds other amplification possibilities, but those
+known cases were not the cause of the problem that Cisco investigated.
+</p>
+
+<p>
+In analyzing the data from this event, it was determined that a very small
+fraction of clients (1,000 out of 500,000-1,000,000 daily unique clients)
+were making 
+repeated queries for the same DNSKEY RR.  It could have been from some kind of
+bug in certain DNS clients, but
+because the event was so sudden, it suggested that there was some kind of
+"external trigger".  An obvious trigger would be a change to the DNS
+information being served and that was in fact the case: the cryptographic
+keys had been changed on the day of the traffic increase.
+</p>
+
+<p>
+Normally, a key rollover is handled by keeping both keys around for an
+overlap period and signing resource records with both keys during that
+time.  Either key can be used to verify the signature during the overlap,
+and eventually the old key can be deprecated and then removed.  Keys are
+signed by 
+a parent server's key (i.e. <tt>example.com</tt>'s key is signed by the
+<tt>.com</tt> 
+server's key), all the way up to the key used to
+sign the root keys. Today, those root keys are often stored locally by the
+client as "Trust Anchor".  If a client cannot verify a signature with
+a key that it has in its cache, it will request a new key from the parent,
+because it 
+assumes the key has changed.
+</p>
+
+<p>
+Before it requests a key from the parent, though, it re-requests the key
+from the server it is talking to, because it assumes that it is getting
+bogus responses from some kind of attack.  If it really were an attack,
+that would be the right response, but if there were some misconfiguration
+on the part of the client, it would just make the problem worse.  It turns
+out that some clients were distributed with a static set of Trust Anchors.
+Once those keys were rolled over, those clients were out of date and could
+no longer resolve names associated with those parts of the DNS hierarchy.
+</p>
+
+<p>
+But, the amplification turns out to be quite a bit larger than just a
+handful of retries for an affected server.  When a client cannot verify a
+signature, it will do a depth-first search of the alternative name servers,
+querying each server to try to find keys that it can use.  There are 14
+<tt>.com</tt> name servers, and potentially several name servers for
+<tt>example.com</tt>.  This leads to a combinatorial explosion of sorts,
+where a query for a single host name (<tt>test.example.com</tt> for
+example) in a simple configuration (two <tt>example.com</tt> name servers)
+leads to 844 separate queries.
+</p>
+
+<p>
+Other, much worse, scenarios are described in the report.  It is
+interesting that perfectly reasonable behavior by clients who have ended up
+with outdated information can lead to such a huge increase in the traffic
+that DNS servers, especially the root servers, may have to handle.  The
+conclusion from the Cisco report is certainly eye-opening:
+
+<div class="BigQuote">
+It is an inherent quality of the DNSSEC deployment that in seeking to
+prevent lies, an aspect of the stability of the DNS has been weakened. When
+a client falls out of synchronization with the current key state of DNSSEC,
+it will mistake the current truth for an attempt to insert a lie. The
+subsequent efforts of the client to perform a rapid search for what it
+believes to be a truthful response could reasonably be construed as a
+legitimate response, if indeed this instance was an attack on that
+particular client. Indeed, to do otherwise would be to permit the DNS to
+remain an untrustable source of information. However, in this situation of
+slippage of synchronized key state between client and server, the effect is
+both local failure and the generation of excess load on external
+servers-and if this situation is allowed to become a common state, it has
+the potential to broaden the failure state to a more general DNS service
+failure through load saturation of critical DNS servers.
+<p>
+This aspect of a qualitative change of the DNS is unavoidable, and it
+places a strong imperative on DNS operations and the community of the 5
+million current and uncountable future DNS resolvers to understand that
+"set and forget" is not the intended mode of operation of DNSSEC-equipped
+clients. 
+</div>
+
+<p>
+The last paragraph is particularly worrisome.  One would guess that a few
+years down the road, most clients will be DNSSEC-equipped.  And most will
+be in the hands of users who know nothing about key rollover,
+amplification, DoS, or, for that matter, DNS or DNSSEC. It will be up to
+the vendors and distributors to ensure that the "forget" part of "set and
+forget" doesn't
+happen.  It is not hard to 
+envision some kind of nasty apocalypse lurking for DNSSEC if that's not the
+case.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Domain Name System (DNS)</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/395934/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor396071"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 2:09 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/396071/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396071" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Was the timing of this article a coincidence or deliberate?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396071/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor396072"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 2:21 UTC (Thu)
+                               by <b>jake</b> (editor, #205)
+                              [<a href="/Articles/396072/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jake" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396072" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Was the timing of this article a coincidence or deliberate?</font><br>
+<p>
+Hmm, coincidence I guess, cuz I don't know what it would be lined up with. Ignorance is bliss :)<br>
+<p>
+jake<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396072/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor396127"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 12:48 UTC (Thu)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/396127/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cesarb" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396127" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="http://www.root-dnssec.org/">http://www.root-dnssec.org/</a><br>
+<p>
+"Planned High Level Timeline<br>
+<p>
+[...]<br>
+<p>
+July 15, 2010: ICANN publishes the root zone trust anchor and root operators begin to serve the signed root zone with actual keys  The signed root zone is available."<br>
+<p>
+That is, today.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396127/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor396129"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 13:06 UTC (Thu)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/396129/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahulsundaram" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396129" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I had assumed it was related to<br>
+<p>
+<a href="http://fedoraproject.org/wiki/Features/DNSSEC">http://fedoraproject.org/wiki/Features/DNSSEC</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396129/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor396134"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 13:25 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/396134/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396134" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It happened!<br>
+<p>
+=====================================<br>
+.                       86085   IN      RRSIG   DNSKEY 8 0 86400 20100725235959 20100711000000 19036 . I4cENgcWP+mN7eoX8KqPhvOMcGB0MMOB6ooTbEKHPR9gk6sAcJvq04tC ncwBNiMY3JxzHajsLmMermTL0sVmXj8j6Ba3eTX+t4CsdnUBFfk8zDyb lIIlYwWKZ/x2aXmOjKIKMIC9w8Wnt8awoo45MWzlAT2wGU7gcCAKxJ+O FG/ev8eUXpNxpzRIQvuC7ZGOlELJrrTQCgubyMWOjGaY0MPzrei0Uwe9 2autHPcISBKghnp80zfLmkueSO8qmkbwHn6Jg5vFQ7mG/BKJ5mDXCX5k IjfBQPPe+I2FsGnl+2r9yAmT1n7xLzktKRwKpCwE265EUhDMq7e0P7gF khgEPA==<br>
+=====================================<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396134/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor396138"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 14:05 UTC (Thu)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/396138/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cesarb" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396138" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nope, wrong query. You are looking at the RRSIG. Look instead at the DNSKEY:<br>
+<p>
+$ dig . dnskey @f.root-servers.net<br>
+<p>
+; &lt;&lt;&gt;&gt; DiG 9.5.1-P2.1 &lt;&lt;&gt;&gt; . dnskey @f.root-servers.net<br>
+;; global options:  printcmd<br>
+;; Got answer:<br>
+;; -&gt;&gt;HEADER&lt;&lt;- opcode: QUERY, status: NOERROR, id: 57513<br>
+;; flags: qr aa rd; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 0<br>
+;; WARNING: recursion requested but not available<br>
+<p>
+;; QUESTION SECTION:<br>
+;.				IN	DNSKEY<br>
+<p>
+;; ANSWER SECTION:<br>
+.			86400	IN	DNSKEY	257 3 8 AwEAAa7hd++++++++++++++++THIS/IS/AN/INVALID/KEY/AND/SHOU LD/NOT/BE/USED/CONTACT/ROOTSIGN/AT/ICANN/DOT/ORG/FOR/MOR E/INFORMATION+++++++++++++++++++++++++++++++++++++++++++ ++++++++++++++++++++++++++++++++++++++++++++++++++++++++ ++++++++++++++++++++++++++++++++++++++++++++++++++++++++ ++++++++++++++++++++++++++++++++++++++++++++++++++++++++ ++++++++++8=<br>
+.			86400	IN	DNSKEY	256 3 8 AwEAAa2Yy++++++++++++++++THIS/IS/AN/INVALID/KEY/AND/SHOU LD/NOT/BE/USED/CONTACT/ROOTSIGN/AT/ICANN/DOT/ORG/FOR/MOR E/INFORMATION+++++++++++++++++++++++++++++++++++++++++++ +++++++8<br>
+<p>
+;; Query time: 311 msec<br>
+;; SERVER: 2001:500:2f::f#53(2001:500:2f::f)<br>
+;; WHEN: Thu Jul 15 11:02:41 2010<br>
+;; MSG SIZE  rcvd: 439<br>
+<p>
+<p>
+When it stops being masked like that, then it has gone live for real. Still 3 hours left according to the countdown at <a href="http://dns.icann.org/">http://dns.icann.org/</a>.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396138/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor396140"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 14:08 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/396140/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396140" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was wrong. Thanks for correction!<br>
+<p>
+BTW, what should be done in BIND to allow it to use the root key? Anything special besides the usual "dnssec-validate yes"?<br>
+<p>
+I suspect that the root key must be manually added to the list of trusted anchors?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396140/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor396146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 14:32 UTC (Thu)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/396146/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cesarb" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396146" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, AFAIK you will need to add it manually as a trust anchor. Be sure to have some way to deal with key rollover (or it will mysteriously stop working as a DNS server at some point in the future). I would recommend using "managed-keys" instead of "trusted-keys" to avoid any problems (see the fine manual at <a href="http://oldwww.isc.org/sw/bind/arm97/Bv9ARM.ch06.html#id2588345">http://oldwww.isc.org/sw/bind/arm97/Bv9ARM.ch06.html#id25...</a>).<br>
+<p>
+I do not know whether ISC's DLV (<a href="http://www.isc.org/solutions/dlv">http://www.isc.org/solutions/dlv</a>) will be updated to use the DNS root key. If it is and you are already using ISC's DLV, you might not need to do anything at first (at least until it is shut down for not being needed anymore).<br>
+<p>
+You can also simply wait for your distribution to update their packages, if you used it to configure DNSSEC (for instance, IIRC Fedora 13's bind package uses DNSSEC via ISC's DLV by default; it will not surprise me if it is updated soon to add the true DNS root key).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor396148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An interesting DNSSEC amplification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2010 14:37 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/396148/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tialaramex" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396148" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, you should obtain and validate (the files will be GnuPG signed, and it is hoped that the people who sign are well connected in the web of trust) anchors for the root zone.<br>
+<p>
+Eventually it is envisioned that OS vendors would provide and update these anchors, much as they all tend to offer timezone files updated with changes from the various civilian entities which claim authority to determine local time. The older anchors would become invalid after some period of time (I've forgotten, perhaps it's a year) and everyone would need to update often enough or switch off DNSSEC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor396294"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Roll Over And Die (ROAD)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 16, 2010 11:42 UTC (Fri)
+                               by <b>shane</b> (subscriber, #3335)
+                              [<a href="/Articles/396294/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="shane" />
+                <input type="hidden" name="return" value="/Articles/395934/#CommAnchor396294" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Full disclosure: I work for ISC (the company that makes BIND).<br>
+<p>
+This article is from the March 2010 issue of the IPJ. The specific problems were fixed in February or March 2010, in the software that supports DNSSEC and exhibits this behavior.<br>
+<p>
+You can see the ISC official comment:<br>
+<p>
+<a href="http://www.isc.org/announcement/iscs-response-concerns-expressed-around-misconfigured-trust-anchors-and-aggressive-vali">http://www.isc.org/announcement/iscs-response-concerns-ex...</a><br>
+<p>
+You can see a message from the director of NLnetLabs (NLnetLabs makes Unbound):<br>
+<p>
+<a href="http://unbound.net/pipermail/unbound-users/2010-February/001031.html">http://unbound.net/pipermail/unbound-users/2010-February/...</a><br>
+<p>
+<p>
+As the article mentions, RFC 5011 describes a technology designed specifically to address key rollover. This is indeed designed to automate administration of DNSSEC-aware resolvers. Implementations are done, and I expect widespread adoption over the next few years.<br>
+<p>
+Beyond that, keep in mind that any security feature by necessity increases the fragility and decreases the usability of the system. This is something to be aware of, but not something to be afraid of. This LWN summary comes very close to spreading FUD about DNSSEC. This is a pity, because DNS has long been an insecure link in the Internet, and DNSSEC not only allows that weakness to be resolved, but also enables new functionality built on a more secure DNS foundation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/396294/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,226 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Enforcing mount options for sysfs and proc [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Enforcing mount options for sysfs and proc">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The sysfs and proc filesystems do not contain executables, setuid programs, or device nodes, b [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/647242/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Enforcing mount options for sysfs and proc</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>June 10, 2015</br>
+           </div>
+<p>
+The sysfs and proc filesystems do not contain executables, setuid programs,
+or device
+nodes, but they are typically mounted with flags (i.e. <tt>noexec</tt>,
+<tt>nosuid</tt>, and <tt>nodev</tt>) that disallow those types
+of files anyway.  Currently, those flags are not enforced when those
+filesystems are mounted inside of a namespace (i.e. the mount will succeed
+without those flags being specified).  Furthermore, a sysfs or proc
+filesystem that has been mounted read-only in the host can be mounted
+read-write inside a namespace,
+which is a bigger problem.
+The others are subtle security
+holes, or they could be, so Eric 
+Biederman is trying to close them, though it turns out that the fixes break
+some container
+code.
+</p>
+
+<p>
+In mid-May, Biederman <a href="/Articles/647755/">posted</a> a patch set
+meant to address the problems, which boil down to differences in the
+behavior of mounting these filesystems inside a container versus bind-mounting
+them.  In the latter case, any restrictions the administrator has placed on
+the original proc and sysfs mounts will be enforced on the bind mounts.
+If, instead, those filesystems are directly mounted inside of a user
+namespace, those restrictions won't be enforced.  The problem is largely
+moot, at least for now, for executables, setuid programs, and device nodes,
+but that is not so for the read-only case.  If the administrator of the
+host has mounted <tt>/proc</tt> as read-only, a process running in a user
+namespace could 
+mount it read-write to evade that restriction, which is clearly a problem.
+</p>
+
+<p>
+But Biederman was well aware that he might be breaking user-space
+applications by making this change.  In particular, he was concerned about
+<a href="https://sandstorm.io/">Sandstorm</a>, <a
+href="https://linuxcontainers.org/">LXC</a>, and <a
+href="https://libvirt.org/drvlxc.html">libvirt LXC</a>, all of which employ
+user namespaces.  So he put out the patches for testing (and comment).
+</p>
+
+<p>
+That led to two reports of breakage, the <a
+href="/Articles/647784/">first</a> from Serge Hallyn about a problem he
+found using the patches with LXC.  The LXC user space was not passing the
+three flags that restrict file types allowed for sysfs, which caused the
+<tt>mount()</tt> call to fail with <tt>EPERM</tt> due to Biederman's
+changes.  The <a href="/Articles/647789/">fix</a> for LXC is
+straightforward but, as Andy Lutomirski <a href="/Articles/647790/">pointed
+out</a>, Biederman's change is an ABI break for the kernel.  Given that
+there aren't 
+executables or device nodes on sysfs or proc, dropping enforcement of those
+flags from the patch would not have any practical effect, Lutomirski argued.
+</p>
+
+<p>
+Sandstorm lead Kenton Varda <a href="/Articles/647791/">suggested</a> that
+instead of returning <tt>EPERM</tt>, <tt>mount()</tt> should instead ignore
+the lack of those flags when the caller has no choice in the matter:
+<div class="BigQuote">
+ That is, in cases where
+mount() currently fails with EPERM when not given, say, MS_NOSUID, it
+should instead just pretend the caller actually set MS_NOSUID and go
+ahead with a nosuid mount. Or put another way, the absence of
+MS_NOSUID should not be interpreted as "remove the nosuid bit" but
+rather "don't set the nosuid bit if not required".
+</div>
+</p>
+
+<p>
+As Varda noted, that would fix the problem without LXC needing to change
+its code.  He also thought it would be less confusing than getting an
+<tt>EPERM</tt> in that situation.  Neither Biederman nor Lutomirski liked
+the implicit behavior that Varda suggested, however.
+</p>
+
+<p>
+It turns out that libvirt LXC has a similar problem, as <a
+href="/Articles/647796/">reported</a> by  Richard Weinberger.  It is
+mounting <tt>/proc/sys</tt>, but not preserving the mount flags from
+<tt>/proc</tt> in the host, thus the <tt>mount()</tt> was failing.  Once
+again, there is a <a href="/Articles/647797/">simple fix</a>.
+</p>
+
+<p>
+Lutomirski <a href="/Articles/647798/">suggested</a> removing the
+<tt>noexec</tt>/<tt>nosuid</tt>/<tt>nodev</tt> part, but keeping the
+read-only enforcement, to avoid the ABI break.  Biederman <a
+href="/Articles/647801/">disagreed</a> with that approach.  It may not
+matter <i>now</i> that proc and sysfs are mounted that way, but it has <a href="/Articles/191954/">mattered in
+the past</a> and could again in the future:
+<div class="BigQuote">
+So I am leaning towards enforcing all of the mount flags including
+nosuid, noexec, and nodev.  Then when the next subtle bug in proc or
+sysfs with respect to chmod shows up I will be able to sleep soundly at
+night because the mount flags of those filesystems allow a mitigation,
+and I did not [sabotage] the mitigation.
+<p>
+Plus contemplating code that just enforces a couple of mount flags but
+not all of [them] feels wrong.
+</div>
+</p>
+
+<p>
+He did want to avoid breaking LXC and libvirt LXC, though, at least until
+those programs could be fixed and make their way out to users over the next
+few years. So Biederman added a <a href="/Articles/647803/">patch</a> that
+relaxed the requirement for <tt>noexec</tt> and <tt>nosuid</tt>
+(<tt>nodev</tt> turns out to be a non-issue due to other kernel changes),
+but printed a warning in the kernel log.  Since it is a security fix
+(though not currently exploitable), he targeted the stable kernels with the
+fix too.  However, Greg Kroah-Hartman <a href="/Articles/647805/">pointed
+out</a> that adding warnings for things that have been working just fine is
+not acceptable in stable kernels.
+</p>
+
+<p>
+Though others disagree, Biederman does not see his changes as breaking the
+ABI.  They do cause a behavior change and break two user-space programs
+(at least that are known so far), however.  He would prefer not to break
+those programs, so the warning is kind of a stop-gap measure, he <a
+href="/Articles/647807/">argued</a>.  The changes are fixing security
+holes, though, even if it appears they are not exploitable right now:
+<div class="BigQuote">
+Given that I have not audited sysfs and proc closely in recent years
+   I may actually be wrong.  Those bugs may actually be exploitable.
+   All it takes is chmod to be supported on one file that can be made
+   executable.  That bug has existed in the past and I don't doubt
+   someone will overlook something and we will see the bug again in the
+   future.
+</div>
+</p>
+
+<p>
+As it stands, the changes will still allow current LXC and libvirt LXC
+executables to function (though the version targeting the mainline will
+warn about that kind of use).  Biederman plans to get it into linux-next,
+presumably targeting 4.2.  After that, he plans to remove the warning and
+enforce the mount options in a subsequent kernel release.  It is a bit hard
+to argue that either of the two broken programs were actually doing what
+their authors intended in the <tt>mount()</tt> calls, even though it
+worked.  Assuming no other breakage appears, that might be enough to get
+this patch added without triggering Linus Torvalds's "no regression" filter.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">/proc</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Sysfs</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/647757/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,763 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>SFrame: fast, low-overhead stack traces [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="SFrame: fast, low-overhead stack traces">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Getting a stack trace of a running program is useful in a variety of scenarios: tracing, profil [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/940291/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>SFrame: fast, low-overhead stack traces</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>August 8, 2023</br>
+           <hr>
+<a href="../Archives/ConferenceByYear/index.html">OSSNA</a>
+</div>
+<p>
+Getting a stack trace of a running program is useful in a variety of
+scenarios: tracing, profiling, debugging, performance tuning, and more.
+There are existing mechanisms to get stack traces, but there are some
+downsides to them; the "Simple Frame" (SFrame) stack-trace format came
+about to address the shortcomings in the other techniques.  Back in May,
+Steve Rostedt and Indu Bhagat gave a <a href="932209.html">talk about
+SFrame support in the kernel</a> as part of <a
+href="/Articles/lsfmmbpf2023/">LSFMM+BPF</a>; a few days later, Bhagat gave
+a more general talk about SFrame 
+(<a href="https://www.youtube.com/watch?v=4XrFYpjyodo">YouTube video</a>)
+at <a
+href="https://events.linuxfoundation.org/open-source-summit-north-america/">Open
+Source Summit North America</a> in Vancouver.  That second talk helped fill
+in some other aspects of SFrame and the overall stack-tracing picture.
+</p>
+
+<h4>Background</h4>
+
+<p>
+Bhagat began by defining what a stack trace is: "a list of function calls
+that are currently active in the thread".  A useful stack trace will show
+information about the instruction pointer (IP) location within each
+function in the call-chain list, as well as some human-readable symbol
+names.  That includes the function name, but it can also provide
+information like file 
+names and line numbers.  The symbolization piece is beyond the scope of
+her talk, however, which focuses on how to get the list of IPs in the call
+chain. 
+</p>
+
+<a href="/Articles/940782/">
+<img src="../_static/images/2023/ossna-bhagat-sm.png" border=0 hspace=5 align="right"
+alt="[Indu Bhagat]" title="Indu Bhagat" width=227 height=280>
+</a>
+
+<p>
+Different kinds of tools will generate the call-chain IPs in different ways
+because they are focused on their own use cases; "a debugger will do it
+differently than a profiler".  From her <a
+href="https://static.sched.com/hosted_files/ossna2023/d1/OSS_LinuxCon_SFrame_final.pdf?_gl=1">slides</a>,
+she put up a list of five existing stack-tracing mechanisms, but said that
+she would be talking about three in particular: frame pointer, EH frame,
+and application-specific formats.  Those three will provide enough context
+to explain the motivations behind the SFrame format, she said.
+</p>
+
+<p>
+The frame-pointer technique is perhaps one of the oldest stack-tracing
+methods.  It reserves a register to hold the frame pointer, which is a
+pointer to the start of the current stack frame; 
+the compiler 
+generates some extra code to save and restore the value of the stack
+pointer to that register on function entry and exit.   So there is some
+performance impact of the extra code for each function call; beyond that,
+the compiler has to reserve the register just for the frame pointer, which
+also has performance implications.  But it is an easy-to-understand
+mechanism that works well; "it's beautiful, it just works and it is so
+simple". 
+</p>
+
+<p>
+The EH-frame mechanism is a <a href="https://dwarfstd.org/">DWARF</a>-based
+method that can do more than just stack tracing; it can also do stack
+unwinding, which means that it can restore the state of all of the
+registers at each point in the call chain.  The information needed to do
+that is stored in the binaries in <tt>.eh_frame</tt> and
+<tt>.eh_frame_hdr</tt> ELF sections.  The format itself is compact,
+versatile, and works well in practice, Bhagat said; it also has good
+library support for applications that want to handle the format.
+</p>
+
+<p>
+Using EH frame does not require reserving a register for the frame
+pointer but "the stack tracer itself is slow and it is complex".  The
+reason is that the DWARF information is a set of instructions needed
+to recover the stack offsets for the information of interest;  some of the
+instructions are simple and some complex, "but you would need to implement
+sort of a stack machine where you can execute the opcodes".  The main
+complaints about this method are its speed and complexity,
+which also make it unsuitable for use in the kernel.  She noted that the
+<a
+href="/ml/fedora-devel/CA+voJeXhBPph9R2nzV9UCiMOU4Tpo0s0NtA26HcJccTwFad25w@mail.gmail.com/">discussion
+around</a> the 
+now-accepted <a 
+href="https://fedoraproject.org/wiki/Changes/fno-omit-frame-pointer">Fedora&nbsp;37
+proposal</a> to enable frame pointers by default in the builds for the
+distribution (which was <a href="/Articles/919940/">covered by LWN</a>) also
+touched on some of the problems with the frame pointer and EH-frame methods.
+</p>
+
+<p>
+The application-specific formats have come about because of these
+shortcomings.  For example, the kernel's <a
+href="/Articles/728339/">ORC</a>-based stack tracing is used 
+because of the problems with the EH-frame method; there are other
+application-specific formats, which are not open source, but also
+demonstrate the need for a fast and simple stack-tracing solution.  The
+application-specific solutions are not using information generated by the
+toolchain, so they may require reverse-engineering to use the formats in other
+ways; that may make it difficult to port and maintain those
+formats.  
+</p>
+
+<h4>Requirements</h4>
+
+<p>
+She put up a slide that summarized the pros and cons of the three methods,
+which could be used to generate a set of requirements for a new
+stack-tracing method.  The first was that given any program counter (or
+instruction pointer, she used both in the talk),
+a precise stack trace can be generated from it, which she called "asynchronous
+stack tracing".  At the end of the talk, an
+audience member asked about what that
+term means in this context.  Bhagat said that frame-pointer-based stack
+traces are not always precise because the compiler adds extra instructions
+in the prologue and epilogue of a function.  If the stack trace starts
+on one of those instructions, some part of the trace will be missed because
+the frame-pointer handling is incomplete at those points.
+</p>
+
+<p>
+The other requirements were more obviously derived from the pros and
+cons on her slide: low-overhead tracing, with a low-complexity tracer,
+using information 
+that is generated by the toolchain.  SFrame has been designed with those
+requirements in mind, she said.
+</p>
+
+<p>
+The SFrame format was defined and implemented in <a
+href="https://sourceware.org/pipermail/binutils/2023-January/125671.html">Binutils&nbsp;2.40</a>
+as SFrame version&nbsp;1.  Since the talk, <a
+href="https://sourceware.org/pipermail/binutils/2023-July/128719.html">Binutils
+2.41 was released</a> with some fairly small, but not backward compatible,
+changes to the format, which is now <a
+href="https://sourceware.org/binutils/docs/sframe-spec.html">SFrame
+version&nbsp;2</a>.  The format simply contains enough information to be
+able to do a stack trace: given a program counter (PC) value, the canonical
+frame address (CFA), frame pointer (FP), and return address (RA) can be
+retrieved. "That's all you need to stack trace and that is all that is
+encoded in the Simple Frame stack-trace format."
+</p>
+
+<p>
+SFrame is defined for two ABIs: x86_64 and 64-bit Arm.  It has support for
+encoding 
+<a
+href="https://refspecs.linuxfoundation.org/ELF/zSeries/lzsabi0_zSeries/x2251.html#PROCEDURELINKAGETABLE">procedure
+linkage table</a> entries (pltN).  On Arm, it can encode <a
+href="/Articles/718888/">pointer authentication</a> information so that the
+return address values that have been mangled by the authentication can be
+decoded. 
+</p>
+
+<p>
+The SFrame information is stored in a <tt>.sframe</tt> ELF section, which
+is stored in its own <tt>PT_GNU_SFRAME</tt> segment.  To generate it, the
+<tt>&#8209;&#8209;gsframe</tt> option needs to be passed to the GNU
+assembler.  The GNU linker "will do the right thing" if it sees multiple
+<tt>.sframe</tt> sections by combining them in the output.  The
+<tt>readelf</tt> and <tt>objdump</tt> tools also have support for SFrame;
+using the <tt>&#8209;&#8209;sframe</tt> option will provide human-readable
+text describing the SFrame information.
+</p>
+
+<h4>Format</h4>
+
+<p>
+The SFrame format has three parts: a header, a set of function descriptor
+entities (FDEs), and a set of frame row entries (FREs).   The header
+contains a magic 
+number, a version number, and offsets to the other two sections. The FDEs
+are fixed 
+size, sorted in PC order, so a binary search can be used to find the
+function corresponding to a given PC value.  FREs are variable-length in
+order to be as compact as possible.  Offsets are used to
+access the various pieces of information in the format.
+</p>
+
+<p>
+Each FDE corresponds to a single function.  It stores the start PC and
+function size in bytes; it also indicates whether it is a regular code
+block or a pltN.  After that, it has an offset to the first FRE along with
+the number and types of FREs that the function has.
+</p>
+
+<p>
+The FREs are the backbone of the format, she said.  They provide the stack
+offsets that can be used to recover the CFA, FP, and RA given a particular
+PC within the function.  Because function sizes differ, the space needed to
+represent an offset from the starting PC value also differs; there are three
+different representations for FREs depending on whether the offsets can be
+encoded in one, two, or four bytes. Each FRE covers a contiguous range of
+addresses within
+the function and encodes the stack offsets for the CFA, FP, and RA values
+that are 
+valid for that range.
+</p>
+
+<p>
+The ability to perform a binary search on the FDEs is one advantage that
+SFrame has; it 
+allows speedy access to the starting point for a trace.
+Another advantage for the format is that the FREs directly encode the
+offsets needed to recover the 
+CFA, FP, and RA; there is no need to execute stack-machine instructions to
+do so.  The kernel's ORC format also directly encodes these offsets, but
+SFrame does some space optimizations to make its format more compact.  She
+put up a graph ("take it with some grain of salt") showing the space
+savings on x86_64 for SFrame versus EH frame for ten different binaries from
+Binutils; it showed that SFrame was roughly&nbsp;80% of the size required for EH
+frame.  She did caution that the use case for EH frame is different, so it
+is not exactly a fair comparison.
+</p>
+
+<h4>Library</h4>
+
+<p>
+The libsframe format library ships with Binutils (starting with&nbsp;2.40);
+it has APIs to read and write SFrame data;  the library was created with
+the linker in mind, thus it includes a write API that a stack tracer likely
+will not need. 
+There are also APIs that target stack tracers, such as for finding the
+FRE that corresponds to a PC value or getting the stack offset from an FRE.
+</p>
+
+<p>
+Libsframe is a young library, so it is too early to make any ABI stability
+guarantees, Bhagat said.  The API is described in <tt>sframe-api.h</tt>.
+The SFrame format is not aligned on disk, but the library internally
+arranges the data so that there are no unaligned accesses.  She showed some
+sample code to demonstrate "how easy it is to stack walk"; it found an FRE
+based on a PC value (<tt>find_fre()</tt>), then got the offsets for the CFA,
+FP, and RA values (<tt>get_*_offset()</tt>) in 
+order to retrieve them.
+</p>
+
+<p>
+There is some future work needed in the assembler to support a <a href="https://sourceware.org/binutils/docs/as/CFI-directives.html">CFI
+directive</a> (<tt>.cfi_escape</tt>) that has been skipped at this point; it
+means that SFrame is not fully asynchronous, but the compiler rarely emits
+that directive so it is not a large problem in practice.  There is also a
+need to add more regression tests for SFrame unwinding to the tests for the GNU
+assembler.  Beyond that, she said that the SFrame developers plan to work
+with the community on use cases for SFrame, including for user-space
+applications and <a
+href="/ml/linux-toolchains/20230501200410.3973453-1-indu.bhagat@oracle.com/">user-space
+stack tracing for
+the 
+kernel</a>.  Adding <a
+href="https://github.com/llvm/llvm-project/issues/64449">SFrame support to
+LLVM</a> has been suggested since the talk, as well.
+</p>
+
+<p>
+Bhagat finished her talk by suggesting that those who are interested in
+working with 
+SFrame get in touch with the developers via the <a
+href="https://sourceware.org/mailman/listinfo/binutils">Binutils mailing
+list</a>.   An audience member asked about applications currently using
+SFrame; Bhagat said that other than the work on the kernel piece, which
+could be used by perf, Ftrace, BPF, and others, there are no applications
+using the format.  The SFrame developers started with the kernel use case
+and are now starting to look into user-space applications that could
+benefit from fast, low-overhead stack traces.
+</p>
+
+<p>
+An attendee asked about other architectures, noting that he believed the RISC-V
+ABI was rather different.  Bhagat said that SFrame already accommodated the
+differences between x86_64 and Arm64, but if another architecture had major
+differences in the way it handled its return address, SFrame would probably
+need to be changed to handle it.  As it stands, x86_64 always uses the
+stack for its RA, while Arm64 uses both the stack and a dedicated register,
+which SFrame already handles.
+</p>
+
+<p>
+Bhagat's colleague, Jose Marchesi, asked about the relationship between
+SFrame and ORC; he wondered why the kernel would need something like SFrame
+instead of simply using ORC.  Bhagat said that because ORC is
+application-specific, it can represent the stack usage of all of the
+different kinds of code in the kernel, including its hand-rolled assembly
+code.  But to do user-space stack tracing, the ORC format will need some
+changes; SFrame is not meant to replace the kernel's internal use of ORC,
+which has 
+similar goals to those of SFrame, but to complement it for
+doing user-space tracing from the kernel.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/SFrame</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Open Source Summit North America/2023</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/940686/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor940833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2023 8:05 UTC (Wed)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/940833/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="comex" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor940833" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So it’s only 20% smaller than eh_frame?  I guess size isn’t the main goal, but still, I was expecting more size savings given the subset of functionality.  And I assume that -fasynchronous-unwind-tables will remain on by default, so the new info will be stored in addition to eh_frame for most binaries, not instead of it.  Which would mean the total size of unwind info on disk will almost double.  If that’s true… is the simpler format really worth the bloat?  Is it not feasible to just convert eh_frame to SFrame on demand (in userspace) rather than storing SFrame in the binary?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor940843"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2023 9:33 UTC (Wed)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/940843/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor940843" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Moreover,<br>
+<p>
+<span class="QuotedText">&gt;The FDEs are … sorted in PC order, so a binary search can be used to find the function corresponding to a given PC value. Each FDE … stores the start PC and function size in bytes</span><br>
+<p>
+When the compiler inlines a function, the so-inlined instructions can participate in instruction reordering within the parent function. Consider f() { argc *= (double)constx; g(); }, g() { printf("%s","foo"); }. This may become e.g. { ld f0&lt;-argc; mov r1&lt;-"foo"; ld f1&lt;-constx; ld r2&lt;-"%s"; fmul f0,f0,f1; call printf; } in ASM, and gdb would report f, g, f, g, f, printf as you step through the program with the "si" command. Because FDEs are PC-sorted, that sounds like it would generate a lot of FDEs, and be responsible for the deemed-mediocre 20% gains on eh_frame. What would the start PC of g and its size even be, given g has been "deconstructed"!?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940843/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor941130"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2023 19:15 UTC (Thu)
+                               by <b>aalexand</b> (guest, #143702)
+                              [<a href="/Articles/941130/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aalexand" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor941130" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think inlining is orthogonal? From the point of view of the thread stack state, g() doesn't "exist", it's presence is merely in the debug info.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941130/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor940975"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2023 20:35 UTC (Wed)
+                               by <b>ibhagat</b> (subscriber, #133641)
+                              [<a href="/Articles/940975/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ibhagat" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor940975" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correct, size is not the main goal. The comparison with .eh_frame sizes was merely to satiate the curiosity about what are the typical sizes of .sframe sections. EH Frame is a pretty compact format, especially given that it contains more information (for stack unwind) than SFrame (the latter contains only information for stack tracing). So comparing the size of the two different formats and using size for one's relative merit over the other should be avoided.<br>
+<p>
+If fast, real-time stack tracing is your goal, it is ideal to generate SFrame sections apriori and not at the time of stack tracing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940975/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor940853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2023 10:56 UTC (Wed)
+                               by <b>error27</b> (guest, #8346)
+                              [<a href="/Articles/940853/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="error27" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor940853" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a dumb question and only vaguely related, but...<br>
+<p>
+When I'm debugging I often add a "*null = 1;" to trigger a crash and then I run my program under valgrind to get the stack trace.  Valgrind is slow.  Is there a faster way?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor940855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2023 11:20 UTC (Wed)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/940855/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vadim" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor940855" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You could run under a debugger, like gdb?<br>
+<p>
+gdb ./program; "run", "bt" when it crashes.<br>
+<p>
+Valgrind is the wrong tool if all you want is a stack trace.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor940858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2023 12:27 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/940858/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor940858" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You don't even have to add the '*null = 1' to make it crash. Just type: break foo.c:123 to break at line 123 in foo.c, or break foobar to break at the start of the foobar() function. You can even do things like 'break foobar if x &gt; 1' where x is an argument to foobar. And lots more, e.g. setting watchpoints on a variable to break whne it disables. You can also have a break point automatically print a backtrace and then continue. Say you set a breakpoint, and you want breakpoint #1 to just auto-backtrace and continue:<br>
+<p>
+commands 1<br>
+bt<br>
+continue<br>
+end<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor940859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2023 12:32 UTC (Wed)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/940859/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tux3" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor940859" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are compiler builtins that will hand you your stack frame information.<br>
+With gcc, you could print a stack trace with: backtrace_symbols_fd(buf, bufsize, STDOUT_FILENO)<br>
+<p>
+The advantage over *0=1 is you can put multiple of those in different places, or mix them with debugger breakpoints, if you'd like to continue observing what your program does after the stacktrace without having to recompile<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor941372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 12, 2023 18:27 UTC (Sat)
+                               by <b>ikm</b> (guest, #493)
+                              [<a href="/Articles/941372/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ikm" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor941372" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Btw it's better to use abort() to trigger a crash -- it's cleaner, and dereferencing a NULL pointer is undefined behavior in C/C++, so it isn't even guaranteed to provoke a crash by the standard.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor941413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2023 5:52 UTC (Mon)
+                               by <b>xecycle</b> (subscriber, #140261)
+                              [<a href="/Articles/941413/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="xecycle" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor941413" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sadly abort() can make debugging harder sometimes.  It is naturally considered "cold" by the compiler, and optimizations around code locality may move calls to it far away from the original location; I've seen cases where it's moved to after "ret" of the function, and gdb failed to recognize it as part of the function.  Instead I found __builtin_trap() to be more likely staying in my intended place...  Maybe asm("int3") can be even smaller?  Well, substitute the correct instruction for your platform :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor941015"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2023 6:54 UTC (Thu)
+                               by <b>ktsanaktsidis</b> (subscriber, #123941)
+                              [<a href="/Articles/941015/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ktsanaktsidis" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor941015" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+First, thank you Indu &amp; Steve - this is awesome and deeply needed stuff to try and unify the very fractured kernel and userspace worlds of profiling!<br>
+<p>
+I wanted to riff off something in the linked LKML thread that caught my eye. You mentioned that it wasn't necessary for the sframe sections to be sorted, because although GNU ld sorted them, GNU as did not. I actually have run across another use-case for unsorted stacktrace generation info like this.<br>
+<p>
+I made (and then abandoned) an attempt earlier this year to generate unwind info for the code generated by Ruby's YJIT compiler so that crashes could have sensible backtraces (see: <a href="https://bugs.ruby-lang.org/issues/19541">https://bugs.ruby-lang.org/issues/19541</a>).  One of the other issues I ran into is that the LSB spec requires .eh_frame data to be sorted by PC; that means if any code was freed, and then more code was inserted into the gap, the whole section needed to be shuffled around. This might be a price worth paying for fast access during profiling, but for simple crash-reporting a slow linear scan would be fine. So this seems to be another potential use-case for unsorted FDEs.<br>
+<p>
+(Another problem was that GDB and glibc both had their own different mechanisms for registering unwind info for dynamically-generated code; I think it would be great if this could eventually be unified into a single mechanism to register sframes for JIT'd code.)<br>
+<p>
+<p>
+(Another another issue was that the DWARF unwind info generation required some rather heavyweight dependencies, so a simple C library which can be used to write sframe data is great!)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941015/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor941019"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SFrame: fast, low-overhead stack traces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2023 6:59 UTC (Thu)
+                               by <b>ktsanaktsidis</b> (subscriber, #123941)
+                              [<a href="/Articles/941019/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ktsanaktsidis" />
+                <input type="hidden" name="return" value="/Articles/940686/#CommAnchor941019" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Argh, I just realised I misremembered - `.eh_frame` data doesn't actually need to be sorted, only (optional) `.eh_frame_hdr` data does. But I guess what I described for jit compilers is still a reasonable use-case for supporting both sorted &amp; unsorted info.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941019/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

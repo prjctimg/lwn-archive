@@ -1,0 +1,304 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A new direction for power-aware scheduling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A new direction for power-aware scheduling">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Power-aware scheduling attempts to place processes on CPUs in a way that minimizes the system's [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/569967/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A new direction for power-aware scheduling</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 15, 2013</br>
+           </div>
+Power-aware scheduling attempts to place processes on CPUs in a way that
+minimizes the system's overall consumption of power.  Discussion in this
+area has been muted since we <a href="554956.html">last looked at it</a> in
+June, but work has been proceeding.  Now a new set of power-aware
+scheduling patches shows a significant change in direction motivated by
+criticisms that were aired in June.  This particular problem is far from
+solved, but the shape of the eventual solution may be becoming a bit more
+clear.
+<p>
+Thus far, most of the power-aware scheduling patches posted to the lists
+have been focused on task placement — 
+packing "small" processes onto a small number of CPUs to allow others to be
+powered down, for example.  The problem with that approach, as Ingo Molnar
+<a href="552885.html">complained</a> at the time, was that it failed
+to recognize that there are several mechanisms used to control CPU power
+consumption.  These include the cpuidle subsystem (which decides when a CPU
+can sleep and how deeply), the cpufreq subsystem (charged with controlling
+the clock frequency for CPUs) and various aspects of the scheduler itself.
+There is no integration between these subsystems; indeed, the scheduler is
+almost entirely ignorant of what the cpuidle and cpufreq controllers are
+doing.  There are other problems as well: the notion of controlling a CPU's
+frequency has been effectively rendered obsolete by current processor
+designs, for example.
+<p>
+In the end, Ingo said that no power-aware scheduling patches would be
+considered for merging until these problems were solved.  In other words,
+the developers working on these patches needed to solve not just their
+problem, but the problem of rationalizing and integrating the work that has
+been done by other developers in preceding years.  Such things happen in
+kernel development; it can be hard on individual developers, but it does
+result in better code in the long term.
+<p>
+<h4>The latest approach</h4>
+<p>
+To address this challenge, Morten Rasmussen, who has been working on the <a
+href="541005.html">big LITTLE MP scheduler</a>, has taken a step back;
+his latest <a href="/Articles/570162/">power-aware scheduling patch set</a>
+does not actually introduce much in the way of power-aware scheduling.
+Instead, it is focused on the creation of an internal API that governs
+communications between the scheduler and a new type of "power driver" that
+is meant to eventually replace the cpuidle and cpufreq subsystems.  The
+power driver (there can only be one for all CPUs in the current patch set)
+provides these operations to the scheduler:
+<p>
+<pre>
+    struct power_driver {
+	int (*at_max_capacity)	(int cpu);
+	int (*go_faster)	(int cpu, int hint);
+	int (*go_slower)	(int cpu, int hint);
+	int (*best_wake_cpu)	(void);
+	void (*late_callback)	(int cpu);
+    };
+</pre>
+<p>
+Two of these methods allow the scheduler to query the power state of a
+given CPU; <tt>at_max_capacity()</tt> allows the scheduler to ask whether the
+processor is running at full speed, while <tt>best_wake_cpu()</tt> asks
+which (sleeping) CPU would be the best to wake in response to increasing
+load.  The <tt>best_wake_cpu()</tt> call can make use of low-level
+architectural knowledge to determine which CPU would require the least
+power to bring up; it would, for example, favor CPUs that share power or
+clock lines with currently running CPUs over those that would require
+powering up a new package.
+<p>
+The scheduler can provide feedback to the power driver with the
+<tt>go_faster()</tt> and <tt>go_slower()</tt> methods.  These calls request
+higher or lower speed from the given CPU without specifying an actual clock
+frequency, which isn't really possible on a lot of current processors.  The
+power driver can then instruct the hardware to adopt a power policy that
+matches what the scheduler is asking for.  The <tt>hint</tt> parameter is
+not used in the current patch set; its purpose is to indicate how much
+faster or slower performance the scheduler would like to see.  These calls
+as a whole are hints, actually; the power driver is not required to carry
+out the scheduler's wishes.
+<p>
+Finally, <tt>late_callback()</tt> exists to allow the power driver to
+do work that may require sleeping or having interrupts enabled.  Most of
+the functions listed above can be called from within the scheduler at
+almost any point, so they have to be written to run in atomic context.  If
+they need to do something that cannot be done in that context, they can set
+the work aside; the scheduler will call <tt>late_callback()</tt> at a safe
+time for that work to be done.
+<p>
+The current patch set makes just enough use of these functions to show how
+they would be used.  Whenever the scheduler adds a process to a given CPU's
+run queue, it checks whether the total load exceeds what the CPU is able to
+provide; if so, a call to <tt>go_faster()</tt> will be made to ask for more
+performance.  A similar test is done whenever a process is removed from a
+CPU; if that CPU is providing more power than is needed,
+<tt>go_slower()</tt> will be called.  A separate test will call
+<tt>go_faster()</tt> if the idle time on the CPU is low, even if the
+computed load suggests that the CPU should not be busy.  Rudimentary
+implementations of <tt>go_faster()</tt> and <tt>go_slower()</tt> have been
+provided; they are a simple wrapper around the existing cpufreq driver
+code. 
+<p>
+<h4>What's coming</h4>
+<p>
+The full plan (as described in <a
+href="http://www.linuxplumbersconf.org/2013/ocw//system/presentations/1263/original/Unifying_Power_Policies_LPC.pdf">Morten's
+Linux Plumbers Conference talk slides [PDF]</a>) calls for the elimination
+of cpufreq and cpuidle altogether once their functionality has been pulled
+into the power driver.  There will also be several more
+functions to be provided by the power driver.  These include
+<tt>get_best_sleep_cpu()</tt> to get a hint for the best CPU to put asleep,
+<tt>enter_idle()</tt> to actually put a CPU into the sleep state,
+<tt>load_scale()</tt> to help with the calculation of loads regardless of
+the CPU's current power state, and <tt>task_boost()</tt> to give priority
+to a specific CPU.  <tt>task_boost()</tt> is aimed at systems that provide
+features like "turbo mode," where one CPU can be overclocked, but only if
+the others are idle.
+<p>
+The long-term plan also involves bringing back techniques like <a
+href="520857.html">small-task packing</a>, proper support for
+big.LITTLE systems, and more.  But those goals look distant at the moment;
+Morten and company must first build a consensus around the proposed
+architecture.  That may take some doing, yet; scheduler developer Peter
+Zijlstra's <a href="/Articles/570374/">first response</a> was "<q>I
+don't see anything except a random bunch of hooks without an over-all
+picture of how to get less power used.</q>"  Morten has promised to fill
+out the story.
+<p>
+Some of these issues may be resolved on October 23, when a <a
+href="/Articles/570375/">half-day minisummit</a> will be held on the topic
+in Edinburgh.  Many of the relevant developers should be there, allowing
+for quick resolution of a number of the outstanding issues.  With luck,
+your editor will be there too; stay tuned for the next episode in this
+long-running story.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Power management/CPU scheduling</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/and power management</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/570353/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor570475"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new direction for power-aware scheduling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2013 20:32 UTC (Tue)
+                               by <b>brice</b> (subscriber, #35493)
+                              [<a href="/Articles/570475/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brice" />
+                <input type="hidden" name="return" value="/Articles/570353/#CommAnchor570475" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the article. Here's to crossing fingers and hoping progress gets made quickly in this increasingly important area of modern multi-cpu low power computing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/570475/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor570489"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another tricky bit...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2013 1:12 UTC (Wed)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/570489/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ejr" />
+                <input type="hidden" name="return" value="/Articles/570353/#CommAnchor570489" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How can the kernel measure what may help allocate resources without interfering with user-space measurement of other quantities?  CPU counters are a limited resource.  The mix of memory ops v. computational ops may guide power scheduling, but measuring that will require counters and limit those available to user space.<br>
+<p>
+There's a ton of research going on right now.  I'm not sure how best to couple the sometimes too-academic research with the sometimes too-practical hacking.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/570489/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor570868"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new direction for power-aware scheduling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 18, 2013 23:35 UTC (Fri)
+                               by <b>jtc</b> (guest, #6246)
+                              [<a href="/Articles/570868/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jtc" />
+                <input type="hidden" name="return" value="/Articles/570353/#CommAnchor570868" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"In other words, the developers working on these patches needed to solve not just their problem, but the problem of rationalizing and integrating the work that has been done by other developers in preceding years."<br>
+<p>
+I suppose this is a semantic nitpick, but it seems to me, based on the well-argued position in the article that an integrated approach is necessary for an effective solution, that "their problem" - the solution to the problem these developers are working on (IMO effective power-aware scheduling) requires a comprehensive, integrated analysis and implementation.  Thus, I would prefer to reword this sentence as:<br>
+<p>
+'In other words, the developers working on these patches need to solve not just the narrow problem-set they've so far been working on, but the problem of rationalizing and integrating the work that has been done by other developers in preceding years.'<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/570868/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

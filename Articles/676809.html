@@ -1,0 +1,347 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The Glibc DNS resolution vulnerability [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The Glibc DNS resolution vulnerability">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" While the recently disclosed GNU C library (Glibc) DNS bug (CVE-2015-7547) is quite serious, o [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/676232/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The Glibc DNS resolution vulnerability</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>February 24, 2016</br>
+           </div>
+<p>
+While the recently <a
+href="https://googleonlinesecurity.blogspot.mx/2016/02/cve-2015-7547-glibc-getaddrinfo-stack.html">disclosed</a>
+GNU C library (Glibc) DNS bug (<a
+href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-7547">CVE-2015-7547</a>)
+is quite serious, one of the interesting aspects is that the real scope of
+the problem is not yet known.  The ability to exploit this bog-standard
+buffer overflow is dependent on a number of other factors, so there are no
+known vectors for widespread code execution—publicly known, anyway.  There are
+certainly millions of vulnerable systems out there, many of which are
+not likely to ever be patched, but it is truly unclear if that will lead to
+large numbers of compromised systems.
+</p>
+
+<p>
+There are a number of obstacles in the way of an attacker wishing to
+exploit this bug.  First off,
+a client application must call <tt>getaddrinfo()</tt> to resolve a domain
+name and 
+use the <tt>AF_UNSPEC</tt> address family.  That family indicates that
+either an IPv4 or IPv6 address is acceptable, which is the normal way that
+<tt>getaddrinfo()</tt> is called these days. Glibc then does two parallel queries for
+the A and AAAA records for the domain.  It is the buffer handling in this
+parallel query step where things go awry. 
+</p>
+
+<p>
+Many systems are not configured to query a local caching nameserver; instead
+Glibc will make a query to the remote nameserver that was configured (or
+auto-configured by DHCP or the like) for the system.  That means these
+two queries leave the system and, crucially, replies are received.
+Typically, DNS replies are short, but they can be as large as 64KB.  Glibc
+allocates 2KB bytes on the stack for the reply, but it has provisions to
+increase that by allocating a heap buffer for replies that are larger.
+Unfortunately, if the query 
+needs to be retried, the stack buffer gets used instead of the larger,
+newly allocated buffer, so roughly 62KB of attacker-controlled data can be
+written to the stack.
+</p>
+
+<p>
+There are still more requirements to make all of this happen, though.
+Normally, UDP is used to do the query, which is typically limited to 512-byte
+replies, 
+but a man-in-the-middle (MITM) attacker could send more data.  But any
+server could set the
+"truncation bit" in the reply to cause the client to switch to TCP for its
+query. 
+Causing the client to retry is evidently tricky, but can be done.  The net
+result can be as bad as a bunch of attacker data on the stack, but even that
+may be difficult to turn into code execution due to address-space layout
+randomization (ASLR) and other defensive measures.
+</p>
+
+<p>
+Ostensibly it would seem that an attacker could simply set up a DNS server
+for their domain that would send malicious responses (while causing
+retries), then "force" clients into looking up this compromised domain.
+But there are complications; most notably any caching resolvers between the
+attacker and victim will reject most or all of the malicious responses
+because they aren't well-formed.  It is unclear, however, whether
+cache-surviving, malicious responses can be constructed.
+</p>
+
+<p>
+In a detailed <a
+href="https://sourceware.org/ml/libc-alpha/2016-02/msg00416.html">advisory</a>,
+Glibc developer Carlos O'Donell of Red Hat indicated that the
+possibility exists:
+<div class="BigQuote">
+A back of the envelope analysis shows that it should be possible to
+  write correctly formed DNS responses with attacker controlled payloads
+  that will penetrate a DNS cache hierarchy and therefore allow
+  attackers to exploit machines behind such caches.
+</div>
+
+<p>
+Dan Kaminsky
+  <a href="http://dankaminsky.com/2016/02/20/skeleton/">followed up</a> on
+  that in his own detailed analysis:
+<div class="BigQuote">
+I’m just going to state outright:  Nobody has gotten this glibc flaw to
+work through caches yet.  So we just don’t know if that’s possible.
+</div>
+</p>
+
+<p>
+But Kaminsky goes on to posit that "<q>some networks are going to be
+vulnerable to some cache traversal attacks sometimes</q>", under the
+theory that attacks only get better over time.  The emphasis on the cache
+is important.  An MITM attacker does not need the malicious
+responses to reside in intermediary caching resolvers (and an MITM can do
+plenty of other malicious things), but others who might want to exploit
+this flaw <i>do</i> need that.  If a way is found to get these malicious
+responses into caches, CVE-2015-7547 gets a whole lot worse.
+</p>
+
+<p>
+The scope of programs affected by the vulnerability is rather surprising as
+well.  As Kaminsky and others have noted, the problem affects many
+different programs, from <tt>sudo</tt> and <tt>httpd</tt> to <tt>gpg</tt>
+and <tt>ssh</tt>—and beyond.
+
+Languages like Python,
+Haskell, JavaScript, and others are also affected.
+Some of these "memory-safe" languages protect against
+ buffer overflows in programs written in the language, but the
+runtimes for those languages use Glibc, so flaws at that level can still
+affect them.  And 
+plenty of programs look up domain names for a 
+variety of reasons.  As Kaminsky put it:
+<div class="BigQuote">
+ If a DNS vulnerability could work through the DNS hierarchy, we would be
+ in a whole new class of trouble, because it is just extraordinarily easy
+ to compel code that does not trust you to retrieve arbitrary domains from
+ anywhere in the DNS.  You connect to a web server, it wants to put your
+ domain in its logs, it’s going to look you up.  You connect to a mail
+ server, it wants to see if you’re a spammer, it’s going to look you up.
+ You send someone an email, they reply.  How does their email find you?
+ Their systems are going to look you up.
+ </div>
+</p>
+
+<p>
+Clearly the best "mitigation" is to update affected systems, but that may
+not be possible in many cases.  There are an enormous number of Glibc-using
+devices out there (e.g. some home routers) that rarely, if ever, get updates.
+Even if updates <i>are</i> released, getting them into the hands of users
+and onto the devices is decidedly non-trivial.  That has some looking for
+other types of mitigation.
+</p>
+
+<p>
+One  that is often mentioned is limiting the size of DNS replies.
+If no reply is large enough to tickle the bug, then devices running the old
+code won't be affected.  That still doesn't solve the MITM problem, but
+Kaminsky also argued that length-limiting will have other hard-to-diagnose
+effects, so it should be avoided.  There is a reason that DNS has been
+engineered to allow for larger responses, so it is effectively too late to
+put that cat back in the bag.
+</p>
+
+<p>
+Using a local caching resolver, rather than requiring Glibc to query the
+network, will also help in environments where that is possible.  If
+cache-traversing responses eventually surface, they can be handled at that
+level.  Both local and remote caching servers can be changed as we learn
+more over time. Kaminsky described it this way:
+<div class="BigQuote">
+Caching resolvers will learn how to specially handle the case of
+simultaneous A and AAAA requests. If we’re protected from traversing
+attacks it’s because the attacker just can’t play a lot of games between
+UDP and TCP and A and AAAA responses.  As we learn more about when the
+attacks can traverse caches, we can intentionally work to make them not.
+</div>
+</p>
+
+<p>
+Some devices, Android devices in particular, use different C libraries,
+which are presumably not vulnerable to this particular flaw.  There are
+undoubtedly other vulnerabilities in those, with unknown effects and
+scope—at least 
+publicly.  The bug in Glibc has existed for almost eight years (it was
+introduced in Glibc&nbsp;2.9 in May&nbsp;2008); it is hard to guess what
+else lurks there—or elsewhere.
+</p>
+
+<p>
+It is refreshing to see a security vulnerability disclosed without a name,
+logo, animated GIF, and hype-ridden web page touting it.  Instead we have
+the disclosure announcements along with some sober analysis of what it all
+might mean.  That used to be the norm and, while it may be a little awkward
+to use "CVE-2015-7547" rather than some catchy name, it is a welcome change
+from the hoopla surrounding Heartbleed, GHOST, and others.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Domain Name System (DNS)</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Glibc</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/676809/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor678317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Glibc DNS resolution vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 2, 2016 12:44 UTC (Wed)
+                               by <b>Cato</b> (guest, #7643)
+                              [<a href="/Articles/678317/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cato" />
+                <input type="hidden" name="return" value="/Articles/676809/#CommAnchor678317" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Good analysis, thanks!  <br>
+<p>
+Actually I like the searchability of branded vulnerabilities, and the branding helps raise awareness which is often very low, so anything to raise it is good in my view.  Without the Heartbleed or Poodle names, would those vulnerabilities have had as much attention, particularly from part-time / non-specialist system administrators?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/678317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor678859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Glibc DNS resolution vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2016 21:08 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/678859/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/676809/#CommAnchor678859" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure what a part-time/non-specialist system administrator can *do* about this one, though. We really can't expect them to rebuild glibc from source: this is something which more or less *has* to come from the distributor.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/678859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor678881"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Glibc DNS resolution vulnerability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2016 22:42 UTC (Fri)
+                               by <b>Cato</b> (guest, #7643)
+                              [<a href="/Articles/678881/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cato" />
+                <input type="hidden" name="return" value="/Articles/676809/#CommAnchor678881" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I just meant the sysadmin could check glibc was auto updated by the distro package manager, or run an update, then reboot.  Simply being aware of a severe vulnerability is not that common for part-time sysadmins - most non-professional sysadmins don't automatically sign up for distro security alert emails.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/678881/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

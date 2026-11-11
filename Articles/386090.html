@@ -1,0 +1,223 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Cleancache and Frontswap [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Cleancache and Frontswap">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Dan Magenheimer's transcendent memory patch was examined here last July.  This patch creates a  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/385214/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Cleancache and Frontswap</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 4, 2010</br>
+           </div>
+Dan Magenheimer's <a href="340080.html">transcendent
+memory patch</a> was examined here last July.  This patch creates a special
+class of memory which is not directly accessible to the rest of the kernel,
+allowing a number of special tricks to be played.  Since then, transcendent
+memory has seemingly disappeared from view - until now, at least.  Dan has
+returned with a pair of new abstractions - called "Cleancache" and
+"Frontswap" - each of which encapsulates a part of what transcendent memory
+does.
+<p>
+<a href="http://lwn.net/Articles/384411/">Cleancache</a> is the less
+controversial of the two.  Dan describes it as 
+"<q>a page-granularity victim cache for clean pages<q>", which
+should be crystal-clear to most LWN readers.  For those who need a few more
+words: Cleancache provides a place where the kernel can put pages which it
+can afford to lose, but which it would like to keep around if possible.  A
+classic example is file-backed pages which are clean, so they can be
+recovered from disk if need be.  The kernel can drop such pages with no
+data loss, but things will get slower if the page is needed in the near
+future and must be read back from disk.
+<p>
+In such situations, the kernel could, instead of dropping the page, put it into the
+Cleancache system with:
+<p>
+<pre>
+    int cleancache_put_page(struct page *page);
+</pre>
+<p>
+At some future point, if there is a need for the page, it can be retrieved
+with:
+<p>
+<pre>
+    int cleancache_get_page(struct page *page);
+</pre>
+<p>
+The key point is that there is never any guarantee that
+<tt>cleancache_get_page()</tt> will actually succeed in getting the page
+back.  The Cleancache code (or whatever mechanism sits behind it) is free
+to drop the page at any time if it needs the memory for some other
+purpose.  So Cleancache users must be prepared to fall back to the real
+backing store if <tt>cleancache_get_page()</tt> fails.
+<p>
+While Cleancache holds the page, it can do creative things with it.  Pages
+with duplicate contents are not uncommon, especially in virtualized
+situations; often, significant numbers of pages contain only zeroes.  The
+backing store behind Cleancache can detect those duplicates and store a
+single copy.  Compression of stored pages is also possible; there is
+currently work afoot to implement ramzswap (<a
+href="334649.html">CompCache</a>) as a Cleancache
+backend.  It might also be possible to use Cleancache as part of a
+solid-state cache in front of a normal rotating drive.
+<p>
+Dan's patches include the addition of hooks to commonly-used filesystems so
+that they will use Cleancache automatically.
+<p>
+The other half of the equation is <a
+href="/Articles/386103/">Frontswap</a>; unlike Cleancache, Frontswap is
+meant to deal with dirty pages that the kernel would like to get rid of.
+Once again, there is an interface for moving pages into and out of the
+system:
+<p>
+<pre>
+    int frontswap_put_page(struct page *page);
+    int frontswap_get_page(struct page *page);
+</pre>
+<p>
+The rules are a bit different, though: Frontswap is not required to accept
+pages handed to it (so <tt>frontswap_put_page()</tt> can fail), but every
+page it accepts is guaranteed to be there later when the kernel asks to get
+it back.
+<p>
+Like Cleancache, Frontswap can play tricks with the stored pages to stretch its
+memory resources.  The real purpose behind this mechanism, though, appears
+to be to enable a hypervisor to respond quickly to memory usage spikes in
+virtualized guests.  Dan <a href="/Articles/386104/">put it this way</a>:
+<p>
+<div class="BigQuote">
+	Frontswap serves nicely as an emergency safety valve when a guest
+	has given up (too) much of its memory via ballooning but
+	unexpectedly has an urgent need that can't be serviced quickly
+	enough by the balloon driver.
+</div>
+<p>
+Reviewers have been more skeptical of this mechanism.  To some, it looks
+like a way for dealing with shortcomings in the balloon driver, which is
+already charged with implementing hypervisor decisions on how much memory
+is to be made available to guests.  If that is the case, it seems like
+fixing the balloon driver might be the better approach.
+Dan's response is that balloon drivers cannot respond quickly to memory
+needs, and that regulating guest memory with a balloon driver can lead to
+swap storms.  This is, apparently, a real problem encountered by
+virtualized systems in the field.  
+If, instead, the hypervisor maintains a pool of pages for Frontswap, it
+can make them available quickly when the need arises, mitigating
+memory-related performance problems.
+<p>
+Beyond that, Avi Kivity <a href="/Articles/386109/">complains</a> that
+memory given to guests with Frontswap can never be recovered by the
+hypervisor if those guests choose to hang onto it.  Since operating systems
+tend to be written to take advantage of all of the memory resources
+available to them, it seems possible that Frontswap memory could fill
+quickly and would stay full, leaving the hypervisor starving for memory
+while maintaining pages it cannot get rid of.  Avi also dislikes the
+page-at-a-time, synchronous nature of the Frontswap API.  Dan's response
+here is that per-guest quotas will keep any guest from using too much
+Frontswap space and that the API is better suited to the problem being
+solved.
+<p>
+Complaints notwithstanding, Cleancache and Frontswap already appear to be
+in reasonably wide use; they are shipping in OpenSUSE 11.2, Oracle's VM
+virtualization product, and with Xen.  Such distribution certainly
+stretches the "upstream first" rule somewhat, but it also shows that there
+is apparently a real use case for these features.  Given that the patches
+are not particularly intrusive and that the features have no cost if they
+are not used, it seems that something along these lines should make it into
+the mainline sooner or later.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Virtualization</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Transcendent memory</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/386090/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor445253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cleancache and Frontswap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2011 10:45 UTC (Mon)
+                               by <b>EthanG</b> (guest, #75270)
+                              [<a href="/Articles/445253/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="EthanG" />
+                <input type="hidden" name="return" value="/Articles/386090/#CommAnchor445253" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Find some serious-looking problems with a new feature and then discover some distros have charged ahead and added it anyway. Worse, some user-space stuff which could suffer from it already requires it. I love the Linux world sometimes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

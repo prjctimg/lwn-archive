@@ -1,0 +1,316 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>An API for handling arithmetic overflow [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="An API for handling arithmetic overflow">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" On March 31, Kees Cook shared  a patch set that represents the culmination of more than a year [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1065980/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>An API for handling arithmetic overflow</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>April 8, 2026</br>
+           </div>
+<p>
+On March 31, Kees Cook shared
+<a href="https://lwn.net/ml/all/20260331163716.work.696-kees@kernel.org/">
+a patch set</a> that represents the culmination of more than a year of work
+toward eliminating the possibility of silent, unintentional integer overflow in
+the kernel. Linus Torvalds was
+<a href="https://lwn.net/ml/all/CAHk-=wg=q7ptcMyUAqPGDbX_DKHivJVppc8bP0zpQqzOky_avA@mail.gmail.com/">
+not pleased</a> with the approach, leading to a detailed discussion about the
+meaning of "safe" integer operations and the design of APIs for handling integer
+overflows. Eventually, the developers involved reached a consensus for a
+different API that should make handling overflow errors in the kernel much less
+of a hassle.
+</p>
+
+<p>
+This work was 
+<a href="959189.html">initially
+proposed in 2024</a> as part of Cook's continuing efforts to harden the kernel
+against various sources of error. In that proposal, he emphasized that the
+problem with integer overflow in the kernel is not related to undefined behavior
+— the kernel is compiled with <tt>-fno-strict-overflow</tt>, which causes
+integer overflow and underflow to wrap around without error. The problem is with
+the unexpected code paths that can be taken when a number is suddenly much
+larger or much smaller than the developer expected. For example, adding an
+offset to a base address can result in a pointer to a location below the base
+address, a fact that is easy to overlook when writing buffer-handling
+code.
+</p>
+
+<p>
+Cook's proposed solution to this problem is a system of annotations that
+separate integers into types depending on whether wrapping is expected
+or not.
+Justin Stitt added
+<a href="https://clang.llvm.org/docs/OverflowBehaviorTypes.html">experimental
+support for the feature</a> to Clang, in the form of a pair of annotations:
+</p>
+
+<pre>
+    int __attribute__((overflow_behavior(wrap))) example1;
+    int __attribute__((overflow_behavior(trap))) example2;
+
+    // Alternate keyword form:
+    int __ob_wrap example1;
+    int __ob_trap example2;
+</pre>
+
+<p>
+The <tt>wrap</tt> attribute indicates that wrapping is expected (and should, for example,
+not be remarked upon by linting programs); the <tt>trap</tt> attribute indicates
+that it is unexpected (and should cause a crash). In the kernel, it appears that
+an operation that would cause an overflow of a trapping integer will produce an
+oops by default.
+The attributes override compiler flags, so wrapping integers will wrap and
+trapping integers will trap on overflow, regardless of how the compiler is
+invoked. Type promotion works in the normal C way; operations involving a normal
+integer and an annotated integer produce an annotated integer. Operations
+combining a wrapping integer and a trapping integer produce a trapping integer.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Vincent Mailhol
+<a href="https://lwn.net/ml/all/bd0a4235-a7f0-4624-802c-aa49a9d13f29@kernel.org/">
+asked</a> about the possibility of adding saturating integers as well.
+Saturating integers stay at the top or bottom of their range, instead of
+wrapping, such that <tt>MAX_INT + 1 == MAX_INT</tt>. Cook
+<a href="https://lwn.net/ml/all/202604011231.1D0BAE9A@keescook/">agreed</a> that was
+possible. The <tt>overflow_behavior()</tt> mechanism should extend to handling other behaviors,
+although that would result in a proliferation of integer types. Cook's patch set adds
+<a href="https://lwn.net/ml/all/20260331163725.2765789-5-kees@kernel.org/">a set
+of typedefs</a> for easily referring to the new types of integer, including
+"<tt>u8t</tt>" for trapping unsigned 8-bit integers, "<tt>s64w</tt>" for wrapping
+signed 64-bit integers, etc.
+</p>
+
+<p>
+Torvalds strongly objected to the way the documentation accompanying the
+patch set described trapping operations as "safe":
+</p>
+
+<blockquote class="bq">
+<p>
+Stop thinking that trapping is "safe".
+</p>
+<p>
+It damn well isn't. A dead machine is not a safe machine.
+</p>
+<p>
+Any patches that call trapping behavior safe will be NAK'ed by me.
+</p>
+</blockquote>
+
+<p>
+A
+<a href="https://lwn.net/ml/all/CAHk-=wiJ6Q_qMHSe-hs+QvqKVZphvDZjvFP_gQLw1eaWimv8+w@mail.gmail.com/">
+later message</a> also objected to the names Cook chose for the typedefs, noting
+that they were visually similar, which is not a good fit for
+"<q><em>VERY</em> subtle semantic changes.</q>" He suggested
+"<tt>wrapping_u32</tt>" or a similarly explicit name. Miguel Ojeda
+<a href="https://lwn.net/ml/all/CANiq72kL3rTKyDNYmD7wXiKCVJSfa1bnp2L8NShXU7OPmWjJ4w@mail.gmail.com/">
+noted</a> that the Rust syntax for this concept is
+"<tt>Wrapping&lt;u32&gt;</tt>", which mirrors Torvald's suggestion. But in practice,
+Rust code in the Kernel uses
+explicit function calls (e.g. <tt>wrapping_add()</tt>) rather than operator
+overloading, because it prevents confusing copy-paste errors where operators
+mean different things in context, Ojeda said.
+</p>
+
+<p>
+Torvalds
+<a href="https://lwn.net/ml/all/CAHk-=whjwHjmB0_2yXsOjDa7Mi_yFSx3AMd3vGk5r70WocvZZg@mail.gmail.com/">
+thought</a> that it would make sense to use explicit operations like that for
+arithmetic on trapping integers — which he continued to insist needed some way to make the
+error recoverable — but thought that it would be overly laborious for wrapping types.
+He suggested that trapping and wrapping operations should really have completely
+different syntax, because although they are often discussed together, they're
+actually quite different: wrapping types are an acknowledgment that a
+particular behavior is correct and expected, whereas trapping types are a
+mechanism that deliberately signals an error when something might be going
+wrong. "<q>Anything that says 'these are two faces of the same coin and are just
+different attributes on the type' is simply broken by design.</q>"
+</p>
+
+<p>
+In <a href="https://lwn.net/ml/all/CAHk-=wgKB5f3MM40FGGUWUm_9eyESe2PAqCa6uZ=YTi0CdPwDg@mail.gmail.com/">
+another follow-up message</a>, he suggested that the interface for trapping
+integers could use macros to take an error label to jump to, in order to make
+their use less obnoxious than the kernel's existing overflow-checking functions:
+</p>
+
+<pre>
+    res = add_overflow(a, b, label);
+    ...
+    label: // Handle overflow errors
+    ...
+</pre>
+
+<p>
+Cook 
+<a href="https://lwn.net/ml/all/202603311155.503B3DA5B@keescook/">explained</a>
+that he
+<a href="https://lwn.net/ml/all/202603311100.F39B5DC3@keescook/">
+had considered</a> an approach like that, but people were so universally
+against introducing function-based math primitives that they wouldn't accept
+using them. "<q>Everyone absolutely hates it.</q>" Torvalds
+<a href="https://lwn.net/ml/all/CAHk-=wh6YWV3hHs8i0P=2A2CVjCY=SOaYeayEodXYa+CMqNO4g@mail.gmail.com/">
+disagreed</a>, saying that he thought a simple-enough interface would
+be used when people have a good reason to do so. He gave an example of how the
+approach he described previously could be extended with a default "overflow"
+label to further streamline the code. "<q>Now will people ENJOY using
+'<tt>addo()</tt>' and things like that? No.</q>" But he still thought that
+interface was better than randomly killing the kernel when an overflow occurs.
+</p>
+
+<p>
+This line of reasoning misses the point,
+<a href="https://lwn.net/ml/all/202603311117.454F578@keescook/">Cook said</a>.
+All of the places where people would use trapping integers are already supposed
+to be places where no overflow is possible. So, operations on trapping integers
+aren't intended to replace existing overflow checks — they're just supposed to
+make it obvious when a developer has missed an overflow check, because people
+keep making related mistakes.
+</p>
+
+<blockquote class="bq">
+If the code was written perfectly, then there's no problem. If there was
+a bug that allows for overflow then you get a crash instead of totally
+insane behavior that is almost always exploitable in a way that the
+system gets compromised. That is a net benefit, even if crashes are
+still bad.
+</blockquote>
+
+<p>
+He did agree that he shouldn't have called trapping a "safe" behavior in the
+documentation, and promised to fix that. Torvalds
+<a href="https://lwn.net/ml/all/CAHk-=wizJdr1qgJ9NKNjtbH=ugL3umA9JRW9ifrQaD+PpWCMuQ@mail.gmail.com/">
+replied</a> that using the equivalent of <tt>BUG_ON()</tt> still wasn't the
+right way to address the problem. 
+</p>
+
+<p>
+Cook
+<a href="https://lwn.net/ml/all/202603311253.95C54588E@keescook/">proposed</a>
+adding an attribute to the language for specifying a label in a given function
+where trapping operations should jump; using trapping integer operations outside
+of an appropriately annotated function would be an error. Torvalds
+<a href="https://lwn.net/ml/all/CAHk-=wjSOGaausLeTD13yAqso7qM09EnkDFiN7wF15kH0VWmZQ@mail.gmail.com/">
+approved</a> of that approach, and spent a while working out precise details of
+what such an interface would look like with Cook. "<q>So with <em>this</em> kind of interface, all my reservations about it go away.</q>"
+</p>
+
+<pre>
+    int __overflow_label(boom)
+    something(...)
+    {
+        u8 __attribute__((overflow_behavior(trap))) count;
+        ...
+        // Jumps to 'boom' if the count overflows.
+        while (thing()) count++;
+        ...
+        return 0;
+    boom:
+        // Cleanup code
+        return -EINVAL;
+    }
+</pre>
+
+<p>
+Peter Zijlstra
+<a href="https://lwn.net/ml/all/20260401083137.GT3738786@noisy.programming.kicks-ass.net/">
+pointed out</a> that, although it worked well for simple examples like the
+above, this design would cause problems with the
+<tt>__cleanup()</tt> macro. It is not permitted to jump into the scope of a
+stack-allocated object annotated with <tt>__cleanup()</tt>; the only permitted
+way to enter that code should be through the assignment to that variable. Having
+trapping operations jump to a locally defined label makes it easy to invisibly
+break that rule and accidentally jump into such a scope.
+</p>
+
+<p>
+Clang does catch this particular error, Cook
+<a href="https://lwn.net/ml/all/202604011328.D3821379@keescook/">demonstrated</a>. 
+GCC doesn't have a similar error message, so that's something that may need to
+be fixed. Cook did agree that the behavior was "<q>a bit fragile</q>".
+</p>
+
+<p>
+With the proposed changes to the API and the documentation, Cook's patch set
+will have to be more or less rewritten. Stitt's compiler code may need changes
+as well, and GCC will need to implement a version of whatever Clang settles on.
+Despite that, having an agreement about
+the form that the API for trapping integers should take is important progress.
+It may not be long before the work becomes available, which will provide the
+opportunity to simplify existing overflow-checking code and to eliminate
+existing unnoticed overflow bugs.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Kernel hardening</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Linux kernel/Hardening</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1065889/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

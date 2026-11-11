@@ -1,0 +1,381 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The long path toward optimizing short reads [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The long path toward optimizing short reads">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's file-I/O subsystems have been highly optimized over the years in the hope of provi [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1044228/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The long path toward optimizing short reads</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 30, 2025</br>
+           </div>
+The kernel's file-I/O subsystems have been highly optimized over the years
+in the hope of providing the best performance for a wide variety of
+workloads.  There is, however, one workload type that suffers with current
+kernels: applications that perform many short reads, in multiple processes,
+from the same file.  Kiryl Shutsemau has been working on <a
+href="/ml/all/20251017141536.577466-1-kirill@shutemov.name">a patch</a> to
+try to optimize this case, but the task is turning out to be harder than
+one might expect.
+<p>
+As Shutsemau (who has also been known as Kirill Shutemov) explains in the
+changelog to this relatively short patch, one of the steps in performing a
+read from a file is locating the relevant folio in the page cache and
+obtaining a reference to that folio to ensure that it remains stable while
+the data it contains is copied back to user space.  In cases where the
+reads are short and frequent, though, that reference-count manipulation
+becomes a significant part of the entire cost; atomic operations are
+expensive, and bouncing the cache line for the folio around the system
+makes things even worse.  Workloads of this type are measurably slowed by
+this overhead.
+<p>
+He set out to reduce this performance penalty by adding a new fast path for
+short reads.  The first step is to add a new <a
+href="https://docs.kernel.org/locking/seqlock.html">sequence counter</a>
+(to the <a
+href="https://elixir.bootlin.com/linux/v6.17.5/source/include/linux/fs.h#L485"><tt>address_space</tt></a>
+structure) that tracks the number of folios for a given file that have been
+deleted from the page cache.  A short read (defined as less than 1KB in
+this patch) is then directed to a fast path that works by noting that
+sequence count before copying the data to be read from the folio into a
+buffer on the kernel stack.  If, at the conclusion of the copy, the
+sequence count has not changed, the data can be safely copied from that
+buffer back to user space; otherwise the kernel will fall back into the
+slower path.
+<p>
+The optimization seems to work.  One benchmark result, for short reads from
+a single small file, improves by nearly a factor of three; other tests show
+more modest improvements.  The obligatory kernel-compilation benchmark,
+which is definitely not the sort of workload this patch is trying to
+optimize, improves by roughly&nbsp;1%.  On its face, this patch looks like
+the type that offers obvious benefits and can sail through the process
+fairly easily, but memory management and file I/O are subtle spaces where
+hazards abound.
+<p>
+The use of a 1KB stack-based buffer would once have raised no end of
+eyebrows.  The kernel stack is not as small as it once was, but 1KB is
+still a significant part of it.  Linus Torvalds <a
+href="/ml/all/CAHk-=wgijo0ThKoYZeypuZb2YHCL_3vdyzjALnONdQoubRmN3A@mail.gmail.com/">suggested</a>
+dropping the maximum "short-read" size to 768&nbsp;bytes, but Shutsemau <a
+href="/ml/all/xsrbm3qilii5cpfbnya2u5dleigbxej4ewctp2yj7i7avkkkkq@yknrffjv2bju/">responded</a>
+that this type of read only happens at the end of a short call chain, so
+there is little risk of a stack overflow happening there.  Andrew Morton
+also <a
+href="/ml/all/20251019215328.3b529dc78222787226bd4ffe@linux-foundation.org/">questioned</a>
+the "<q>1k guess-or-giggle</q>" cutoff, saying that a much smaller
+buffer would probably handle most of the relevant cases.  He also wondered
+if it would be possible to copy the data directly to user space rather than
+buffering by way of the kernel stack; Torvalds <a
+href="/ml/all/CAHk-=wh62OxWsL+msmks7=VdBJHz7HvRYoPDckkAEAwsgrmjew@mail.gmail.com">answered</a>
+that doing so would risk exposing sensitive data if the folio in question
+is reused during the operation.
+<p>
+<a href="/ml/all/aPiPG1-VDV7ZV2_F@dread.disaster.area">A different sort of
+criticism</a> came from Dave Chinner, who worried about what would happen
+if one of these short reads raced with an <a
+href="https://man7.org/linux/man-pages/man2/fallocate.2.html"><tt>fallocate()</tt></a>
+operation that punches a hole into the same file.  <tt>fallocate()</tt> is
+specified to be atomic, meaning that user space will see the contents of
+the file either before or after an operation, but will not see intermediate
+results.  The check on the new sequence count, he said, would not notice
+changes by <tt>fallocate()</tt>, potentially resulting in "<q>a transient
+data corruption event</q>" if data is copied to satisfy a read while being
+simultaneously modified by <tt>fallocate()</tt>.
+<p>
+Torvalds <a
+href="/ml/all/CAHk-=wjVOhYTtT9pjzAqXoXdinrV9+uiYfUyoQ5RFmTEvua-Jg@mail.gmail.com">dismissed</a>
+those concerns, describing the atomicity guarantees for
+<tt>fallocate()</tt> as "<q>a bedtime story</q>", and asserting that
+implementing that behavior would be too expensive.  Chinner <a
+href="/ml/all/aPneVmBuuTHGQBgl@dread.disaster.area">replied</a> that this
+case is the same as <a
+href="https://man7.org/linux/man-pages/man2/truncate.2.html"><tt>truncate()</tt></a>,
+where the kernel community treats the exposure of partial results as a
+serious bug.  The problem is worse than just exposing partial results, he
+said; in the case of an <tt>FALLOC_FL_COLLAPSE_RANGE</tt> operation, a
+badly timed read could return results that never existed, even partially,
+in the file.  With regard to performance, he said that XFS implements the
+necessary locking to prevent this kind of race, even with Shutsemau's
+patch, so providing the specified guarantees for <tt>fallocate()</tt> does
+not have to be slow.
+<p>
+Chinner also <a href="/ml/all/aPgZthYaP7Flda0z@dread.disaster.area">advised
+against</a> increasing the "<q>cognitive load</q>" for anybody who is
+working on any part of the implementation of <tt>truncate()</tt>, which has
+long been seen as one of the most difficult operations for a filesystem to
+get right.  He asked: "<q>is the benefit for this niche workload really
+worth the additional complexity it adds to what is already a very complex
+set of behaviours and interactions?</q>".  Hugh Dickins <a
+href="/ml/all/b8e56515-3903-068c-e4bd-fc0ca5c30d94@google.com">echoed</a>
+that sentiment, but Torvalds <a
+href="/ml/all/CAHk-=wiWmTpQwz5FZ_=At_Tw+Nm_5Fcy-9is_jXCMo9T0mshZQ@mail.gmail.com">said</a>
+that there are other parts of the page cache that do "<q>*much* more scary
+things</q>", and that tripling performance for a known workload isn't
+necessarily "niche".  David Hildenbrand <a
+href="/ml/all/7bfd0822-5687-4ddc-9637-0cedd404c34e@redhat.com">answered</a>
+with a request that this change be deferred until planned work to change
+how folios are freed (using read-copy-update) is completed.
+<p>
+
+The conversation has wound down, for now at least; it seems likely to
+resume if Shutsemau reposts the patch after addressing some other issues
+that were pointed out in review.  This work, and the conversation around
+it, shows just how subtle the intersection of memory management and the
+virtual filesystem layer can be; each of those subsystems is tricky enough
+on its own, and bringing them together does not make anything simpler.
+That is why it can be difficult for this kind of change to clear the bar
+for acceptance; it is just too easy to break things.  So this particular
+optimization's acceptance into the mainline is far from guaranteed, but it
+is an interesting exercise regardless.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">fallocate()</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Page cache</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1043640/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1044278"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Threads galore</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2025 14:13 UTC (Thu)
+                               by <b>sam_c</b> (subscriber, #139836)
+                              [<a href="/Articles/1044278/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sam_c" />
+                <input type="hidden" name="return" value="/Articles/1043640/#CommAnchor1044278" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some further reading: the story with this started (recently) around <a href="https://lore.kernel.org/all/CAHk-=wj00-nGmXEkxY=-=Z_qP6kiGUziSFvxHJ9N-cLWry5zpA@mail.gmail.com/">https://lore.kernel.org/all/CAHk-=wj00-nGmXEkxY=-=Z_qP6ki...</a>, though Linus mentioned he'd tried before (<a href="https://lore.kernel.org/all/CAHk-=whFzKO+Vx2f8h72m7ysiEP2Thubp3EaZPa7kuoJb0k=ig@mail.gmail.com/">https://lore.kernel.org/all/CAHk-=whFzKO+Vx2f8h72m7ysiEP2...</a>) at least once.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044278/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1045228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why stack not heap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 9:52 UTC (Thu)
+                               by <b>rwmj</b> (subscriber, #5474)
+                              [<a href="/Articles/1045228/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rwmj" />
+                <input type="hidden" name="return" value="/Articles/1043640/#CommAnchor1045228" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I missed why copying it through the stack is important.  If a 1K buffer on the stack is risky, why not allocate the bounce buffer with kmalloc?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why stack not heap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 9:53 UTC (Thu)
+                               by <b>rwmj</b> (subscriber, #5474)
+                              [<a href="/Articles/1045229/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rwmj" />
+                <input type="hidden" name="return" value="/Articles/1043640/#CommAnchor1045229" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And related to this question, if this optimization benefits 1K reads, why not use it for larger reads?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045252"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why stack not heap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 12:11 UTC (Thu)
+                               by <b>Karellen</b> (subscriber, #67644)
+                              [<a href="/Articles/1045252/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Karellen" />
+                <input type="hidden" name="return" value="/Articles/1043640/#CommAnchor1045252" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Read time is somewhat proportional to read size. Saving a fixed amount of time is a smaller percentage win for large reads than it is for small reads. And IIRC large reads are less common than small reads.<br>
+<p>
+Also, kernel stacks are highly constrained, and while overflowing the stack of a userspace process just results in that processes being killed, overflowing a kernel stack leads to your whole system crashing. If you're lucky. If you're unlucky, you overwrite something else important like a very important database index or your disk partition table first. If an unprivileged attacker can cause a medium sized read of a file they control to overflow a kernel stack with just the right data, you might be in a heap of trouble.<br>
+<p>
+(Probably not, I think there are guard pages on kernel stacks now, but also I'm not a very imaginative attacker.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045252/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1045253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why stack not heap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 13:33 UTC (Thu)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1045253/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1043640/#CommAnchor1045253" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Once the read gets large enough, it's not an optimization any more.
+<p>This fast path is "if the data you want is in the page cache, and we can copy it from the page cache to a bounce buffer without the page cache changing underneath us, then don't do the full locking needed to stop the page cache changing underneath us, just copy the bounce buffer to the reader". As the read grows, the chances of you needing the full locking anyway also grow, and the chances of the data you want being in the page cache go down, so that it's not a win any more.
+<p>And that ignores the cost of copying in and out of the bounce buffer, which is there so that if the page cache does change while you're copying to the bounce buffer, there's been no copy to userspace, and thus no way for another thread to observe the data you copied (which might be partly from a new user of that page of page cache, referring to data you shouldn't have had access to).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1045237"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why stack not heap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 11:58 UTC (Thu)
+                               by <b>Karellen</b> (subscriber, #67644)
+                              [<a href="/Articles/1045237/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Karellen" />
+                <input type="hidden" name="return" value="/Articles/1043640/#CommAnchor1045237" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Presumably because this is a speed optimisation, it's intentionally part of the fast path, and also it's racing to complete before the sequence count changes. Calling kmalloc() is going to slow that path significantly, whereas the stack is right there already and updating the stack pointer has negligible cost?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045237/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

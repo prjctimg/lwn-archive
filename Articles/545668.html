@@ -1,0 +1,325 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Avoiding game-score loss with per-process reclaim [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Avoiding game-score loss with per-process reclaim">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Minchan Kim's recent patch series to provide user-space-triggered reclaim of a process's pages [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/544793/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Avoiding game-score loss with per-process reclaim</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Michael Kerrisk</b><br>April 3, 2013</br>
+           </div>
+<p> Minchan Kim's recent <a href="/Articles/545669/">patch series</a> to
+provide user-space-triggered reclaim of a process's pages represents one
+more point in a spectrum that increasingly sees memory management on Linux
+as a task that is indirectly influenced or even directly controlled from
+user space.
+
+<p> Approaches such as Android's low-memory killer represent one end of the
+page-reclaim spectrum, where memory management is primarily under kernel
+control. When memory is low, the low-memory killer picks a victim process
+and kills it outright; applications that live in such an environment have
+to work with the possibility that they may disappear from
+one moment to the next.  As Minchan pointed out via an amusing example, the
+effects of the low-memory killer's approach to page reclaim can be extreme:
+
+<div class="BigQuote">
+
+        [Having a process killed to free memory] was really terrible
+        experience because I lost my best score of game I had ever after I
+        switch the phone call while I enjoyed the game
+
+</div>
+
+<p> Jon Stultz's volatile ranges work and Minchan's own work on a similar
+feature (both described in <a href="522135.html">this article</a>)
+represent a middle point in the spectrum. The volatile ranges approach,
+inspired by Android's ashmem, provides a process with a way to inform the
+kernel that a certain range of its own virtual address space can be
+preferentially reclaimed if memory pressure is high. Under this approach,
+the kernel takes no responsibility for the contents of the reclaimed pages:
+if the kernel needs the memory, the page contents are discarded, and it is
+assumed that the application has sufficient information available to
+re-create those pages with the right contents if they are needed. As with
+the low-memory killer, the decision about if and when to reclaim the pages
+remains with the kernel.
+
+<p> By contrast, Minchan's patch set places the decision about when to
+reclaim pages directly under the control of user space. The interface provided by
+these patches is simple. A <tt>/proc/<i>PID</i>/reclaim</tt> file is
+provided for each process. A process with suitable permissions&mdash;that
+is, a process owned by root or one with the same user ID as the
+process <tt><i>PID</i></tt>&mdash;can write one of the following values to
+the file, to cause some or all of the process's pages to be reclaimed:
+
+<ol>
+
+    <p>
+    <li>
+
+       Reclaim all process pages in file-backed mappings. 
+
+    </li>
+
+    <p>
+    <li>
+
+       Reclaim all process pages in anonymous
+       (<tt>MAP_ANONYMOUS</tt>) mappings.
+
+    </li>
+
+    <p>
+    <li>
+
+       Reclaim all pages of the process (i.e., the combination of 1 and 2).
+
+    </li>
+
+</ol>
+
+<p> As currently implemented, all of the process's pages that match the
+specified criterion are reclaimed.  Your editor
+<a href="/Articles/545817/">wondered</a>
+whether there might be benefit in allowing some control over the
+range of pages that are reclaimed from the target process, by allowing an
+address range to be written to the <tt>/proc/<i>PID</i>/reclaim</tt> file.
+
+<p> By contrast with volatile ranges and the low-memory killer,
+modifications in pages reclaimed via <tt>/proc/<i>PID</i>/reclaim</tt> are
+not lost. Modified pages are written to the underlying file in the case of
+shared (<tt>MAP_SHARED</tt>) file mappings or to swap in other cases. Thus,
+if the process touches the reclaimed page later, it will be faulted into
+memory with the contents at the time it was reclaimed. The patches also
+include some logic to handle the case where multiple processes are sharing
+the same pages; in that case, the pages are reclaimed only after all of the
+processes have marked them for reclaim. Like the low-memory killer,
+<tt>/proc/<i>PID</i>/reclaim</tt> can be used to reclaim all of the pages
+in a process, but without needing to kill the process to do so.
+
+<p> The idea behind Minchan's proposal is that a user-space task manager
+could take over some part of the job of memory management. In some cases,
+this may be more effective than allowing the kernel to make
+memory-management decisions, since the user-space task manager can bring
+application-specific intelligence to decisions about whether to reclaim a
+process's pages.  For example, some application processes may be in the
+foreground while others are in the background. It may desirable to
+preferentially reclaim pages from one of the background processes, even if
+it has some frequently accessed pages. Of course, the task manager would
+somehow need to know when the system is under memory pressure. To that end,
+a mechanism like Anton Vorontsov's proposed <a
+href="524742.html"><tt>vmpressure_fd()</tt> API</a> might be useful.
+
+<p> Minchan's patches apply against Michal Hocko's <a
+href="https://git.kernel.org/cgit/linux/kernel/git/mhocko/mm.git/">MMOTM
+(memory management of the moment) tree</a>. The patches came out on March
+25, but have so far seen little review. Nevertheless, they present an idea
+that will probably be of particular interest for the developers of mobile
+and embedded devices and thus it seems likely that they will get some
+attention at some point in the future.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/545668/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor546022"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding game-score loss with per-process reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2013 19:36 UTC (Thu)
+                               by <b>Baylink</b> (guest, #755)
+                              [<a href="/Articles/546022/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Baylink" />
+                <input type="hidden" name="return" value="/Articles/545668/#CommAnchor546022" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have low-mem killer problems on my HTC Supersonic, and you know what they have taught me?<br>
+<p>
+Lots of Android app designers *have not learned yet* that you *checkpoint work-in-progress every time you lose focus*.<br>
+<p>
+You won't generally get killed if you have focus, but as soon as you don't, watch out.  Tweetcaster loses in-progress postings, Facebook loses its reading position, even newer builds of CoolReader forget to checkpoint the cursor position on blur.<br>
+<p>
+It's really annoying.<br>
+<p>
+Opera Mobile has an even more annoying bug, in it's latest release: it checkpoints the tab list, and the current position in the tab, but has regressed to not keeping the *history list*.<br>
+<p>
+&lt;sigh&gt;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/546022/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor546177"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding game-score loss with per-process reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2013 16:45 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/546177/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/545668/#CommAnchor546177" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+This is half of the classic long term scheduling of batch systems - swapping out a process.  But what about the other half: shouldn't reclaiming all of the process' pages be accompanied by making it wait a while before running again?  Otherwise, this could lead to a great deal of page thrashing.
+<p>
+I assume we're talking about a process that runs and touches all its pages regularly, or its pages would have been reclaimed long ago by normal page replacement.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/546177/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor547229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding game-score loss with per-process reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2013 3:49 UTC (Sat)
+                               by <b>wtanksleyjr</b> (subscriber, #74601)
+                              [<a href="/Articles/547229/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtanksleyjr" />
+                <input type="hidden" name="return" value="/Articles/545668/#CommAnchor547229" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not swapping out a process -- killing a process completely. Swapping happens only when you have available memory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/547229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor547253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding game-score loss with per-process reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2013 19:09 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/547253/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/545668/#CommAnchor547253" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+Not swapping out a process -- killing a process completely. 
+</blockquote>
+<p>
+I'm not sure what you meant to contradict here, but neither traditional long-term scheduling nor the feature discussed in the article kill a process completely.  They remove all of its data from real memory to make more real memory available for other processes.
+<blockquote>
+Swapping happens only when you have available memory.
+</blockquote>
+<p>
+I don't know what you mean by this.  "Swapping" means two things - in Linux, it is moving pages from real memory to e.g. disk and back again.  In traditional batch systems, this is called "paging" and "swapping" means moving entire processes from real memory to e.g. disk and back again.  In either case, it's done when by some definition there is not "enough" real memory.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/547253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

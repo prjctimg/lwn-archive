@@ -1,0 +1,169 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>VFS parallel lookups [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="VFS parallel lookups">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" In one of just a handful of filesystem-only sessions at the 2016 Linux Storage, Filesystem, an [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/684573/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>VFS parallel lookups</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>April 27, 2016</br>
+           <hr>
+<a href="/Articles/lsfmm2016/">LSFMM 2016</a>
+</div>
+<p>
+In one of just a handful of filesystem-only sessions at the 2016 Linux
+Storage, Filesystem, and Memory-Management Summit, Al Viro reported on work
+he has done to allow VFS lookups to proceed in parallel.  Today, all
+directory operations are done with the inode mutex (<tt>i_mutex</tt>) held,
+which prevents anything else from touching that directory.  But the most
+common operation, lookup, is non-destructive, so there is no real
+conceptual reason to stop it from happening in parallel.  Solving that
+scalability problem took some work, though, as Viro described.
+</p>
+
+<a href="/Articles/685159/">
+<img src="../_static/images/2016/lsf-viro-sm.jpg" border=0 hspace=5 align="right"
+alt="[Al Viro]" title="Al Viro" width=225 height=240>
+</a>
+
+<p>
+The obvious choice to replace the mutex is a read/write semaphore (rwsem),
+Viro said.  But there is a problem: the mutex currently protects the
+directory entry (dentry).  A lookup operation can cause dentries to be
+created, which can lead to races if two dentries are created for the same name.
+Unwinding that took some effort, he said.  There
+is a need to ensure that there are never two hashed dentries with the same
+parent 
+and name at the same time.  If that were to happen, subsequent lookups
+would only find one or the other, which must be avoided.  If two lookups on
+the same name in the same directory run in parallel, there is a danger that
+these two dentries would be created.
+</p>
+
+<p>
+There was a need for an object that would be used to indicate that a lookup
+was in progress 
+for a given parent and name.  When a dentry is not found in the
+dentry cache, a new dentry is created to be passed to the filesystem
+<tt>lookup()</tt> function.  That dentry is the obvious place to track a
+lookup in progress for the given parent and name.  There are some fields
+that are unused at that point, so they can be repurposed for lookup tracking.
+</p>
+
+<p>
+These in-progress lookup dentries are tracked in a hash on the
+parent.  That hash can't be bigger than the number of in-progress lookups
+for that directory.
+If a lookup finds an entry on the parent's hash for the same name, it
+simply waits until the earlier lookup is done.  So there are no parallel
+lookups for the same parent/name combination.
+</p>
+
+<p>
+His "lookups" branch that implements parallel lookups "actually works",
+Viro said.  <tt>i_mutex</tt> is replaced with <tt>i_rwsem</tt> and lookups
+are done using that shared lock.  
+</p>
+
+<p>
+For <tt>readdir()</tt>, a different choice was made.  Because there is state
+associated with <tt>readdir()</tt> (i.e. directory position), it doesn't
+really make sense to allow two threads to 
+be calling <tt>getdents()</tt> on the same directory file descriptor in
+parallel.  The <tt>struct&nbsp;file</tt> 
+that represents the open directory file has a lock that prevents
+<tt>read()</tt> and 
+<tt>lseek()</tt> from happening in parallel; it is used to prevent parallel
+<tt>readdir()</tt>/<tt>getdents()</tt> calls.
+</p>
+
+<p>
+One problem that he ran into when converting to an rwsem is a lack of
+<a href="/Articles/288056/">"killable" variants</a> of the semaphore
+primitives (like 
+<tt>down_write()</tt>).  There is a patch series floating around that adds
+<tt>down_write_killable()</tt>, but it has not stabilized yet so, for now,
+he replaced <tt>mutex_lock_killable()</tt> calls with
+<tt>down_write()</tt>, which is fine for testing purposes.
+</p>
+
+<p>
+Jan Kara asked about the performance of the semaphore.  Viro said that
+there have 
+been no performance regressions that he has seen on the tests he runs.  But
+read/write semaphores are a bit costlier.  Kara was concerned that all
+lookups are paying the cost of the semaphore, when only some lookups get
+the benefit of parallelism.  Hugh Dickins said that a lot of effort has
+been put into improving the performance of the semaphore, so the differences
+should be minimal.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/Virtual filesystem layer</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2016</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/685108/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

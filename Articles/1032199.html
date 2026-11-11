@@ -1,0 +1,405 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improving control over transparent huge page use [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Improving control over transparent huge page use">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The use of huge pages can significantly increase the performance of many workloads by reducing  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1032017/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improving control over transparent huge page use</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 5, 2025</br>
+           </div>
+The use of huge pages can significantly increase the performance of many
+workloads by reducing both memory-management overhead in the kernel and
+pressure on the system's translation lookaside buffer (TLB).  The addition
+of transparent huge pages (THP) for the 2.6.38 kernel release in 2011
+caused the kernel to allocate huge pages automatically to make their
+benefits available to all workloads without any effort needed on the
+user-space side.  But it turns out that use of huge pages can make some
+workloads slower as the result of internal memory fragmentation, so the THP
+feature is often disabled.  Two patch sets aimed at better targeting the
+use of transparent huge pages are currently working their way through the
+review process.
+<p>
+Over the years, the kernel has evolved a number of ways to control the use
+of THP; they are described in <a
+href="https://docs.kernel.org/admin-guide/mm/transhuge.html"><tt>Documentation/admin-guide/mm/transhuge.rst</tt></a>.
+At the global level, the
+<tt>/sys/kernel/mm/transparent_hugepage/enabled</tt> knob controls behavior
+system-wide.  It can be set to "<tt>always</tt>" or "<tt>never</tt>" with
+obvious results.  This knob also supports the "<tt>madvise</tt>" setting,
+which only enables THP for processes that explicitly opt in for specific
+memory regions with a call to <a
+href="https://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>.
+The kernel, in other words, allows for the imposition of a system-wide
+policy, with the possibility of restricting THP usage to places where
+applications have explicitly enabled it.
+<p>
+<!-- middle-ad -->
+<h4>Tweaking <tt>prctl()</tt></h4>
+<p>
+There are more control points for THP usage, though, including a whole set
+of knobs for the <tt>khugepaged</tt> kernel thread (which builds huge pages
+out of base pages in the background) and a set of
+kernel command-line options.  There is also the <a
+href="https://man7.org/linux/man-pages/man2/PR_SET_THP_DISABLE.2const.html"><tt>PR_SET_THP_DISABLE</tt></a>
+option to <a
+href="https://man7.org/linux/man-pages/man2/prctl.2.html"><tt>prctl()</tt></a>,
+which lets a process disable the THP usage for its entire address space
+regardless of the overall system policy.  This option is used in programs
+where the developer feels that THP allocations will only harm performance;
+for example, <a
+href="https://sources.debian.org/src/mariadb/1:11.8.2-1/sql/mysqld.cc/?hl=5683#L5683">MariaDB</a>
+uses this feature.
+<p>
+The implementation of <tt>PR_SET_THP_DISABLE</tt> is absolute; it will
+override any <tt>madvise()</tt> calls that the process may subsequently
+make to enable THP for an address range.  Disabling THP process-wide in
+this way is a big hammer.  There are use cases where it would be useful to
+be able to disable THP generally (on systems where it is enabled globally),
+while still being able to enable THP for specific memory regions, but the
+kernel does not currently offer that option.  There is, in other words, no
+way for a process to request "do not use THP unless otherwise requested".
+<p>
+As described in <a
+href="/ml/all/20250804154317.1648084-2-usamaarif642@gmail.com">this patch
+from David Hildenbrand</a> (which has been made part of <a
+href="/ml/all/20250804154317.1648084-1-usamaarif642@gmail.com">this
+series</a> by Usama Arif), one could consider letting <tt>madvise()</tt>
+override <tt>PR_SET_THP_DISABLE</tt> but, as Hildenbrand put it, "<q>this
+would change the documented semantics quite a bit</q>".  There may also be
+cases where the current semantics are what is actually wanted, so this does
+not seem like a good option.
+<p>
+Instead, Hildenbrand's patch adds a new option to
+<tt>PR_SET_THP_DISABLE</tt>, called <tt>PR_THP_DISABLE_EXCEPT_ADVISED</tt>,
+that provides the new semantics.  When this option is provided (as the
+third parameter to <tt>prctl()</tt>), THP will be disabled process-wide
+except for regions where <tt>madvise()</tt> has been used to request an
+exception, addressing the above-mentioned use case.  This series has been
+through a couple of revisions and appears to be stabilizing.
+<p>
+This new option may solve an immediate problem, but it is one more knob
+added to a complex and interacting pile of them.  It also does not address
+another aspect of the THP problem.  Once upon a time, there was only one
+size of THP: the "PMD size", which is 2MB on many systems.  The advent of
+multi-size THP, which allows many different sizes of huge pages, has
+complicated the situation.  One result of that can be seen by looking in
+the <tt>/sys/kernel/mm/transparent_hugepage</tt> directory, which now
+includes subdirectories for a range of huge-page sizes.
+
+The system administrator can use this large array of knobs to control the
+allocation of specific THP sizes system-wide, but there is currently no way
+to tune the policy with size granularity for a specific process's needs.
+The idea of adding more complexity to the <tt>prctl()</tt> and
+<tt>madvise()</tt> interfaces to provide that flexibility is looking
+increasingly unappetizing.
+<p>
+<h4>Using BPF</h4>
+<p>
+At the conclusion of his changelog, Hildenbrand acknowledges that the new
+<tt>prctl()</tt> option does not solve the whole problem:
+<p>
+<blockquote class="bq">
+	Likely, the future will use bpf or something similar to implement
+	better policies, in particular to also make better decisions about
+	THP sizes to use, but this will certainly take a while as that work
+	just started.
+</blockquote>
+<p>
+The current form of that work can be seen in <a
+href="/ml/all/20250729091807.84310-1-laoar.shao@gmail.com">this patch
+set</a> from Yafang Shao.  It introduces a new <a
+href="https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_STRUCT_OPS/">struct-ops</a>
+hook with this BPF callback:
+<p>
+<pre>
+    int (*get_suggested_order)(struct mm_struct *mm, unsigned long tva_flags,
+                               int order);
+</pre>
+<p>
+If a BPF program is attached to this hook, it will be called from the
+memory-management subsystem when page-allocation decisions are being made.
+The <tt>mm</tt> argument will point to the <a
+href="https://elixir.bootlin.com/linux/v6.16/source/include/linux/mm_types.h#L933"><tt>mm_struct</tt></a>
+structure describing the address space, <tt>tva_flags</tt> describes the
+current context (and, specifically, whether a page fault is being handled),
+and <tt>order</tt> is the largest size that is being considered for this
+allocation.  The function should return an order number indicating the
+largest allocation that should actually be performed; returning zero will
+disable huge pages entirely in this case.
+<p>
+To make this decision, the BPF program will likely want to know a bit about
+the context in which the allocation is being made.  The patch series adds a
+couple of new kfuncs, <tt>bpf_mm_get_mem_cgroup()</tt> and
+<tt>bpf_mm_get_task()</tt>, to give that program access to the relevant
+control-group and task information.  Shao notes in the series that there
+may be a need for other helpers in the future to provide information about
+the memory pressure that the system is currently experiencing.
+<p>
+The patch series, currently in its fourth revision, has not yet reached the
+point where it is ready to go upstream.  One significant change was <a
+href="/ml/all/08D7155B-84F0-4575-B192-96901CFE690A@nvidia.com">requested</a>
+by Zi Yan, who would like to give the callback access to the relevant
+virtual memory area (VMA) as well.  Shao <a
+href="/ml/all/CALOAHbDRBs8bdXB_LJjx-7gALOCLvmMxFD+c7MbHAiQ3htXawA@mail.gmail.com">answered</a>
+that "<q>mm is sufficient for our use cases</q>", but Hildenbrand <a
+href="/ml/all/65e9ee9a-3b64-4efc-ade0-83990de7af91@redhat.com">said</a>
+that an approach based on virtual memory areas would be required.
+<p>
+A separate concern, raised in regard to <a
+href="/ml/all/20250608073516.22415-1-laoar.shao@gmail.com">the previous
+revision</a>, was that any BPF callbacks could quickly find themselves cast
+in stone as part of the kernel's ABI.  That is especially undesirable given
+that the problem of how to best control the use of THP is clearly not fully
+understood at this point.  As Hildenbrand <a
+href="/ml/all/87a54cdb-1e13-4f6f-9603-14fb1210ae8a@redhat.com">put it</a>:
+<p>
+<blockquote class="bq">
+	Every MM person I talked to about this was like "as soon as it's
+	actively used out there (e.g., a distro supports it), there is no
+	way you can easily change these callbacks ever again - it will just
+	silently become stable."
+<p>
+	That is actually the biggest concern from the MM side: being stuck
+	with an interface that was promised to be "unstable" but suddenly
+	it's not-so-unstable anymore, and we have to support something that
+	is very likely to be changed in the future.
+</blockquote>
+<p>
+As a result of these concerns, the current patch set includes warnings that
+the interface could change or even be removed in future kernel versions.  
+That matches the general understanding around BPF programs; they are not
+normally deemed to be a part of the kernel's stable ABI.  That said, if a
+given BPF interface becomes sufficiently deeply integrated into how systems
+are managed, it will become increasingly hard to change or remove.
+Memory-management developers could end up having to support it for years,
+even if it gets in the way of needed changes.
+<p>
+So the addition of BPF control for core memory-management decisions is
+likely to be approached with a great deal of caution, even by developers
+who feel that it is the most logical way to solve the problems around
+control of THP usage.  There will almost certainly be a way to control THP
+allocation with BPF in a future kernel, but that may not happen as quickly
+as some might like.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Huge pages</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Huge pages</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1032199/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1032611"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">eBPF-mm</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2025 16:39 UTC (Tue)
+                               by <b>psomas</b> (subscriber, #48733)
+                              [<a href="/Articles/1032611/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="psomas" />
+                <input type="hidden" name="return" value="/Articles/1032199/#CommAnchor1032611" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nice to see the eBPF slowly making its way into memory management. I think there is another patchset (not sure if it's been merged), that added eBPF hooks for OOM.<br>
+<p>
+Regarding the eBPF allocation order selection,  we explored a similar approach in eBPF-mm [1], with a focus on the mTHP orders supported by the ARMv8-A contig bit feature. <br>
+<p>
+[1] <a href="https://arxiv.org/abs/2409.11220">https://arxiv.org/abs/2409.11220</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1032611/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1032653"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why transparent ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2025 9:22 UTC (Wed)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1032653/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1032199/#CommAnchor1032653" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the process request a complicated policy for transparent huge page allocation, why is the need to use transparent huge page instead of directly requesting huge pages when appropriate ? I'm not at all an expert in this domain, so there is certainly an obvious answer but from my point of view this seems to overly complicates an abstraction to present low level details instead of directly use the lower level.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1032653/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1032658"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why transparent ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2025 10:50 UTC (Wed)
+                               by <b>hnaz</b> (subscriber, #67104)
+                              [<a href="/Articles/1032658/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hnaz" />
+                <input type="hidden" name="return" value="/Articles/1032199/#CommAnchor1032658" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The policy request isn't expected to come from the workload, but rather from whoever launches the workload. Whether enabling THP right now is a good idea depends on whether the installed kernel has the latest THP features and fixes, what else might be running on the host etc. - all of which falls squarely in the domain of the operator/administrator. To the actual workload, which in a datacenter may run on a variety of different hosts, the feature remains, and should remain, very much transparent.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1032658/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1032661"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why transparent ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2025 11:15 UTC (Wed)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1032661/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1032199/#CommAnchor1032661" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks. I was confused with the previous use of prctl/madvise which come from the running process, which implied to me that the decision should come from the process. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1032661/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1033141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why transparent ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2025 23:04 UTC (Sat)
+                               by <b>neggles</b> (subscriber, #153254)
+                              [<a href="/Articles/1033141/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neggles" />
+                <input type="hidden" name="return" value="/Articles/1032199/#CommAnchor1033141" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+They can also come from a service manager, after it forks off a new service process but before execve()-ing into the target binary<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1033141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

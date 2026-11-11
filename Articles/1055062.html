@@ -1,0 +1,2599 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Filesystem medley: EROFS, NTFS, and XFS [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Filesystem medley: EROFS, NTFS, and XFS">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Filesystems seem to be one of those many areas where the problems are well understood, but ther [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1055442/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Filesystem medley: EROFS, NTFS, and XFS</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 23, 2026</br>
+           </div>
+Filesystems seem to be one of those many areas where the problems are well
+understood, but there is always somebody working toward a better solution.
+As a result, filesystem development in the Linux kernel continues at a fast
+pace even after all these years.  In recent news, the EROFS filesystem is
+on the path to gain a useful page-cache-sharing feature, there is a new
+NTFS implementation on the horizon, and XFS may be about to get an
+infrastructure for self healing.
+<p>
+<h4>EROFS page-cache sharing</h4>
+<p>
+The <a href="https://erofs.docs.kernel.org/en/latest/">Enhanced Read-Only
+Filesystem (EROFS)</a> is, as its name would suggest, a filesystem for
+read-only data.  EROFS supports an assortment of advanced filesystem
+features and provides high-performance data compression.  It can be found
+in a number of settings, perhaps most notably on Android devices.  EROFS
+was merged for the 5.4 kernel release in 2019 and has been steadily
+developed since then.
+<p>
+One common use case for EROFS is as a base layer for container images.  As
+such, an EROFS filesystem can often be mounted many times on a given
+machine, and there can be multiple variants of a given filesystem with minor
+differences.  Several images may contain different application mixes, but
+all have the same C library, for example.  While EROFS will deduplicate
+data within a given filesystem at creation time, it cannot do that for
+independently created filesystems.  Duplication of files across filesystems
+can result in multiple open files containing the same data in the system as
+a whole, wasting a lot of memory as that data is placed in the page cache.
+It would be nice to find a way to deduplicate that page-cache data and
+eliminate that memory waste.
+<p>
+In early 2025, Hongzhen Luo posted <a
+href="/ml/all/20250301145002.2420830-1-hongzhen@linux.alibaba.com/">a patch
+series</a> implementing page-cache sharing for EROFS.  Later on, Hongbo Li
+picked up and continued that work; the most recent posting is <a
+href="/ml/all/20260123013132.662393-1-lihongbo22@huawei.com">version&nbsp;18</a>.
+It works by assigning a "fingerprint" to each file within a filesystem at
+creation time; that fingerprint is later used to detect files containing
+the same data.
+<p>
+Specifically, each file within an EROFS filesystem is given an extended
+attribute; the name of that attribute can be set by the creator, but
+<tt>trusted.erofs.fingerprint</tt> appears to be standard usage.  The
+actual contents of the fingerprint are not defined.  A logical value to use
+would be a cryptographic hash of the file's contents but, as Gao Xiang <a
+href="/ml/all/8e30bc4b-c97f-4ab2-a7ce-27f399ae7462@linux.alibaba.com/">said</a>,
+it could simply be an integer value assigned by the image creator.  It should,
+of course, be different for two files if they have different content.
+<p>
+The fingerprint is used if the filesystem is mounted with the
+<tt>inode_share</tt> option.  Another option, <tt>domain_id</tt>, is used
+to separate users; only files mounted within the same domain ID will be
+deduplicated.  In the absence of this restriction, an attacker who is able
+to mount an EROFS filesystem could attach arbitrary fingerprints to files
+with malicious content, possibly causing other users to obtain that content
+rather than the files they were hoping for.
+<p>
+When a fingerprinted file is opened, the EROFS code creates an internal
+inode that references the data within that file.  The file opened by user
+space is redirected (within the kernel) to that deduplication inode, which
+is associated with the fingerprint internally.  Subsequent opens of files
+with the same fingerprint will simply take a reference to the deduplication
+inode, and read operations will be redirected to that inode's backing
+store.  As a result, all of the files will share the same folios in the
+page cache, eliminating the duplicate memory usage.
+<p>
+In the current implementation, at least, use of fingerprints is
+incompatible with direct I/O.
+<p>
+Depending on the workloads running within a system, page-cache sharing can
+reduce memory usage by as much as nearly half in the best cases.  So the
+attractiveness of the idea is not entirely surprising.  The patch series
+has evolved considerably over time and a lot of review concerns have been
+addressed, but some still remain.  Christoph Hellwig, for example, <a
+href="/ml/all/20260119083251.GA5257@lst.de/">is concerned</a> about the
+security implications of this feature, and will likely need some convincing
+before coming around.  So, while 18 revisions is quite a few, there will
+likely be more yet before this feature is merged.
+<p>
+<a name="ntfs"></a>
+<h4>A new NTFS</h4>
+<p>
+<a href="https://en.wikipedia.org/wiki/NTFS">NTFS</a> is the standard
+Windows filesystem format.  One would think that Linux, which has long
+offered interoperability with as many systems as possible, would have a
+good NTFS implementation, but that has never really come to pass.  For
+years, the kernel was limited to read-only support for NTFS.  Linux users
+wanting full access to NTFS filesystems had to make do with <a
+href="https://github.com/tuxera/ntfs-3g/blob/edge/README">ntfs-3g</a>,
+running under FUSE in user space.
+<p>
+That situation appeared to change with <a href="/Articles/866112/#ntfs">the
+arrival of ntfs3</a> in 2021.  This implementation offered full NTFS access
+and appeared to be what the community was waiting for, despite worries
+expressed at the time that the level of support behind this system was less
+than might be desired.  It was merged for the 5.15 release, and the
+read-only NTFS filesystem was <a
+href="https://git.kernel.org/linus/7ffa8f3d3023">removed from the
+kernel</a> for the 6.9 release in 2024.
+<p>
+The worries about the maintenance of ntfs3 have, to an extent, been
+realized since its merging.  The ntfs3 code, having been freshly merged in
+5.15, would normally be expected to see a fair rate of change in subsequent
+releases as bugs are fixed and more features added.  In this case, though,
+there were exactly four ntfs3 patches in 5.16, only one in 5.17, five in
+5.18, and so on.  The pace picked up somewhat around 6.0, but has dropped
+off more recently.  There have been 67 commits to <tt>fs/ntfs3</tt> in the
+last year.  Many of those changes are not by its maintainer (Konstantin
+Komarov), but by other developers fixing up ntfs3 for changes elsewhere in
+the tree.
+<p>
+In October 2025, Namjae Jeon surfaced with <a
+href="/ml/all/20251020020749.5522-1-linkinjeon@kernel.org/">an alternative
+NTFS implementation</a> called "ntfsplus"; the filesystem has since just
+been rebranded "ntfs", matching the old, read-only implementation.  The
+work, Jeon said, was motivated by the fact that "<q>ntfs3 still has many
+problems and is poorly maintained</q>"; ntfs is meant to be a
+better-maintained and more functional NTFS implementation.  The <a
+href="/ml/all/20260111140345.3866-1-linkinjeon@kernel.org">fifth revision
+of this patch set</a> was posted on January&nbsp;11.
+<p>
+The series begins by reverting the removal of the read-only NTFS
+filesystem.  This code, Jeon says, "<q>is much cleaner, with extensive
+comments, offers readability that makes understanding NTFS easier</q>", so
+it makes a better base for ongoing development than the ntfs3 code base.
+From there, the series adds the code needed to turn the filesystem into a
+proper, <span class="nobreak">read/write</span> implementation of NTFS.
+Toward the end, the series removes the compatibility code that ntfs3 uses
+to emulate the old, read-only implementation.
+<p>
+There are, Jeon says, a number of advantages to this version.  It uses the
+<a href="https://docs.kernel.org/filesystems/iomap/">iomap layer</a> to
+interface with the memory-management and block subsystems; ntfs3, instead,
+still uses the older buffer-head interface.  (It should be said that there
+is a patch from Komorov adding iomap support to ntfs3 currently sitting in
+linux-next).  There is an associated project adding a filesystem checker.
+Jeon claims that this filesystem passes many more fstests tests than ntfs3.
+A set of benchmarks shows better performance than ntfs3, as much as 110%
+better for some workloads.
+<p>
+The patch set has evolved quickly over the short time it has existed
+on the lists, and a lot of review comments have been addressed.  The new
+filesystem appears to be mostly feature-complete, with one notable
+exception: it does not yet support journaling.  The ntfs3 implementation is
+able to play back an existing journal (though Jeon says that this feature
+"<q>in our testing did not function correctly</q>").  The next step,
+according to the cover letter, will be full journaling support.
+<p>
+The kernel community is normally unenthusiastic about multiple
+implementations of the same functionality, and would rather see incremental
+improvements than wholesale replacements; that places a sizable obstacle
+in Jeon's path.  Even so, the new code appears to be winning over the
+filesystem developers; there are a lot of review comments, still, but they
+are aimed at improving the code rather than questioning its existence.  To
+replace the NTFS implementation again would be a big step, but it appears
+to not be an inconceivable one.
+<p>
+<a name="xfs"></a>
+<h4>XFS self healing</h4>
+<p>
+The <a href="https://en.wikipedia.org/wiki/XFS">XFS filesystem</a> tends to
+be associated with big systems; it is designed to scale to massive files in
+great number, on systems with a lot of CPUs.  The organizations that run
+this type of system also tend to be concerned about reliability and data
+integrity.  A lot of work has been done on XFS in those areas in recent
+times; one piece of that is the <a
+href="/ml/all/176897694953.202109.15171131238404759078.stgit@frogsfrogsfrogs">XFS
+autonomous self-healing infrastructure</a> from Darrick Wong.
+<p>
+The kernel-based infrastructure will not, on its own, heal a problematic
+filesystem.  It is primarily a reporting mechanism giving a user-space
+daemon the ability to learn about problems; the decision on how to respond
+to any particular problem can then be made in user space.  That daemon
+might respond by killing and restarting a container, initiating some sort
+of scrub operation, or trying to correct an error in some other way.
+Regardless, this is a complex operation with policy decisions that are best
+made outside the kernel.
+<p>
+The series adds a new <tt>ioctl()</tt> operation,
+<tt>XFS_IOC_HEALTH_MONITOR</tt>, which will return a file descriptor to a
+suitably privileged process.  Whenever an event of note takes place, a
+structure will be written to that file descriptor for user space to read
+and react to.  For the curious, <a
+href="/ml/all/176852588604.2137143.13534232614166405704.stgit@frogsfrogsfrogs">this
+patch</a> starts with a justification of the decision to output events as
+binary C structures rather than using some sort of higher-level protocol
+encoding.
+<p>
+There is a wide variety of events that can be reported, starting with an
+"unmount" event; it indicates that the filesystem is no longer mounted, and
+no further events will be produced.  There is a set of events for reporting
+metadata corruption, distinguishing between "sick" metadata (with
+corruption noted at run time) and "corrupt" metadata (detected by the
+filesystem checker).  Other events report media and I/O errors.  The series
+also adds an <tt>ioctl()</tt> operation to check whether a given file
+descriptor refers to a file on the filesystem that is being monitored; it
+can give the user-space daemon confidence that it is, indeed, operating on
+the right filesystem.
+<p>
+On the user-space side, Wong has <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/djwong/xfsprogs-dev.git/log/?h=health-monitoring">a
+repository</a> that includes an <tt>xfs_healer</tt> program designed to use
+the new interface.  For the curious (and troff-capable), there is <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/djwong/xfsprogs-dev.git/tree/man/man8/xfs_healer.8?h=health-monitoring">a
+minimal man page</a> describing this utility; we have created <a
+href="/Articles/1055218/">a rendered version</a> of that page that some may
+find a little easier on the eyes.
+<p>
+The kernel series is in its sixth revision, and it would appear to be
+stabilizing.  It may find its way into the mainline in the near future.  It
+might take a bit longer, though, to develop the user-space code to the
+point that administrators will trust it to operate on a live, production
+filesystem.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/EROFS</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/NTFS</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/XFS</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1055062/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1055721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 17:15 UTC (Fri)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/1055721/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lionel_Debroux" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055721" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On my computer, the very first public release of ntfs-3g ran out of steam for files larger than several hundred MBs, but that was fixed quickly. Since then, which was nearly two decades ago, ntfs-3g has been reliable IME.<br>
+<p>
+Honest questions:<br>
+* for most users, with the ever increasing focus on security, what are the highly compelling reasons to use kernel-mode drivers like ntfs3, or that new version of ntfs, instead of trusty old FUSE ntfs-3g ? Performance, really ?<br>
+* for security-minded users aiming at reducing the attack surface without resorting to building and signing their own kernels, why should their hardened deployments of standard Linux distros not add into some /etc/modprobe.d/* file:<br>
+install ntfs /bin/true<br>
+right next to<br>
+install ksmbd /bin/true<br>
+and a number of similar lines for disabling rarely used filesystems and/or repeat security offenders ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055723"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 17:59 UTC (Fri)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/1055723/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pizza" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055723" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Performance, really ?</span><br>
+<p>
+"Security" is not the focus of most users... as opposed to things like "don't eat my data".. and yes, "performance".<br>
+<p>
+Filesystems are routinely benchmarked on "performance".  But you can't sell "security" the same way.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055723/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 8:08 UTC (Sat)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/1055745/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lionel_Debroux" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055745" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nearly 20 years ago, after the first few releases of ntfs-3g fixed the initial performance issues with large files, ntfs-3g was much faster than HDDs anyway. When dealing with a PCIe Gen5 NVME SSD sporting millions of IOPS and a transfer rate in the GB/s range, there could be a speed and/or CPU consumption difference between a kernel space filesystem and a user space filesystem, right. However, it remains to be seen whether the latter isn't good enough for _most users_ on those metrics.<br>
+<p>
+I guess I'll wait for benchmarks to be posted on e.g. Phoronix.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1056548"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 29, 2026 15:25 UTC (Thu)
+                               by <b>LionsPhil</b> (subscriber, #121073)
+                              [<a href="/Articles/1056548/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LionsPhil" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056548" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think that really applies when it comes to file system implementations. For the vast majority of users you're not presented with a choice; you're going to get whatever your GUI filer autoselects when you click the icon for the drive, or mount autoselects when you just do "mount /dev/sdb1 /tmp/whatever".<br>
+<p>
+Which is putting the decision in the hands of distro, kernel, util-linux, KIO, whatever-GNOME's-is-called, etc. maintainers. I assume that's going to be more influenced by "which one gets me the fewest severe bug reports?"<br>
+<p>
+Add to that that a lot of filesystem performance pressure comes from the server role, but...hopefully the number of people choosing to use NTFS on Linux servers is small. :D As a reverse-engineered-for-interoperability filesystem, this is more the remit of client systems supporting being able to read that Windows-world external drive you plugged in. And, consequently, at *more* risk of vulnerabilities in the filesystem driver.<br>
+<p>
+(I just wish ntfs-3g supported sparse files. NTFS itself does.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056548/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1055722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 18:23 UTC (Fri)
+                               by <b>marcel.oliver</b> (subscriber, #5441)
+                              [<a href="/Articles/1055722/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcel.oliver" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055722" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I experienced a very "interesting" bug that might well give a compelling reason for a more robust NTFS implementation: A graduate student of mine was doing, fairly recently, a parameter study of some numerical modeling problem. He was controlling the actual simulation (some Fortran code) from a Python script that would first generate a working directory with a deep path, each of the many parameters encoding one level of subdirectories with the actual parameter value going into the directory name. He was running all of this on a mildly beefy departmental compute server, dumping the output onto a big USB hard drive which, no surprise, came formatted with NTFS.  For the analysis, he plugged in the hard drive into his laptop and used different Python scripts to read a single data point from each of the simulations for his study.  Both server and laptop had some recent Ubuntu, so presumably used ntfs-3g.<br>
+<p>
+Now it turned out that his graphs had strange outliers.  On closer inspection, the "outliers" were actually at different locations for different runs of the script, while the data on disk was completely unchanged.  Excluding all other rational explanations and given that the nesting of directories was pretty deep and I was not sure that all characters used where actually legal and unambiguous on NTFS, I concluded that this might be a filesystem issue, with the filesystem randomly and quietly mixing up paths.  So I advised to simply reformat the drive in ext4 and recompute everything.  Immediately, the "outliers" were gone.<br>
+<p>
+I still think we were extremely lucky that ntfs-3g's path resolution was wrong in a non-deterministic fashion, otherwise the problem space would have been much larger and we would likely not have suspected the filesystem as the culprit.  But from this experience, I am very reluctant to touch NTFS from Linux in any way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055739"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 20:26 UTC (Fri)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/1055739/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055739" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>I experienced a very "interesting" bug that might well give a compelling reason for a more robust NTFS implementation ... But from this experience, I am very reluctant to touch NTFS from Linux in any way.</blockquote>
+
+<p>I think the second point is the right one.  Having an NTFS driver is cool because it helps with interoperability with Windows systems, but that should be its exclusive use.  If every system that's going to use your disk runs Linux, they should use a Linux-native filesystem.  This isn't intended as a dig against NTFS, just a comment on the degree of testing the different filesystem code is likely to have.  
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055739/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055795"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 18:21 UTC (Sun)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/1055795/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="eru" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055795" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sadly, interoperability with Windows is a common use-case, and it is bidirectional. I like to archive stuff offline on removable USB HD:s, and wish them to be both readable and writable from both Linux and Windows systems. NTFS is really the only option, because Windows has no up-to-date and well-maintained  implementations for any Linux file systems, and FAT just does not cut it any more with today's large files. So all work on better NTFS support in Linux is welcome.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055795/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055802"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 19:12 UTC (Sun)
+                               by <b>jem</b> (subscriber, #24231)
+                              [<a href="/Articles/1055802/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jem" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055802" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ExFAT and UDF are two filesystems that are suitable for removable drives, and can be used to transfer large files between Linux and Windows (and macOS too.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055802/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055809"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 20:10 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1055809/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055809" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+UDF looks nice in but I'm afraid it's poorly maintained - including on Windows!<br>
+<p>
+exFAT is probably a better choice now.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055809/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 2:08 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1055844/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055844" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Jan Kara maintains UDF, and I'm not aware of any outstanding problems or patches that are unduly delayed. Sure, there's not a huge flux of patches, but that's to be expected, I think.<br>
+<p>
+It'd be nice if it were converted to use iomap instead of buffer_heads. If anyone's looking for a filesystem project ...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055857"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 9:10 UTC (Mon)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1055857/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055857" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Jan Kara maintains UDF, and I'm not aware of any outstanding problems or patches that are unduly delayed.</span><br>
+<p>
+The main reason for not using UDF as a data exchange format is not the Linux support in my eyes, but the rather non-optimal support on other platforms. Reading from UDF works on other platforms from my experience, but in the past I've had trouble writing to UDF filesystems on Windows - sometimes it just didn't work, with no apparent reason for the failure.<br>
+<p>
+UDF is nice in theory, but in practice exFAT is probably what's here to stay for simple data exchange.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055857/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1055814"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 20:41 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055814/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055814" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ExFAT is not journaled, making it less suitable for something like an internal HDD/SSD that is used to store data on a dual-boot system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055814/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1059979"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Compelling reasons to switch ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2026 5:29 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1059979/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1059979" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Shouldn't file data sharing be a VFS facility, not something specific to EROFS?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1059979/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1055729"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">xfs_healer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 18:36 UTC (Fri)
+                               by <b>djwong</b> (subscriber, #23506)
+                              [<a href="/Articles/1055729/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="djwong" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055729" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+/me notes that xfs_healer is a daemon that will autostart at mount time (if you have systemd) and fix XFS problems in the background if the filesystem is so configured.<br>
+<p>
+For maximum repair abilities, you need to format the filesystem with reverse mapping and parent pointers enabled.  This is the default in xfsprogs 6.18; for older versions you can pass “-m rmapbt=1 -n parent=1”.  Don't do this if your kernel is older than 6.12; your distributor may not enable online fsck in their kernel configuration.<br>
+<p>
+For self-repair, you also have to enable the xfs_healer_start service (“systemctl enable xfs_healer_start; systemctl start xfs_healer_start”), and set the autofsck property on each filesystem to the value “repair”, either by formatting with “-m autofsck=1” or via “xfs_property &lt;mountpoint or device&gt; set autofsck=repair”.  Note that self-repair is still extremely experimental, so don't do this except on a test filesystem that you created by restoring a backup.<br>
+<p>
+Complaints about xfs_healer should be sent to linux-xfs@vger.kernel.org so everyone can see how things are going.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055729/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055732"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">xfs_healer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 19:27 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1055732/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055732" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; systemctl enable xfs_healer_start; systemctl start xfs_healer_start</span><br>
+<p>
+FYI, `systemctl enable --now xfs_healer_start` combines these.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055732/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055740"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">xfs_healer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 20:16 UTC (Fri)
+                               by <b>djwong</b> (subscriber, #23506)
+                              [<a href="/Articles/1055740/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="djwong" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055740" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's a neat trick that I didn't know about.  Thanks for the info!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055740/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1055780"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">xfs_healer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 11:08 UTC (Sun)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/1055780/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055780" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How do xfs.ko and xfs_healer work together ensuring that they do not write data simultaneously? For example when a user just so happens to call /bin/rm mere nanoseconds after the kernel has detected corruption in the same file. Or when xfs_healer relocates a piece of data, that a concurrent "open(blah, O_CREAT)" do not write to the same empty block.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055780/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055997"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">xfs_healer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 16:47 UTC (Mon)
+                               by <b>zhaan</b> (subscriber, #177139)
+                              [<a href="/Articles/1055997/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zhaan" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055997" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not an expert, but my guess is that the operations would happen sequentially and transactionally.  Corruption would be fixed (at block level), then the /bin/rm would execute assuming there weren't other block corruption fixes queued.  So you would be injecting a /bin/rm into a process queue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055997/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">xfs_healer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 16:57 UTC (Mon)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1055999/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055999" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The actual repair code is in kernel, the userspace code is just a driver - it's not reaching around the kernel code and doing its own thing.<br>
+<p>
+So yes, all the normal filesystem locking applies.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1055730"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 18:52 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1055730/">Link</a>] (14 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055730" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Better NTFS support is great news.  But Microsoft appears to be replacing NTFS with their new filesystem ReFS (Resilient File System), at least for big disks.  It might not be true to call NTFS "the standard Windows filesystem format" any longer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055730/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055744"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2026 22:44 UTC (Fri)
+                               by <b>garyguo</b> (subscriber, #173367)
+                              [<a href="/Articles/1055744/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="garyguo" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055744" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The same can be said in 2016. 10 years later, NTFS is still the default and booting from ReFS is still consider experimental...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055744/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 0:09 UTC (Sat)
+                               by <b>wsy</b> (subscriber, #121706)
+                              [<a href="/Articles/1055748/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wsy" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055748" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The same can be said in 2003 when they announced WinFs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1055750"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 4:05 UTC (Sat)
+                               by <b>djwong</b> (subscriber, #23506)
+                              [<a href="/Articles/1055750/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="djwong" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055750" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Filesystems are hard, XFS is just about finished, and it's been what, 33 years? 😜<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055750/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055755"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 14:30 UTC (Sat)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1055755/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055755" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Filesystems are hard, XFS is just about finished, and it's been what, 33 years? 😜</span><br>
+<p>
+Has it become better with small files ? I was using it a lot in the past, but I had to abandon it on my laptop for ext4 15 years ago when every git operation on my linux directory would make my disk seek for 30 seconds before completing the operation. However for large files, streaming writes etc it was awesome. I initially started to use it on network probes running tcpdump that would continuously capture traffic on multiple interfaces and store it to disk. Writing and rotating 10GB files was as instant as doing it on a readme with XFS, and I'm speaking about pentium4 with sata1 disks. Also it never failed even once on me, despite not having invoked "halt" nor "shutdown" on a linux machine for the last 20 years, since boot-time journal replay is always faster than a "clean" system shutdown.<br>
+<p>
+On the other hand, ext4 is also good for my use cases nowadays, I'm just not sure if XFS would bring me anything more, or could still annoy me on numerous small files like a kernel source tree.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055755/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055765"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 21:28 UTC (Sat)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/1055765/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dgc" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055765" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Has it become better with small files ? I was using it a lot in the past,</span><br>
+<span class="QuotedText">&gt; but I had to abandon it on my laptop for ext4 15 years ago when every</span><br>
+<span class="QuotedText">&gt; git operation on my linux directory would make my disk seek for 30</span><br>
+<span class="QuotedText">&gt; seconds before completing the operation.</span><br>
+<p>
+Yes, most of major small file/metadata performance issues (in comparison to ext4) were fixed with the introduction of delayed logging in 2.6.36 (i.e. about 15 years ago). That improved transaction rates from being disk bound at a few hundred a second to being CPU bound at tens of thousands of transactions/second.<br>
+<p>
+These days XFS can run a couple of million asynchronous transactions per second through the journal, so highly concurrent workloads are able to scan, create, rename, unlink, etc at rates of over half a million files/second, even on a typical cheap consumer SSDs.... <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055765/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055848"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 5:19 UTC (Mon)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1055848/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055848" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Good to know, thank you! I'll have to try it again then!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055848/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1055752"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 13:21 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1055752/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055752" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It looks like Microsoft changed their mind on that in 2017. Support for creating new ReFS volumes was removed from Windows 10, except for Server and Enterprise editions. While all versions of Windows 10/11 can read-write ReFS volumes, it seems that ReFS is not currently slated to replace NTFS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055752/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055758"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 17:00 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1055758/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="khim" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055758" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>It already change it back and Windows 11 can create it and even boot from it.</p>
+
+<p>But after two flip-flops we don't know where would it go next…</p>
+
+<p>It's not like Apple who just said “we are going APFS” and just did that. Granted, HFS+ was a crazy unstable pile of hacks on top of hacks, at this point, thus abandoned it was much easier that for Microsoft to abandon NTFS which is simply bad, not awful.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055758/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055815"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 20:52 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1055815/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055815" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So with ReFS, maybe Windows will be able to delete or even just rename a file in use in 10-20 years time? Who knows, software updates might not take 30 minutes anymore.<br>
+<p>
+Unless Windows first becomes what "DOS" or COBOL is today. Even _gaming_ is under serious threat now, who would have thought?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055815/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 22:55 UTC (Sun)
+                               by <b>garyguo</b> (subscriber, #173367)
+                              [<a href="/Articles/1055835/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="garyguo" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055835" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That was possible for a while now in Windows, when `FILE_DISPOSITION_POSIX_SEMANTICS` is specified to delete a file. I think it is even the default in newer version of Windows.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 5:10 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1055846/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055846" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed, it looks like this was changed with very little fanfare:<br>
+<a href="https://stackoverflow.com/questions/60424732/did-the-behaviour-of-deleted-files-open-with-fileshare-delete-change-on-windows">https://stackoverflow.com/questions/60424732/did-the-beha...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1055837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 23:16 UTC (Sun)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1055837/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="khim" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055837" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; Who knows, software updates might not take 30 minutes anymore.</font>
+
+<p>How is that even related? Android and macOS do that, too — and they are not using NTFS.</p>
+
+<p>They all are just using process that is less error-prone (and is actually even recommended by many Linux distributions, just not enforced) instead of giving the user rope and hoping that s/he not hung himself or herself.</p>
+
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055847"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 5:15 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1055847/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055847" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's related because when you cannot delete files in use then you need to stop, delete and restart processes using the files. And when you are not 100% sure, then you need to restart pretty much everything.<br>
+<p>
+It may not be the only upgrade limitation but it's an important one.<br>
+<p>
+<span class="QuotedText">&gt; Android and macOS do that, too</span><br>
+<p>
+"How is that even related?"<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055847/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056010"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is NTFS on the way out?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 18:11 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1056010/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056010" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It's related because when you cannot delete files in use then you need to stop, </span><br>
+<p>
+Or you nick an idea or two from the 80s ... and rename the old file in place so you can replace it.<br>
+<p>
+You still need to reboot to ensure everything is running the upgrade, and then clean up all the old files, but that's not too hard ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056010/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1055791"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ZFS status</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 17:03 UTC (Sun)
+                               by <b>cyperpunks</b> (subscriber, #39406)
+                              [<a href="/Articles/1055791/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyperpunks" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055791" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Talking about file systems: what is status of ZFS (on Linux) there days? <br>
+ <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055791/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055842"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ZFS status</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 23:30 UTC (Sun)
+                               by <b>mbunkus</b> (subscriber, #87248)
+                              [<a href="/Articles/1055842/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mbunkus" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055842" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A lot of folks use it commercially with huge success. For example, TrueNAS-the-company makes TrueNAS Scale, their current OS, and it's all based on Linux + ZFS. They also sell hardware with pre-installed TrueNAS (Dell machines if I'm not mistaken). Those NAS devices are quite popular and rock solid. The Linux+ZFS solution is so stable that they decided to sunset their earlier product, TrueNAS Core, which was based on FreeBSD+ZFS in favor of doing the multi-year process of switching the whole thing to Linux+ZFS.<br>
+<p>
+Another example is Proxmox Virtualization Environment, which emerged as the primary winner in VMware's (Broadcom's) ongoing slide to irrelevancy in small &amp; medium deployment sizes. It's Debian + custom Open Source software, and while they support a plethora of file systems the one they support the best &amp; recommend the most for single-server deployments is ZFS.<br>
+<p>
+Neither of those are marked as experimental features, and in the case of TrueNAS it's the raison d'être of the whole company nowadays.<br>
+<p>
+My personal experience with both products and ZFS outside of those as well mrirors what you read elsewhere, too: it works great, has amazing features, and well worth a look for any kind of storage environment.<br>
+<p>
+It's here to stay.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055842/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1057607"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ZFS status</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2026 17:17 UTC (Sat)
+                               by <b>zwol</b> (guest, #126152)
+                              [<a href="/Articles/1057607/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zwol" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1057607" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ZFS doesn't have a fsck.  (Its "scrub" operation only validates the block checksums, not the consistency of the on-disk data structure.)  In this cranky old sysadmin's opinion, that indicates an unacceptable level of hubris among the ZFS developers, and renders the filesystem unfit for production use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057607/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1055810"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2026 20:45 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1055810/">Link</a>] (29 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055810" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; As a result, filesystem development in the Linux kernel continues at a fast pace even after all these years.</span><br>
+<p>
+Except... for "modern" COW filesystems with snapshots and volume management built-in?<br>
+<p>
+Like this one: <a href="https://illumos.org/books/zfs-admin/gbcik.html">https://illumos.org/books/zfs-admin/gbcik.html</a><br>
+Or this one: <a href="https://en.wikipedia.org/wiki/Apple_File_System">https://en.wikipedia.org/wiki/Apple_File_System</a><br>
+<p>
+Is btrfs progressing and its advanced features getting better reliability and reputation? Genuine question.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055810/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 8:50 UTC (Mon)
+                               by <b>jmalcolm</b> (subscriber, #8876)
+                              [<a href="/Articles/1055856/">Link</a>] (28 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jmalcolm" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055856" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Btrfs is getting better but not everybody trusts it yet.<br>
+<p>
+A file system which is already excellent but massively controversial for non-technical reasons is bcachefs.<br>
+<p>
+It is great but the dev got it kicked out of the kernel. So you have to build it in yourself or using DKMS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055861"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2026 11:22 UTC (Mon)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1055861/">Link</a>] (19 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1055861" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The split with the kernel needed to happen, unfortunately. Since then things have been massively smoother and my life has been much less stressful. Project's been growing, people are migrating and the focus is back on the technical.<br>
+<p>
+The reasons for that split being a topic for another conversation, because I'm just drinking my coffee and enjoying a nice drama free day, and hoping to keep it that way, thank you very much :)<br>
+<p>
+I should have erasure coding ready for testers inside of a week, I deferred the announcement lifting the experimental label to get that done due to popular demand (and post reconcile, there really wasn't much left). Gonna have some very cool stuff coming out this year - our ability to manage large numbers of drives is turning into something next level.<br>
+<p>
+And we've got all the self healing stuff, complete and thorough fsck - and image creation tools that produce images on par with what EROFS can do.<br>
+<p>
+But the thing that excites me the most is how debuggable the system is.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055861/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056051"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 8:15 UTC (Tue)
+                               by <b>drago01</b> (subscriber, #50715)
+                              [<a href="/Articles/1056051/">Link</a>] (18 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="drago01" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056051" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Being out of tree means it has to compete with ZFS. If someone goes through that pain, why not just use ZFS? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056051/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 9:00 UTC (Tue)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1056059/">Link</a>] (15 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056059" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can't speak for others but ZFS very much feels like a project that has peaked and has wasted a lot of its potential on that whole licensing fight. Any desire to even try it has been gone for many years at this point and the ZFS hype was another very off-putting thing about it.<br>
+<p>
+Plus, on a purely technical level, I am sure ZFS, being the first of this type of file system has many design flaws that could be improved starting from scratch a generation later, much like any technology that tries something new and then gets stuck supporting existing behavior and design decisions as it gains users. Filesystems are probably affected by that more than most given that they deal with data at rest and not just some ephemeral data like e.g. network protocols.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056071"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 9:55 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1056071/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056071" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I tried it only briefly but the concepts and user interface looked better than everything else I knew at the time. Very impressive.<br>
+<p>
+It has real, "big iron" users too and they seem generally pretty happy too.<br>
+<p>
+I have not researched it extensively but I don't remember hearing about any serious issue with it. <br>
+<p>
+<span class="QuotedText">&gt; and the ZFS hype was another very off-putting thing about it.</span><br>
+<p>
+How do you know it was hype? I don't think any company tried to promote it, or at least not recently...<br>
+<p>
+<span class="QuotedText">&gt;  I am sure ZFS, ...</span><br>
+<p>
+"sure" without ever trying it? What is this based on?<br>
+<p>
+<span class="QuotedText">&gt; ... being the first of this type of file system has many design flaws</span><br>
+<p>
+Maybe you could find and list at least one flaw?<br>
+<p>
+<span class="QuotedText">&gt; ... that could be improved starting from scratch a generation later, much like any technology that tries something new and then gets stuck supporting existing behavior and design decisions as it gains users. </span><br>
+<p>
+Again, not an expert but I try to stay informed and so far it seems like other filesystems are still playing catch up...<br>
+<p>
+<span class="QuotedText">&gt; wasted a lot of its potential on that whole licensing fight. </span><br>
+<p>
+Agreed, a real pity.  That could almost make you wish it's also bad technically  :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056071/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056261"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 28, 2026 8:33 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1056261/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056261" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I did actually try it once for a little while in the early days when the hype was at its peak. From what i remember the ZFS design had some issues around requiring huge amounts of kernel memory which presented a big problem for alternate implementations even on license compatible systems like the BSDs and it quickly ran out of memory on systems with the 2GB of RAM that were still common at the time. Overall I was not very impressed, especially since 90% of its supposed advantages are meaningless on the small scale of just 2-4 disks or so that you might have in a typical home system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056261/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057421"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2026 17:27 UTC (Thu)
+                               by <b>georgh-cat</b> (guest, #158897)
+                              [<a href="/Articles/1057421/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="georgh-cat" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1057421" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is that memory issue something you experimented yourself? <br>
+<p>
+I had a 750GB mirror running on OpenSolaris at home on 2008 (still using ZFS today and that pool was migrated once to 4TB disks), and I was afraid of the memory thing. <br>
+<p>
+It was never an issue. Even when approaching full disk capacity, never had the memory usage be anywhere near high or even a potential problem. Then had the same server migrated to FreeBSD (OpenSolaris not being maintained anymore) and same experience.<br>
+<p>
+If there ever were memory issues, I was somehow not affected or it was a myth or misunderstanding of how it worked.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057421/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1057311"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2026 12:38 UTC (Thu)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1057311/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1057311" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+How do you know it was hype?
+</blockquote>
+
+The kind of fearmongering used for selling ZFS was really off-putting.  One supposedly-relevant scenario that ZFS defends against is when a HDD writes a block to the wrong disk sectors.  This scenario has never happened in my experience, and the way HDDs work, it cannot happen in the way that the scenario suggests (by the read-write-head arm moving to the wrong track without any additional hardware failure).
+
+<p>That being said, we have used ZFS on many machines since about 2019 (mainly because it was not clear at the time whether RAID1 works well on btrfs), it works nicely.  The only downside I see in it is that it is its own universe that ignores things like /etc/fstab and you need to learn the ZFS terminology even for terms that have a correspondence outside the ZFS universe.  Another downside I read about is that ZFS supposedly does not utilize RAM as well as native Linux file systems which make better use of the buffer cache or somesuch.  We certainly see little free RAM on our machines with ZFS.  That's why I have decided to go for btrfs again for one machine recently.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057311/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1057579"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2026 7:53 UTC (Sat)
+                               by <b>cypherpunks2</b> (guest, #152408)
+                              [<a href="/Articles/1057579/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cypherpunks2" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1057579" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Maybe you could find and list at least one flaw?</span><br>
+<p>
+ARC is not well-integrated with the rest of the memory management system, so the system can OOM before ARC detects memory pressure and shrinks itself (so it's more than just an "ARC presents itself as used memory which confuses people" UI issue).<br>
+<p>
+The cache for mapped files is unnecessarily duplicated in both ARC and the page cache.<br>
+<p>
+There's still no support for defragmentation, which is an issue on high-speed IOPS-limited NVMe drives as CoW filesystems tend to experience heavy fragmentation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057579/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1067498"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2026 22:47 UTC (Mon)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1067498/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1067498" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Maybe you could find and list at least one flaw?</span><br>
+<p>
+i've used ZoL on several machines for over a decade now. i've also written a large disk-management tool that has had to support all variety of filesystems. i've encountered zero problems with it from a user, despite generally running tip-of-git checkouts with most features enabled. can't say enough good about it from that perspective.<br>
+<p>
+as an app writer and administrator, it has some annoying issues. it lives outside the standard filesystem management (fstab / systemd mount objects) with its own systemd services. i'm still unsure what exactly zed does, or what a ZEDLET is, or why it's written ZEDLET. you won't find the zpools in /sys/block, nor in /proc/diskstats, meaning you won't find them in say iostat, nor in blkid. compiling against libzfs is a shifting and rewardless PITA due to libspl clashing with all manner of userspace entities (random.h last i checked), and the OpenZFS developers have explicitly declared that one ought not compile against libzfs, essentially limiting sane userspace to the OpenZFS toolset.<br>
+<p>
+whether or not one's bootup toolchain supports zfs this week is another question, one which i sidestep by never having zfs in my boot chain. as a result, i have an annoying mix of mdadm and zfs on these machines.<br>
+<p>
+so it's great tech, but it's not without its annoyances. these annoyances seem furthermore not to be issues of bugs nor design flaws, but operational and philosophical decisions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1067498/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1056082"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 11:12 UTC (Tue)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056082/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056082" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Plus, on a purely technical level, I am sure ZFS, being the first of this type of file system has many design flaws that could be improved starting from scratch a generation later, much like any technology that tries something new and then gets stuck supporting existing behavior and design decisions as it gains users. Filesystems are probably affected by that more than most given that they deal with data at rest and not just some ephemeral data like e.g. network protocols.</span><br>
+<p>
+"Flaws" isn't a fair characterization; the approach the ZFS devs took was a pragmatic one, and the only one that had any chance of success given the scope of what they were trying to do.<br>
+<p>
+When you're trying to do something ambitious, you don't shoot for the moon - you can't reimagine everything at once, you can't take on too many big risks, that's how you get stuck in second system syndrome; you'll never complete your task. You have to work incrementally, and pick and choose what you're going to reimagine and what risks you're going to take.<br>
+<p>
+But - that does mean that ZFS is essentially the original Unix filesystem underneath. Blocks, not extents, and data structures that are clearly in that lineage.<br>
+<p>
+bcachefs is that "shoot for the moon and reimagine everything" project. It only happened because I got profoundly lucky with some of the original key design decisions (the b-tree implementation in particular), and for the first five years I wasn't attempting a full filesystem - I had much smaller targets (a block cache, and then something more intermediate) where I was able to successfully complete and ship building blocks for the full filesystem; it wasn't until those were successful that I realized attempting a filesystem was even possible.<br>
+<p>
+So in a way you're right, but don't sell the ZFS folks short - they deserve massive amounts of credit and respect for showing everyone what a modern filesystem should be capable of.<br>
+<p>
+And there's a whole list of things that took years to crack before I had something better:<br>
+<p>
+- Snapshots: snapshots + extents are a difficult combination, Dave Chinner and others were poking me about this for years before I had a working design (I've got notebooks filled with scribbles of different ways of solving the "extents can overlap in arbitrary ways" problem).<br>
+<p>
+- fsck/self healing: bcachefs benefited massively from the hindsight of seeing what other filesystems were doing, and just having a lot more time to get it done. Going straight for full self healing and skipping a conventional fsck does not get you what you want, nor does just starting with a conventional offline fsck. I had experience with proto-runtime-fsck from the early days immediately after bcache, and time to explore a lot of different options; bcachefs takes a mixed approach that's turned out to be very comprehensive, but that took a lot of time to get right.<br>
+<p>
+- The erasure coding design is entirely original; it delivers much better performance than RAIDZ but had many difficult problems to solve over years of development (it all looks simple in hindsight, but it wasn't simple to figure out when it hadn't been done before!).<br>
+<p>
+- The whole "filesystem that really is a database underneath" approach has always been the dream - having that makes my life so much easier now. (Was working on the last bits of hooking up erasure coding to reconcile last night for automatic resilvering when a drive goes away, when I realized the on disk data structures were wrong; when using the reconcile_*_phys btrees for doing pending work in on-disk LBA order on rotating disks, we can't mix that in with the pending work for user data extents; we need to repair stripes first; _then_ user data extents to get anything that wasn't erasure coded, or we'll do a ton of unnecessary work; oh damn, that was a whole 10 lines of code to fix). But no existing b-tree implementation was remotely fast enough, even today - that was the big one that I cracked 15 years ago, with design decisions that look prescient in hindsight, and then benchmarking bcache on early Google SSDs when we realized "oh damn, binary search is actually really slow" and pulling math out of the ether to do magic with eytzinger search trees...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056082/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056102"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 12:45 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1056102/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056102" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; - The whole "filesystem that really is a database underneath" approach has always been the dream - having that makes my life so much easier now.</span><br>
+<p>
+Wowser! And that's moving into the mainstream now? Again, massive kudos to you if you've managed to pull it off, but that's been around for ages.<br>
+<p>
+I hesitate to say it was true of Pick - it was sort of - but that was more "the storage system is permanent virtual memory". The AS400 had a database as a filesystem, no? And there were loads of rumours that NTFS was originally going to be a derivative of the Pick database - that was back in the days of NT3.1 whenever that was.<br>
+<p>
+"If I can see so far, it's because I'm standing on the shoulders of giants" - but you're a giant yourself for pulling it off!<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056102/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 13:15 UTC (Tue)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056107/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056107" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yup.<br>
+<p>
+We're not using it to do anything particularly novel yet, just doing normal filesystem stuff but done better and more cleanly, so far. And it's still not quite as general as I want; the main remaining limitation is that keys are fixed size at 160 bits (64 bit inum, 64 bit offset, 32 bit snapshot); key types really need to be per-btree definable, bpos has been increasingly overloaded in different places and it's annoying. <br>
+<p>
+It's also definitely nowhere near SQL, where you define tables and indexes and do joins; it's more of a NoSQL database. But it's got a solid transaction model, locking model (with a full cycle detector, as real databases do), triggers, nice iterators, lots of support for extending the database schema - it's generally quite pleasant to work with.<br>
+<p>
+The challenge with making this stuff mainstream has been performance. Historically, Unix filesystems were completely unlike databases because they needed to be simple and fast - inodes as flat arrays on disk, blocks indexed by radix trees hanging off the inodes. Lots of simple specialized data structures. <br>
+<p>
+Bu conventional filesystems have started to look more and more like databases over the years as they've gotten more complex. Extents mean radix trees don't work anymore, you need btrees, journaling means you need a transaction model, and every additional feature filesystems want to do pushes you more in the direction of "I really just want a real general purpose database for this stuff".<br>
+<p>
+The game changer was when, in the early days of bcache, we pushed the performance of the "btree with big log structured nodes" design to the point where it could support a filesystem with no per-inode sharding - that was when I knew bcachefs was possible.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 13:45 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1056112/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056112" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; We're not using it to do anything particularly novel yet, just doing normal filesystem stuff but done better and more cleanly, so far. And it's still not quite as general as I want; the main remaining limitation is that keys are fixed size at 160 bits (64 bit inum, 64 bit offset, 32 bit snapshot); key types really need to be per-btree definable, bpos has been increasingly overloaded in different places and it's annoying.</span><br>
+<p>
+<span class="QuotedText">&gt; It's also definitely nowhere near SQL, where you define tables and indexes and do joins; it's more of a NoSQL database. But it's got a solid transaction model, locking model (with a full cycle detector, as real databases do), triggers, nice iterators, lots of support for extending the database schema - it's generally quite pleasant to work with.</span><br>
+<p>
+Don't confuse SQL and Relational, they're two completely separate things in a marriage :-)<br>
+<p>
+And you say "NoSQL" - do you mean No SQL, or Not Only SQL? :-) (I'm sure you don't mean the database actually called "NoSQL" :-)<br>
+<p>
+But it might be worth taking a look at Pick's Not Only SQL model. I don't understand what you're going about key types and btree especially, but Pick is hash-based not btree based. Investigate Linear/Dynamic hashing. That swaps btree's "all accesses take the same time" for hashing's "most accesses are extremely fast" and the linear/dynamic algorithm makes resizing order 1, not order N. I've been thinking about making ScarletDMEs hash buckets into btrees so in the worst case access degrades to btrees ?order root N? rather than a naive hash's order N. (And speeds up splitting an overflowed bucket, too.)<br>
+<p>
+But if you're looking at "the file system is a database", don't restrict yourself to SQL/Relational. Just because it's taken the universities by storm so that nobody knows anything else, doesn't mean it's the best, or even has any ideas worth nicking :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 15:07 UTC (Tue)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056165/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056165" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SQL may not be the prettiest language, and the relational model may not be what you want in every context - it's too abstracted when you really need to optimize for performance - but there's a reason it's taught, it's a good model, and it's something every programmer should probably know.<br>
+<p>
+Hash tables are no-go in on disk data structures, they destroy locality and you can't do range lookups. Extents require range lookups, along with a lot of other things filesystems need to do, and we very frequently need to do efficient scans - btrees are much better suited to that.<br>
+<p>
+Locality is a prime consideration when designing on disk data structures, and frequently you'll be doing short linear scans - linear searches are not slow as long as you keep them short.<br>
+<p>
+E.g., the way bcachefs does full writeable snapshots, with versioning (so snapshots are at key granularity, not btree node granularity like btrfs) uses the low bits of the key as the snapshot ID - so a lookup finds either a key in the current snapshot, or an ancestor snapshot - that requires range lookups. But then for writeable snapshots, the snapshot ID is not a linear history, it's a tree; so we also have to skip over keys in unrelated branches of the snapshots tree. This search will be short for a variety of reasons (the main one being that creates always get a new inode number that won't be shared by any other snapshots), so snapshot lookups are fast; you can't do these kinds of tricks with hash tables.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 21:02 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1056235/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056235" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; SQL may not be the prettiest language, and the relational model may not be what you want in every context - it's too abstracted when you really need to optimize for performance - but there's a reason it's taught, it's a good model, and it's something every programmer should probably know.</span><br>
+<p>
+The relational *model* is great, yes. The engineering is flawed by design :-(<br>
+<p>
+Pick allows you to stick a 4NF view directly into the database as a table row ... that's why an optimiser is a waste of time ... (now that most RDBMSs have arrays and structures, they've finally caught up, 40 years late, but SQL can't query them cleanly)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1056116"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 13:59 UTC (Tue)
+                               by <b>malmedal</b> (subscriber, #56172)
+                              [<a href="/Articles/1056116/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="malmedal" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056116" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; But - that does mean that ZFS is essentially the original Unix filesystem underneath.  </span><br>
+<p>
+what? ZFS is a log-structured filesystem, like e.g. Sprite LFS and NetApp WAFL. Very different tradition from the old modify-in-place unix filesystem.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056116/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057314"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2026 13:26 UTC (Thu)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1057314/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1057314" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; what? ZFS is a log-structured filesystem, like e.g. Sprite LFS and NetApp WAFL.</span><br>
+<p>
+It's not a log-structured filesystem, it is a write-anywhere-*ish* (but not really) kind of filesystem with a log (journal) hanging off its side for performance.<br>
+<p>
+Very different things.<br>
+<p>
+The core concept underpinning DMU is still just a (potentially recursive) map of blocks. That is the "original Unix filesystem". It's just ext2 with (admittedly, a lot of) extra steps.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057314/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2026 16:05 UTC (Thu)
+                               by <b>malmedal</b> (subscriber, #56172)
+                              [<a href="/Articles/1057414/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="malmedal" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1057414" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  it is a write-anywhere-*ish* (but not really)  </span><br>
+<p>
+ish? Fully I believe. The only exception to write anywhere I am aware of is the uberblock.  IIRC you basically have two logs, one for the uberblock only and one for everything else. <br>
+<p>
+I believe NetApp does the same thing, the root inode, just like ZFS's uberblock, is constrained to a few known locations to avoid having to read every byte on every disk on a cold start.<br>
+<p>
+<span class="QuotedText">&gt; (but not really) kind of filesystem with a log (journal) hanging off its side for performance. </span><br>
+<p>
+No, both metadata and data are always written to a new location when updated. There is no update in place neither in ZFS nor in NetApp WAFL. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1056083"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 10:46 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1056083/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056083" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+bcachefs doesn't have the licensing issue and, if and when it's mature and trusted, it'll (hopefully) be a no-brainer to have it merged back in to upstream.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056083/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2026 12:12 UTC (Tue)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056095/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056095" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, it won't be a no brainer - <br>
+<p>
+I've always believed in "just write the best code you can - the rest will sort itself out later". Not being upstream hasn't hurt the project at all - on the contrary, if anything adoption has accelerated over the past six months. We're no longer tied to a project with engineering practices that haven't changed much over the past 20 years, and right now I'm wondering how the kernel is going to manage the Rust transition over the next 10-20 years.<br>
+<p>
+At some point, the broader engineering community is going to realize that all the code we depend on - essentially, all of it - is going to have to be rewritten in Rust. The level of complexity we can manage in C has been hitting limits; we cannot keep doing the same old forever. Systems engineering is going to get so much easier if we can manage the Rust transition, and there are so many techniques in debugability, introspection, static analysis and formal verification that that opens up. There is a mountain of work that needs to happen to get there - but it needs to happen, or we'll be stuck with a mountain of legacy code in a language new people aren't learning with the people that actually understand it dying off.<br>
+<p>
+To understand how this impacts myself personally and the bcachefs project: my rule of thumb is that when a bug in upstream, non-bcachefs kernel code comes across my desk (and they do), it's going to take at least 10 times as long to debug as any bcachefs bug. And I'm going to be stuck with it personally; there are people who have been tearing through the bcachefs code and can debug anything (literally; I'm half-following the IRC channel right now) and will tell me exactly what's broken and what needs to be fixed - and I'd be more than comfortable just giving commit access to the repo but they seem to like using me as the coding bot - but when it's an mm-involved bug or anything else I'll hear back a week later - "uhh, maybe you better take this one on".<br>
+<p>
+There's ways to write complex code and make it testable and debugable, but it has to be an object of serious study, you have to prioritize it. Fortunately, Rust is going to make this a hell of a lot easier, with things like the Display trait, and a type system that's comprehensive enough that you don't have to stare at code for a couple hours in order to safely change one little thing - but "how to write complex systems that we can maintain and debug in the wild" is something that needs more thought and study in the kernel community.<br>
+<p>
+So I'll be taking a wait-and-see approach. I have seen some positive developments over the past six months - people who weren't finally seem to be talking somewhat more seriously about automated testing, and that's been a huge gap that was really painful for bcachefs (my test dashboard would blow up every rc1 rebase with bugs in other subsystems, and I can't do work or merge code without good test data, so all work would stop - often for weeks - while dealing with that). But I think things have a ways to go before I could seriously consider it - and that's if they even wanted bcachefs in the kernel, and I think everyone knows the rough outline of that part of the story :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1056275"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 28, 2026 10:40 UTC (Wed)
+                               by <b>Lennie</b> (subscriber, #49641)
+                              [<a href="/Articles/1056275/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lennie" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056275" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Btrfs is getting better but not everybody trusts it yet."<br>
+<p>
+Every time I test it, it fails, when I report it on the mailinglist I got no response, I stopped testing it a few years ago.<br>
+<p>
+My test was:<br>
+<p>
+create a VM with 2 disks, set up RAID1 for meta and data, etc.<br>
+<p>
+Scrub and sync them, shutdown the VM, remove disk one and start it again, it usually runs.<br>
+<p>
+Shutdown the VM, connect second disk again.<br>
+<p>
+Start VM and scrub and sync to make sure they are the same again.<br>
+<p>
+Shutdown VM, remove first disk and start VM<br>
+<p>
+Failed. The first time I do this it might work and it would fail on the second time I did the whole cycle again.<br>
+<p>
+A scrub/sync should make sure all the data is on the second disk, why does it fail such a simple test ?<br>
+<p>
+Or is this now fixed ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056275/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056279"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 28, 2026 11:17 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056279/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056279" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You might give bcachefs a try. And if you do run into issues, there's a lot of activity on the IRC channel, and we really try to stay on top of bugs and make sure things are working for people.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056279/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056281"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 28, 2026 12:57 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056281/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056281" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also, I should say a bit about methodology when there's issues, for new people jumping into bcachefs.<br>
+<p>
+The expectation isn't that things will be 100% perfect; it's a &gt; 100k loc codebase. You do want your filesystem to be as close to perfect as humanly possible - but developing perfect code in isolation and then releasing it to the world, that isn't possible at the scale we're talking about. There will always be issues, people will always be trying out new and unexpected things, even when it's 100% stable for the situations it was originally developed. We're always pushing boundaries and trying new things, especially as the userbase ramps up.<br>
+<p>
+It's much more important to me that code be debugable than that it be perfect; when something breaks, error messages should be clear enough that even end users can get a decent idea of what went wrong, and the introspection and other debugging facilities need to be complete, thorough and easy to use so that mere mortals can debug in the field.<br>
+<p>
+That's how we make this sustainable, when there aren't enough developers to go around, and that's how we share the load and build up the community and make complex systems understandable and usable.<br>
+<p>
+And we've got a solid community of people who are knowledgable about the system and interested in making sure it works for people - so if you run into issues, you should be able to get answers, especially if you're willing to pay that forward and help the next person out.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056281/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 28, 2026 23:31 UTC (Wed)
+                               by <b>neggles</b> (subscriber, #153254)
+                              [<a href="/Articles/1056410/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neggles" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056410" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's really nice to see you sticking to saying positive things about bcachefs, rather than being negative about other filesystems; seems like you're much happier these days :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 29, 2026 1:20 UTC (Thu)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056414/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056414" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Engineering isn't a "good vibes only" club. We have to be able to talk about and understand past mistakes if we want to improve and do better, and sometimes the "what not to do" are really important lessons.<br>
+<p>
+So I can and do talk about that stuff when it's relevant, and no doubt will again.<br>
+<p>
+If you want to avoid the tensions and the drama, the way for that to happen is for everyone to be taking responsibility for their work and responding to the challenges that are arising, because we all depend on each other.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056561"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 29, 2026 15:30 UTC (Thu)
+                               by <b>neggles</b> (subscriber, #153254)
+                              [<a href="/Articles/1056561/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neggles" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056561" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I completely agree; maybe I should've said "being unnecessarily negative", my bad.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056561/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056595"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 29, 2026 16:08 UTC (Thu)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1056595/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1056595" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That can be hard one to categorize :) Some people may think everything is fine, and maybe they're right, maybe they're not - and it may not be clear until it's too late.<br>
+<p>
+But I do not think you can look at the kernel community's track record on filesystems and call it a smashing success. There are lessons I think the community has yet to learn. When you see me talking harshly about those things, it's not because I'm trying to be negative or tear the place down - but sometimes people do need tough love.<br>
+<p>
+That thing that makes me happy is just when I see that people are learning, or at least willing to learn. All problems are solvable - in engineering, and programming especially - as long as we're facing up to them.<br>
+<p>
+But yeah, I am happier since the split, and watching the bcachefs community grow and turn into something really special has been a big part of that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056595/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1057313"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW and volume management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2026 12:55 UTC (Thu)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1057313/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1055062/#CommAnchor1057313" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I have done <a href="http://www.complang.tuwien.ac.at/anton/btrfs-raid1.html">a similar test</a> around 2018, and what we tried, worked (although recovery after a drive failure requires (required?) extra effort).  We have been using btrfs in RAID1 configuration since then without problems.  I had been using btrfs earlier (starting around 2013 or so) on laptops without RAID1 without problems.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057313/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

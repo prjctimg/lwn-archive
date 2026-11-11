@@ -1,0 +1,905 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Filesystem support  for block sizes larger than the page size [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Filesystem support  for block sizes larger than the page size">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The maximum filesystem block size that the kernel can support has always been limited by the ho [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1011012/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Filesystem support  for block sizes larger than the page size</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="GAByline">
+           <p>February 20, 2025</p>
+           <p>This article was contributed by Pankaj Raghav</p>
+           </div>
+<p>
+The maximum filesystem block size that the kernel can support has always
+been limited by the host page size for Linux, even if the filesystems could
+handle larger block sizes. The <a href="/ml/all/20240822135018.1931258-1-kernel@pankajraghav.com/">large-block-size (LBS) patches</a> that were <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=171754c3808214d4fd8843eab584599a429deb52">merged</a>
+for the 6.12&nbsp;kernel removed this limitation in XFS, thereby decoupling
+the page size from the filesystem block size. XFS is the first filesystem
+to gain this support, with other filesystems likely to add LBS support in
+the future. In addition, the LBS patches have been used to get the <a
+href="974578.html">initial atomic-write support</a> into XFS.
+</p>
+
+<p>
+LBS is an overloaded term, so it is good to clarify what it means in the
+context of the kernel. The term LBS is used in this article to refer to
+places where the filesystem block size is larger
+than the page size of the system. A filesystem block is the smallest unit of
+data that the filesystem uses to store file data on the
+disk. Setting the filesystem block size will only affect the I/O
+granularity in the data path and will not have any impact on
+the filesystem metadata.
+</p>
+
+<h4>Long history</h4>
+
+<p>
+The earliest use case for LBS <a href="232757.html">came from the CD/DVD world</a>, where reads and
+writes had to be performed
+in 32KB or 64KB chunks. LBS support was proposed to handle these devices
+and avoid workarounds at the device-driver level, but it was never merged. Beyond these historical
+needs, LBS enables testing filesystem block sizes larger than the host page
+size, allowing developers to verify XFS functionality with 64KB blocks on
+x86_64 systems that do not support 64KB pages. This is particularly valuable given the increasing adoption
+of architectures with larger page sizes.
+</p>
+
+<p>
+Another emerging use case for LBS comes from modern high-capacity
+solid-state storage devices (SSDs).  Storage vendors are <a
+href="https://www.colfax-intl.com/downloads/intel-achieving-optimal-perf-iu-ssds.pdf">increasing
+their internal mapping unit</a> (commonly called the Indirection Unit or IU)
+beyond 4KB to support these devices. When I/O operations are not sized for
+this larger IU, the device must <a href="https://blog.pankajraghav.com/2023/12/18/IU-WAF.html">perform read-modify-write
+operations</a>, increasing the write amplification factor. LBS enables
+filesystems to match their block size with the device's IU, avoiding these
+costly operations.
+</p>
+
+<p>
+Although LBS sounds like it has something to do with the block layer, the
+block-size limit in the kernel actually <a
+href="/ml/all/20230308075952.GU2825702@dread.disaster.area/">comes from the page
+cache</a>, not the block layer.
+The main requirement to get LBS support for filesystems is the ability to
+track a filesystem block as a single unit
+in the page cache. Since a block is the smallest unit of data, the page cache
+should not <a href="/Articles/945987/">partially evict</a> a single block
+during writeback.
+</p>
+
+<p>
+There were multiple <a
+href="https://blog.pankajraghav.com/2024/09/04/LBS2.html">attempts</a> in
+the past to add LBS support. The <a
+href="/ml/all/20181107063127.3902-1-david@fromorbit.com/">most recent
+effort</a> from Dave Chinner in&nbsp;2018 worked around the page-cache
+limitation by adding the <tt>IOMAP_F_ZERO_AROUND</tt> flag in <a href="https://docs.kernel.org/filesystems/iomap/design.html">iomap</a>. This
+flag pads I/O operations with zeroes if the size is less than a single block. The
+patches also removed the <a
+href="https://elixir.bootlin.com/linux/v6.13.1/source/include/linux/fs.h#L400"><tt>writepage()</tt></a>
+callback to ensure that the entire large block was written during the
+writeback. This effort was not upstreamed as <a
+href="/Articles/849538/">folios</a> were getting traction,
+which had the potential to solve the partial-eviction problem directly at the
+virtual filesystem
+layer.
+</p>
+
+<p>
+<a
+href="/ml/linux-kernel/20220116121822.1727633-1-willy@infradead.org/">Large
+folio support</a> was added to the page cache, and it was enabled in XFS in&nbsp;5.18. If a filesystem supports large folios, then the page cache will
+opportunistically allocate larger folios in the read and write paths based
+on the size of the I/O operation. The filesystem calls <a
+href="https://elixir.bootlin.com/linux/v6.12.12/source/include/linux/pagemap.h#L435"><tt>mapping_set_large_folios()</tt></a>
+during
+inode initialization to enable the large-folios feature. But the page cache
+could still fall back to allocating an order-0 folio (a single page) if the
+system is running low on memory, so there is no guarantee on the size of
+the folios.
+</p>
+
+<p>
+The LBS patches, which were developed by me and some colleagues, add a way for the filesystem to inform the page cache of the
+minimum and maximum order of folio allocation to match its
+block size. The page cache will allocate large folios that match the order
+constraints set by the filesystem and ensure that no partial
+eviction of blocks occurs.
+The <a
+href="https://elixir.bootlin.com/linux/v6.12.12/source/include/linux/pagemap.h#L428"><tt>mapping_set_folio_min_order()</tt></a>
+and <a
+href="https://elixir.bootlin.com/linux/v6.12.12/source/include/linux/pagemap.h#L393"><tt>mapping_set_folio_order_range()</tt></a>
+APIs have been added to control the allocation order in the page cache. The
+order information is encoded in the <tt>flags</tt>
+member of the <a
+href="https://elixir.bootlin.com/linux/v6.12.12/source/include/linux/fs.h#L444"><tt>address_space</tt>
+struct</a>.
+</p>
+
+<p>
+Setting the minimum folio order is sufficient for filesystems to add LBS
+support since they only need a guarantee on the smallest folio allocated in
+the page cache. Filesystems can set the minimum folio order based on the
+block size during inode initialization.
+Existing callers of <tt>mapping_set_large_folios()</tt>
+will not notice any change in behavior because that function will now set the
+minimum order to zero and the maximum order to the <tt>MAX_PAGECACHE_ORDER</tt>.
+</p>
+
+<p>
+Under memory pressure, the kernel will try to break up a large folio into
+individual pages, which could violate the promise of minimum folio order in the
+page cache. The main constraint is that the page cache must always ensure
+that the folios in 
+the page cache are never smaller than the minimum order.
+Since the 6.8&nbsp;kernel, the memory-management subsystem has the support to split a large folio into any <a
+href="/ml/all/20240226205534.1603748-1-zi.yan@sent.com/">lower-order
+folio</a>. LBS support uses this feature to always
+maintain the minimum folio order in the page cache even when a large folio
+is split due to memory pressure or truncation.
+</p>
+
+<h4>Other filesystems?</h4>
+
+<p>
+Readers might be wondering if it will be trivial to add LBS support to
+other filesystems since the page cache infrastructure is now in place. The
+answer unfortunately is: it depends. Even though the necessary
+infrastructure is in place in the page cache to support LBS in any
+filesystem, the path toward adding this support depends on the filesystem
+implementation. XFS has been preparing for LBS support for a long time,
+which resulted in LBS patches requiring minimal changes in XFS.
+</p>
+
+<p>
+The filesystem needs to support large
+folios to support LBS. So any filesystem that is
+using buffer heads in the data path cannot support LBS at the moment. XFS
+developers 
+moved away from buffer heads and designed iomap to
+address the shortcomings in buffer heads. While there is work underway to
+support large folios in buffer
+heads, it might take some time before it gets added.
+Once large folios support is added to the filesystem, adding LBS support is
+all about finding any corner cases that have made any assumption on block
+size in the filesystem.
+</p>
+
+<p>
+LBS has already found a use case in the kernel. The guarantee that the memory in the page cache
+representing a filesystem block will not be split has
+been used by the <a
+href="/ml/all/20241016100325.3534494-1-john.g.garry@oracle.com/">atomic-write support in XFS</a> for&nbsp;6.13. The initial support in XFS will only
+allow writing one filesystem block atomically. The drive needs to be
+formatted with 
+the desired size for atomic writes as its filesystem block size.
+</p>
+
+<p>
+The next focus in the LBS project is to <a
+href="/ml/all/20250204231209.429356-1-mcgrof@kernel.org/">remove the logical-block-size
+restriction for block devices</a>. Similar to filesystem block size, the
+logical block size, which is the smallest size that a storage device can
+address, is restricted to the host page size due to limitations in the page
+cache. Block devices cache data in the page cache when applications
+performed buffered I/O operations directly on the devices and they use
+buffer heads by default to interact with the page cache. So large folio
+support is needed in buffer heads to remove this limitation for block
+devices.
+</p>
+
+<p>
+Many core changes, such as large folios support, XFS using iomap instead of
+buffer heads, multi-page bvec support in the block layer, and so on, took place
+over the past 17&nbsp;years after the first
+LBS attempt. This resulted in adding LBS support with relatively fewer
+changes. With that being done for&nbsp;6.12, XFS will finally support all
+the features that it supported in IRIX before it was ported to Linux in&nbsp;2001.
+</p>
+
+<p>
+[I would like to thank Luis Chamberlain and Daniel Gomez for their
+contributions to both this article and the LBS patches. Special thanks to
+Matthew Wilcox, Hannes Reinecke, Dave Chinner, Darrick Wong, and Zi Yan for
+their thorough reviews and valuable feedback that helped shape the LBS
+patch series.]
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems</a></td></tr>
+            <tr><td><a href="../Archives/GuestIndex/index.html">GuestArticles</a></td><td><a href="../Archives/GuestIndex/index.html">Raghav, Pankaj</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1009548/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1011145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shows how ahead of its time SGI really was</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 20, 2025 21:16 UTC (Thu)
+                               by <b>jmalcolm</b> (subscriber, #8876)
+                              [<a href="/Articles/1011145/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jmalcolm" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011145" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We tend to look back to the era of "proprietary" UNIX as a lesser time but the sentence "XFS will finally support all the features that it supported in IRIX before it was ported to Linux in 2001" really hits home. Not only do we have XFS itself only because it was gifted by SGI but the kernel is only now able to offer all the features that XFS could rely on in IRIX almost 30 years ago.<br>
+<p>
+My point is not that IRIX is better than Linux. Only that, if you consider what your home PC would have looked like in 2000, it is kind of mind blowing how advanced the software already was back then. Which makes sense of course because, though it would not hold a candle to today, the proprietary UNIX systems were designed for money-no-object hardware that pushed the technology of the time as far as it could go.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shows how ahead of its time SGI really was</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2025 1:20 UTC (Fri)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/1011165/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gerdesj" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011165" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"but the kernel is only now able to offer all the features that XFS could rely on in IRIX almost 30 years ago."<br>
+<p>
+reflinks?<br>
+<p>
+XFS nowadays has holes in the knees of its jeans, which it mock derides as "ironic".  For me XFS is a safe haven for data, especially for large files.  <br>
+<p>
+Veeam has supported reflinks for some time now and it is a bit of a game changer when you are dealing with backups that have a full and incrementals.  A "synthetic full" can be generated within seconds by shuffling reflinks instead of blocks.  Add a flag to cp and you can create a sort of clone within seconds - a bit like a volume snapshot but for individual files.<br>
+<p>
+The real beauty of Linux and other promiscuous Unixes is that we have a lot of choice and sometimes we as sysadmins pick the right one for the job in hand.  <br>
+<p>
+Windows has vFAT, NTFS and ReFS and that's your lot.  To be fair ReFS is shaping up nicely these days (it doesn't kick your puppies quite so often) and NTFS is very, very stable - regardless of how much you abuse it.  vFAT is FAT - keep it simples.<br>
+<p>
+Apples have files and I'm sure they are lovely.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011172"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shows how ahead of its time SGI really was</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2025 4:38 UTC (Fri)
+                               by <b>bmenrigh</b> (subscriber, #63018)
+                              [<a href="/Articles/1011172/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bmenrigh" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011172" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+XFS has reflinks. I’ve been de-duping files on it for a while.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011172/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1011146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Thanks for the nudge</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 20, 2025 21:44 UTC (Thu)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1011146/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011146" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This was on my todo list, but I'd been too lazy to look up the relevant helper :)<br>
+<p>
+bcachefs now has it in for-next, so it should land in 6.15:<br>
+<a href="https://evilpiepirate.org/git/bcachefs.git/commit/?h=for-next&amp;id=77308424ba26e1b41a7db5d4eae121841a707c05">https://evilpiepirate.org/git/bcachefs.git/commit/?h=for-...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011305"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2025 15:16 UTC (Fri)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1011305/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011305" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Given that it is CoW, could bcachefs support arbitrary atomic writes, or even (gulp) transactions in the style of NTFS?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011305/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011327"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2025 18:10 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1011327/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011327" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Unlikely. And even NTFS' successor removed the transactional support.<br>
+<p>
+The problem is not in the filesystem itself, where transactions are reasonably easy, but in the VFS layer and the page cache. There's no easy way to impose isolation between parts of the page cache, and rollbacks are even more tricky.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011327/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1011353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2025 20:05 UTC (Fri)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1011353/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011353" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, it could support arbitrary atomic writes (not of infinite size, bcachefs transactions have practical limits). If someone wanted to fund it - it's not a particularly big interest of mine.<br>
+<p>
+Unfamiliar with NTFS style transactions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 22, 2025 22:41 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1011436/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011436" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To the best of my understanding, "NTFS style transactions" means, roughly speaking, "you expose full transaction semantics to userspace, so that userspace can construct transactions with arbitrary combinations of writes, including writes that span multiple files or directories." And then, once it exists and works correctly, you write documentation[1] telling userspace not to use it, supposedly because userspace never really wanted it in the first place (which I find hard to believe, personally).<br>
+<p>
+[1]: <a href="https://learn.microsoft.com/en-us/windows/win32/fileio/deprecation-of-txf">https://learn.microsoft.com/en-us/windows/win32/fileio/de...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011438"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 22, 2025 23:23 UTC (Sat)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1011438/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011438" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Many applications which deal with "document-like" data tend to load the entire document into memory, operate on it, and then write it back out to save the changes. The needed atomicity here is that the changes either are completely applied or not applied at all, as an inconsistent state would render the file corrupt. A common approach is to write the document to a new file, then replace the original file with the new one. One method to do this is with the ReplaceFile API.</span><br>
+<p>
+Yeah, I tend to agree with Microsoft :) I'm not aware of applications that would benefit, but if you do know of some please let me know.<br>
+<p>
+I'm more interested in optimizations for fsync overhead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011438/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011439"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 22, 2025 23:45 UTC (Sat)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1011439/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011439" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; but if you do know of some please let me know.</span><br>
+<p>
+Package managers? Text editors? Basically anything that currently has to do the fsync+rename+fsync dance?<br>
+<p>
+Now, I'm not saying that someone should get on coding userspace transactions yesterday™, but at a glance, there are definitely uses for that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011439/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1012076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2025 10:30 UTC (Thu)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1012076/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1012076" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That fsync already isnn't needed on bcachefs (nor ext4, and maybe xfs as well) since we do an implicit fsync on an overwrite rename, where we flush the data but not the journal.<br>
+<p>
+That is, you get ordering, not persistence, which is exactly what applications want in this situation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1012076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1011468"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 23, 2025 9:37 UTC (Sun)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1011468/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011468" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Depends how much state, across how many files, but (if I understand correctly) I'm sure object based databases could benefit.<br>
+<p>
+I would want to update part of a file (maybe two or three blocks, across a several-meg (or more) file) and the ability to rewrite just the blocks of interest, then flush a new inode or whatever, changing just those block pointers, would be wonderful.<br>
+<p>
+Maybe we already have that. Maybe it's too complicated (as in multiple people trying to update the same file at the same time ...)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011468/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1011669"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2025 18:52 UTC (Mon)
+                               by <b>tim-day-387</b> (subscriber, #171751)
+                              [<a href="/Articles/1011669/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tim-day-387" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011669" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Lustre would benefit from a filesystem agnostic transaction API (at least, in kernel space). The OSD layer is essentially implementing that. We're making a push to get Lustre included upstream and the fate of OSD/ldiskfs/ext4 is one of the big open questions. Having a shared transaction API would make that much easier to answer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011669/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011682"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2025 21:37 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1011682/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011682" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does Lustre currently handle transactions? Especially rollbacks?<br>
+<p>
+It looks like transactions in Lustre are more like an atomic group of operations, rather than something long-lived? I.e. you can't start a transaction, spend 2 hours doing something with it, and then commit it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011682/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011797"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2025 16:49 UTC (Tue)
+                               by <b>tim-day-387</b> (subscriber, #171751)
+                              [<a href="/Articles/1011797/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tim-day-387" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011797" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Currently, Lustre hooks into ext4 transactions in osd_trans_start() and osd_trans_stop() [1]. So the transactions aren't long-lived and are usually scoped to a single function. Lustre patches ext4 (to create ldiskfs) and interfaces with it directly. But it'd probably be better to have a generic way for filesystems to (optionally) expose these primitives. Infiniband has a concept of kverbs - drivers can optionally expose an interface to in-kernel users. We'd could do something similar for transaction handling.<br>
+<p>
+[1] <a href="https://git.whamcloud.com/?p=fs/lustre-release.git;a=blob;f=lustre/osd-ldiskfs/osd_handler.c">https://git.whamcloud.com/?p=fs/lustre-release.git;a=blob;...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011797/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1011445"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bcachefs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 23, 2025 1:45 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1011445/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011445" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; And then, once it exists and works correctly</span><br>
+<p>
+Except this never happened :) I wrote an application that actually used distributed transactions with NTFS and SQL Server, for video file management from CCTV cameras, some time around 2008.<br>
+<p>
+There were tons of corner cases that didn't work quite right. For example, if you created a folder and a file within that folder, then nobody else could create files in that folder until the transaction commits. Because the folder had to be deleted during the rollback.<br>
+<p>
+And this at least made some sense within Windows, as it's a very lock-heavy system. It will make much less sense in a Linux FS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011445/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1011173"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance hit?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2025 4:43 UTC (Fri)
+                               by <b>bmenrigh</b> (subscriber, #63018)
+                              [<a href="/Articles/1011173/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bmenrigh" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011173" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does this come at a performance cost (CPU-wise, not disk-wise). From the description of the details it sounds like it doesn’t, or the overhead is too tiny to matter.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011173/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1011193"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance hit?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2025 12:18 UTC (Fri)
+                               by <b>mcgrof</b> (subscriber, #25917)
+                              [<a href="/Articles/1011193/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mcgrof" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1011193" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We did measurements of the impact to existing 4k workloads and found the impact to be within the noise. The more interesting things were about how larger block sizes perform against 4k block size workloads, and while that was also found to be within the noise I figured I'd share the old results here [0]. The more interesting results were found once one started to use unbounded IO devices such as pmem [0], part of which lead to last year's LSFMM topic to "Measuring and improving buffered I/O". One of the key conclusions of that discussion was the prospect of parallelizing writeback, a topic which has been proposed for this year's LSFMM [2] and for which there are RFC  patches out to help review.<br>
+<p>
+[0] <a href="https://docs.google.com/presentation/d/e/2PACX-1vS6jYbdGDBxlN5fyIjEFAsMxZ5iHkqaXIW-K3-mWDyA4jL_ZzBdZkBe7TkzmZ-IVoSwrQPGQeqeXlkn/pub?start=false&amp;loop=false&amp;delayms=3000">https://docs.google.com/presentation/d/e/2PACX-1vS6jYbdGD...</a><br>
+[1] <a href="976856.html">https://lwn.net/Articles/976856/</a><br>
+[2] <a href="https://lore.kernel.org/all/Z6GAYFN3foyBlUxK@dread.disaster.area/T/">https://lore.kernel.org/all/Z6GAYFN3foyBlUxK@dread.disast...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1011193/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1013470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Can't actually use currently?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2025 10:42 UTC (Sun)
+                               by <b>bmenrigh</b> (subscriber, #63018)
+                              [<a href="/Articles/1013470/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bmenrigh" />
+                <input type="hidden" name="return" value="/Articles/1009548/#CommAnchor1013470" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On kernel 6.13.5 I was able to make an XFS filesystem (to a file) with 8192 byte sector sizes but when I try to mount it via loopback (either with losetup or mount -o loop) I run into:<br>
+<p>
+[ 3713.182037] XFS (loop0): Cannot set_blocksize to 8192 on device loop0<br>
+<p>
+Or trying to specify losetup -b 8192:<br>
+[ 3770.934627] Invalid logical block size (8192)<br>
+<p>
+Maybe I'm missing something? Otherwise the support is there in XFS but the support isn't in the the block layer (at least not the loopback part) to work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1013470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

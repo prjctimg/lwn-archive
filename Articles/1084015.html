@@ -1,0 +1,573 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Hazard pointers for the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Hazard pointers for the kernel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's read-copy-update (RCU) subsystem ensures that data will not be deleted until it is [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1084316/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Hazard pointers for the kernel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 27, 2026</br>
+           </div>
+The kernel's read-copy-update (RCU) subsystem ensures that data will not be
+deleted until it is known that there are no threads holding references to
+it.  RCU works well and is widely used throughout the kernel, but it can
+increase memory use and add significant delays before unused kernel objects
+are cleaned up.  <a
+href="https://en.wikipedia.org/wiki/Hazard_pointer">Hazard pointers</a> are
+an alternative approach to lockless data updates that offers better
+performance, for some situations at least.  The kernel community is
+currently considering <a
+href="/ml/all/23e34c2e-67fd-45da-b130-e70a131a59ea@paulmck-laptop">a
+hazard-pointer implementation</a> by Mathieu Desnoyers and Paul McKenney.
+<p>
+Like RCU, hazard pointers are meant to be a way to hold a short-lived
+reference to an immutable object that may disappear once all references are
+gone.  Code holding references to RCU-protected data must disable
+preemption; hazard pointers, instead, appear to be designed to allow
+preemption, though such use may not be entirely optimal.
+<p>
+<!-- middle-ad -->
+<h4>The hazard-pointer API</h4>
+<p>
+At the API level, code using hazard pointers must allocate a context
+(<tt>struct hazptr_ctx</tt>) for each pointer that will be in use at the
+same time; this structure is normally placed on the stack.  If there is a
+pointer (we'll call it <tt>resource</tt>) to an object to be protected by a
+hazard pointer, and code needs to access that object, the pointer must
+first be acquired with a call to:
+<p>
+<pre>
+    void *hazptr_acquire(struct hazptr_ctx *ctx, void * const *address);
+</pre>
+<p>
+Where <tt>ctx</tt> is the above-described context, and <tt>address</tt>, in
+this case, would be the address of <tt>resource</tt>.  This call will
+return the current value of <tt>resource</tt> (the address of the protected
+object) and ensure that this object will not be changed or deleted for as
+long as the reference remains.  When work with the protected object is
+complete, the code must call:
+<p>
+<pre>
+    void hazptr_release(struct hazptr_ctx *ctx, void *address);
+</pre>
+<p>
+Where <tt>address</tt> is the address of the old copy of the resource; after
+this call, the previously protected object can no longer be used.
+<p>
+Normally, a hazard pointer must be released in the same execution context
+in which it was obtained — in the same thread or interrupt handler, in
+other words.  There may be times when it is necessary to release the
+pointer in a different setting, though.  That can be done, but only if the
+hazard-pointer context is passed to this function:
+<p>
+<pre>
+    void hazptr_detach(struct hazptr_ctx *ctx);
+</pre>
+<p>
+This call must, clearly, be made before the pointer is actually released.
+<p>
+On the producer side, when the time comes to replace the protected object
+with a new one, code should create and initialize the new object, aim the
+<tt>resource</tt> pointer at this new copy, then call:
+<p>
+<pre>
+    void hazptr_synchronize(void *address);
+</pre>
+<p>
+This call, which must be made in a preemptible context, will wait until
+there are no more hazard-pointer references to the given <tt>address</tt>,
+then return to the caller.  At that point, the object at that address can
+be freed.
+<p>
+<h4>The implementation</h4>
+<p>
+The core idea behind hazard pointers is relatively simple: a call to
+<tt>hazptr_acquire()</tt> adds the pointer to a special list, while
+<tt>hazptr_release()</tt> removes it from that list.  When a call to
+<tt>hazptr_synchronize()</tt> is made, that list is scanned for the address
+in question; if the address is found there, the function will wait until it
+is removed.  This algorithm could be implemented with a simple linked list
+protected by a lock, but the whole purpose is to maximize performance, so
+the actual implementation is somewhat more complicated.
+<p>
+The hazard-pointer code maintains a global per-CPU array, with four slots
+on each CPU.  The oversimplified explanation of the algorithm is that, on a
+call to <tt>hazptr_acquire()</tt>, an empty slot is found, and the relevant
+address is stored there.  Calls to <tt>hazptr_synchronize()</tt> can then
+simply scan those slots (on each CPU) and wait until none of them contain
+the protected address.  But, once again, there are complications.
+<p>
+One of those is an ordering problem.  <tt>hazptr_acquire()</tt> must read
+the pointer to acquire, then store it into the slot.  On the synchronize
+side, that pointer must be changed, then the slots searched for the
+previous value.  If the synchronization code runs between the two acquire
+operations — after the pointer is read, but before it is stored into a slot
+— it will conclude that there are no references and release an object that
+is still in use.  That is not the sort of hazard the authors of this code
+care to face.
+<p>
+To address this problem, the slots are maintained in three different
+states.  If the address stored there is <tt>NULL</tt>, the slot is free and
+not protecting a pointer.  If it contains a non-<tt>NULL</tt> pointer
+value, the slot is occupied protecting that pointer.  But there is a third
+value, <tt>HAZPTR_WILDCARD</tt> (which happens to have the value
+<tt>0x1UL</tt>) to indicate that the slot is in the process of being
+assigned.  <tt>hazptr_acquire()</tt> starts by finding a free slot and
+setting its value to <tt>HAZPTR_WILDCARD</tt>; only then does it read the
+address value and, subsequently, store it in the slot.
+<tt>hazptr_synchronize()</tt> treats any slot containing
+<tt>HAZPTR_WILDCARD</tt> as if it contained the pointer it is looking for,
+so it will wait until the real pointer value appears in that slot before
+returning.  That extra check prevents the race described above.
+<p>
+The other complication is: what happens if there is a need for more than
+four slots?  Any given function may not need so many slots, but there is no
+knowing how many will be used by functions further down the call chain.
+The hazard-pointer API could just return an error in that case, but that
+seems like a sure way to create hard-to-find bugs.  Instead, handling this
+case is what the <tt>hazptr_ctx</tt> structure is for.
+<p>
+That structure contains a spare slot that can be used to hold the hazard
+pointer if none of the per-CPU slots are available.  In that case, the code
+uses the slot in the context structure, then links that structure into a
+per-CPU list.  When a <tt>hazptr_synchronize()</tt> call happens, it must
+search those per-CPU lists as well as the per-CPU slots to ensure that the
+address is not under protection.  As an added twist, there are actually
+<i>two</i> per-CPU linked lists; one is available for adding to while the
+other is available for searching, again to prevent race conditions.  The
+list traversal risks slowing everything down, but those lists should almost
+always be empty.
+<p>
+The overflow slot has a couple of uses beyond extending the four per-CPU
+slots.  The <tt>hazptr_detach()</tt> call described above will immediately
+move the given pointer into the overflow slot (if it is not already there),
+freeing the per-CPU slot for other uses.  There is also a special callback
+added to the scheduler that is called on context switches; that one moves
+all of the per-CPU slots to their corresponding overflow slots.  In this
+way, if a thread is preempted while using hazard-pointer slots, it will
+free the faster per-CPU slots for whoever runs next.
+<p>
+This code is still in a relatively early state, and could yet evolve
+somewhat before finding its way into the mainline.  Importantly, the patch
+series does not include any users of the API, which is normally a
+requirement for a new subsystem like this.  The creation of those users may
+well reveal API shortcomings that can be resolved before merging upstream.
+So it is hard to hazard a guess as to when hazard pointers will be
+available for use by kernel developers.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Lockless algorithms</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1084015/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1085657"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Delays and puns</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2026 8:23 UTC (Tue)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1085657/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1085657" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for all the puns :-)<br>
+<p>
+"I can haz hazptr?"<br>
+<p>
+Seriously though, I'm digging through wifi and we have a lot of synchronize_rcu()/synchronize_net() under mutex (wiphy_lock()) that can then end up being contended for no good reason. Some of them are avoidable with better software design, but sometimes you do need to clear up things and make sure they're no longer reachable. I'm also trying to see if more use of call_rcu() is possible.<br>
+<p>
+What cases are folks envisioning would actually (be allowed to?) take advantage of this infrastructure? With just four slots it seems you don't really want to use this too much, especially not for many pointers in a single call stack? The WiFi case alone might end up having a key, interface link, station and station link that are all protected by RCU right now - so that seems like the wrong thing to do with just hazard pointers. Perhaps only one or two of them? Or better not at all?<br>
+<p>
+I'm not saying I want to either way, I'm just trying to think through whether applying hazard pointers for a specific problem I'm looking into right now would be plausible.<br>
+<p>
+<span class="QuotedText">&gt; void * const *addr_p</span><br>
+<p>
+It also seems that perhaps there could be some kind of sparse annotation like __rcu, along with perhaps write-side wrappers too? Otherwise I'd be scared of it for random wireless drivers ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085657/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1085892"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Delays and puns</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2026 13:49 UTC (Tue)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1085892/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1085892" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's four per CPU; so on modern systems you can probably safely assume at least eight. That said, all that happens if you overflow the per-CPU slots is that they go on the linked list and cause a slight performance penalty. Whether that penalty is worse than contention on your mutexes is the kind of performance question that I think should probably be solved via measurement, and not via too much ungrounded speculation.<br>
+<p>
+At a guess, though, I would expect contention on a mutex, which involves suspending tasks and performing context switches, to be much more expensive than scanning the hazard pointer list, at least until you get up to hundreds of concurrent entries.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085892/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1085914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Delays and puns</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2026 19:56 UTC (Tue)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1085914/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1085914" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It's four per CPU; so on modern systems you can probably safely assume at least eight.</span><br>
+<p>
+Well, yes, but also no: I was thinking of a single call chain consuming four, so that'll use up all all slots on a single CPU during that (inner) call of the chain.<br>
+<p>
+<span class="QuotedText">&gt; That said, all that happens if you overflow the per-CPU slots is that they go on the linked list and cause a slight performance penalty. Whether that penalty is worse than contention on your mutexes is the kind of performance question that I think should probably be solved via measurement, and not via too much ungrounded speculation.</span><br>
+<p>
+Fair point regarding measurement, sure. I think the performance question is a different one though than just comparing to a contended mutex - the price could also be paid by someone else who happens to be on the core? Or higher up/lower in the call chain? (see below too)<br>
+<p>
+<span class="QuotedText">&gt; At a guess, though, I would expect contention on a mutex, which involves suspending tasks and performing context switches, to be much more expensive than scanning the hazard pointer list, at least until you get up to hundreds of concurrent entries.</span><br>
+<p>
+Oh, sure! I was more thinking that if everyone starts to use it arbitrarily then it'll probably hit a scalability wall eventually, unlike RCU which is always basically the same, regardless of the number of pointers dereferenced in any given call chain. Say TCP uses it, then IP layer underneath, perhaps qdisc layer and then Wi-Fi also consumes a bunch of slots - you can layer a lot of things on top of each other even in the kernel.<br>
+<p>
+Which would appear (to me) to raise the question where we should be using it, because the answer maybe can't really be "everywhere"? If we were to start using it say in Wi-Fi, and already need a number of slots, should TCP then not use it? Although I guess the performance cost of the combination would only be paid by users of said combination, so perhaps that's still OK?<br>
+<p>
+But you're definitely right that these are all problems better left for after even a first user appears :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1085916"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">thanks for yet another clear explanation of a complex topic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2026 20:07 UTC (Tue)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/1085916/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alison" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1085916" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The article contains the eagerly awaited Corbetian pun, but not for once a complaint about lack of Documentation/.   That is unsurprising given the authors of the new feature.<br>
+<p>
+The explanation suggests that the new feature is built on top of sequence locks (for hazptr_synchronize()), cleanup.h (for freeing the context) and cmpxchg (for updating and perhaps reading the slots).      The kernel has accrued clever infrastructure which makes all kinds of cool new features easier to implement.<br>
+<p>
+The fact that C++ has adopted hazard pointers before the kernel (<a href="https://en.cppreference.com/Template:cpp/synopsis/hazard_pointer">https://en.cppreference.com/Template:cpp/synopsis/hazard_...</a>) is surprising.   Presumably McKenney et al. worked first on the C++ proposal given the ISO committee's slower release cycle.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085916/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1085940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">hazptr_synchronize() cost</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2026 23:36 UTC (Tue)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1085940/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1085940" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if this implementation is trying to be too general.<br>
+<p>
+It provides a single arena were pointers can be registered, and where other threads can check if a given address is registered.  This area has at least 4 slots per CPU that need to be searched, and if you are lucky enough to have 1024 CPUs, then that is a lot of slots probably spread over several NUMA nodes.<br>
+<p>
+But any particular use case I can think of involves a particular module that is only interested in its own pointers, and so would be happy with its own smallish arena that can quickly be searched.  That would mean that registering a pointer would not be cpu-local and so would need atomic operations, but hazptr_synchronize() could have a smaller maximum cost in the uncontended case.<br>
+<p>
+But maybe the developers of this functionality have thought about this for more than the half-hour that I have spent on it.  Does anyone know of any discussion about the expected cost of hazptr_synchronize() and the tradeoffs with hazptr_acquire() cost?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086037"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">hazptr_synchronize() cost</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 29, 2026 13:59 UTC (Wed)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/1086037/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="compudj" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1086037" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I suspect that once you can afford atomics on a global variable on the read-side, you already have a solution available: reference counting. So hazptr is filling a niche not unlike RCU: where there is a need for existence guarantee with minimal overhead added to fast paths.</p>
+<p>Some differences between hazptr and RCU are:</p>
+<ul class="spacylist"><li>hazptr allows faster object reclaim compared to RCU which needs to wait for grace periods,</li>
+<li>hazptr can be used in preemptible/blocking/faultable context without relying on specific RCU flavors each with different overhead tradeoffs,</li>
+<li>hazptr is really working on a per-pointer publication level, compared to RCU which needs to publish reader state. This can make hazptr easier to integrate in some low-level instrumentation contexts.</li>
+</ul>
+<p>One downside of hazptr vs RCU I am aware of:</p>
+<ul class="spacylist"><li>Those familiar with RCU guarantees that extend to a read-side <em>traversal</em> may be surprised by the fact that hazptr only targets specific pointers. For instance, this has impacts on guarantees provided with respect to linked list removal vs traversal.</li>
+</ul>
+<p>One use-case for hazptr I am aware of is lockdep. Boqun has patches adapting lockdep to use hazptr. This needs much faster read-side than synchronize.</p>
+<p>It is also possible to add &quot;synchronization domains&quot; to hazptr, e.g. each modules would scan for its own domain for your per-module use-case, but I went for the simpler &quot;global&quot; approach instead. This made the integration with the scheduler straightforward.</p>
+<p>Note that Boqun has plans to build a call_hazptr() facility around my hazptr API. This would batch callbacks in fashion not completely unlike call_rcu().</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086037/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086111"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">hazptr_synchronize() cost</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 7:20 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1086111/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1086111" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the response!<br>
+<p>
+Thinking about this comment:<br>
+<p>
+<span class="QuotedText">&gt; I suspect that once you can afford atomics on a global variable on the read-side, you already have a solution available: reference counting</span><br>
+<p>
+I don't think atomics are the only reason to avoid a refcount.  Another is memory space in the relevant data structure.  There are probably others.<br>
+<p>
+One use case I'm thinking of is in fs/namespace.c where namespace_unlock() calls synchronize_rcu_expedited().<br>
+I think this is to wait for __legitimize_mnt() to complete, and importantly for the "mnt_add_count(mnt, -1);" to run if needed.<br>
+<p>
+If namespace_unlock() proceeds past the synchronize_rcu_expedited() too soon, the mntput() call might find that the refcount is still temporarily elevated, and it won't wait.  Which would be bad.<br>
+<p>
+If __legitimize_mnt()  calls hazptr_acquire(mnt) before incrementing, and hazptr_release(mnt) before it returns, then namespace_unlock() could call hazptr_synchronize() on each mnt before calling mntput.<br>
+I don't think this rcu / hazptr usage is really about avoiding atomics (there are various atomics in that function).  It is about finding the most economical way to close a gap.<br>
+And I wonder how the cost of an atomic compares with the cost of scanning a large array when there is a large number of CPUs.  I really don't know the answer there.<br>
+<p>
+BTW, I imagine that an even simpler solution to the fs/namespace.c race is to call hazptr_acquire(foo) where "foo" is some constant that no other code would use, maybe the address of some function.  Then namespace_unlock() could call hazptr_synchronize(foo) just once (rather than once per mnt).  That could be cheaper in the cases where there were multiple mnts (which I think can happen, but maybe not often).  The one hazptr_synchronize() call could wait for all running __legitimize_mnt() calls (like synchromnize_rcu_expedited() does - but it waits for lots of other stuff too).<br>
+<p>
+Is there any reason that might not work?  i.e. using an abstract pointer rather than a pointer to the particular memory we want to monitor.<br>
+<p>
+One thing I really like about hazptr is it forces you to document in the code exactly what you are waiting for.  With RCU it is a bit like the old BKL in that you really need to understand the code to be able to see what is protected.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086111/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086361"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">hazptr_synchronize() cost</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 0:12 UTC (Fri)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/1086361/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PaulMcKenney" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1086361" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One 100,000-foot sound-bite way to think of these synchronization primitives is to consider RCU to be a high-performance/scalability replacement for many reader-writer-locking use cases, and Hazard Pointers to be a high-performance/scalability replacement for many reference-counting use cases.  RCU allows readers to unconditionally traverse a linked data structure, while Hazard Pointers does not, but the fact that Hazard Pointers can say "no" to an attempt to traverse a Hazard-Pointers-protected pointer is exactly why Hazard Pointers can avoid unnecessarily deferring reclamation of objects that are not currently protected by the current set of Hazard-Pointers Readers.<br>
+<p>
+Both Hazard Pointers and RCU have other use cases, there is significant overlap between their respective use cases, and there are often tricks that allow each to overcome its respective disadvantages.<br>
+<p>
+For an RCU example of the latter, if you don't want unrelated RCU readers slowing down your reclamation, you can use SRCU.  For a Hazard-Pointers example, there are restrictive but useful tricks that allow Hazard Pointers to unconditionally traverse some types of data structures, except that the first pointer leading into that structure is still conditional.  Yes, this means that a given Hazard Pointer must block reclamation of all nodes that are reachable from the entry point.<br>
+<p>
+Tradeoffs, almost as if this was the real world or something.  ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086361/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1086381"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Suitable users for the API?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 6:22 UTC (Fri)
+                               by <b>ondrej</b> (subscriber, #27872)
+                              [<a href="/Articles/1086381/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ondrej" />
+                <input type="hidden" name="return" value="/Articles/1084015/#CommAnchor1086381" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We had hazard pointers in BIND 9 for a brief moment and we found out two things:<br>
+<p>
+1. It interacted badly with plugins that created more threads (our implementation needed static array per-thread) which might not be a problem for kernel (and/or kernel already has mechanisms for hot plugging CPUs)<br>
+2. It was not needed at all as there were better algorithms for what we were using hazptr ;)<br>
+<p>
+So, I am wondering if you already have identified specific places where hazptrs would help in the kernel?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086381/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

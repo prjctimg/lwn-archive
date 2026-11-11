@@ -1,0 +1,167 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Separating memory descriptors from struct page [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Separating memory descriptors from struct page">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's memory-management subsystem is currently partway through a multi-year project to r [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1074951/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Separating memory descriptors from struct page</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 28, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+The kernel's memory-management subsystem is currently partway through a
+multi-year project to replace the <tt>page</tt> structure (which represents
+a page of physical memory) with <a
+href="https://kernelnewbies.org/MatthewWilcox/Memdescs">memory
+descriptors</a>.  At the 2026 <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a>, Vishal Moola ran a
+fast-paced session in the memory-management track to describe the current
+state of that work and what is likely to happen next.
+<p>
+<a href="/Articles/1073576/"><img
+src="../_static/images/conf/2026/lsfmm/VishalMoola-sm.png" alt="[Vishal Moola]"
+title="Vishal Moola" class="rthumb"></a>
+
+The <tt>page</tt> structure has been at the core of the kernel's
+memory-management subsystem since the 1.3.50 development release in late
+1995, but it has a number of problems.  It must be able to describe any
+type of page in the system, which limits how small the structure can be.
+These structures currently occupy a significant portion of the memory they
+represent.  The size constraint has led to a lot of complexity as
+developers have used every trick they could to shoehorn more information
+into the structure.  Use of <tt>struct page</tt> has leaked far beyond the
+memory-management code, making the structure harder for memory-management developers
+to change.  These structures also contain a lot of redundant data in cases
+where pages are grouped into larger structures; a PMD-size folio can be
+described with a single <tt>folio</tt> structure, but requires 512
+<tt>page</tt> structures.
+<p>
+The memory descriptors that will replace <tt>struct page</tt> are,
+eventually, intended to only occupy eight bytes.  For many page types, that
+descriptor will contain a pointer to a type-specific structure —
+<tt>struct folio</tt> for folios, for example.  Some other page types can
+be fully described with the eight bytes available.  This descriptor-based
+future will be cleaner and more memory-efficient, but getting there is not
+a small task.
+<p>
+A number of descriptor types have been defined so far, Moola said, starting
+with the <tt>folio</tt> type.  For pages used by the slab allocator, <a
+href="871982.html">slab descriptors</a> were added in 2021.  There is
+<a href="937839.html">struct ptdesc</a> for page-table pages, and
+descriptor types for <a
+href="https://docs.kernel.org/mm/zsmalloc.html">zsmalloc</a> and <a
+href="https://docs.kernel.org/networking/netmem.html">netmem</a> as well.
+Each of those descriptor types is currently carefully designed to overlay
+<tt>struct page</tt> but, when the switch is made, it will become possible
+to remove unneeded fields from each, making them smaller.
+<p>
+One concern he has with switching to descriptors is the double-allocation
+cost.  When a page is needed for some purpose, kernel code will need to
+allocate that page, but it will also have to allocate the descriptor to
+manage it.  With the existing system memory map, instead, the <tt>page</tt>
+structures are set up at boot time and are always present.  He also
+wondered about how the change would be managed in general; he suggested
+adding a new configuration option (<tt>CONFIG_MEMDESC</tt>) that would
+provide access to all of the disruptive changes.  It would be disabled by
+default.  A participant said that folios will be the biggest user of
+descriptors in general; he asked whether it might make sense to convert all
+of the other types first as a relatively small change before making the big
+leap.
+<p>
+Matthew Wilcox said, though, that moving to the eight-byte descriptor is
+still a distant goal.  There is "<q>a long-tail problem</q>" of code
+throughout the kernel using random fields in <tt>struct page</tt> for its
+own purposes.  This code has worked so far, but all of it will have to be
+located and fixed before the change can be made.  That said, he liked the
+idea of doing folios last.  He suggested the creation of a "developer
+preview" configuration that would simply "<q>disable ¾ of the kernel</q>";
+it would support the XFS filesystem but no networking.  This configuration
+could be used initially to test out changes and run benchmarks.  Converting
+page-table descriptors first, he said, might be a good start.
+<p>
+Moola said that he has tried moving to descriptors for a few types; it
+allowed him to shrink <tt>struct page</tt> to 32&nbsp;bytes.  One of the
+biggest challenges turns out to be page migration, which forces some fields
+to be kept in <tt>struct page</tt>, and also requires the allocation of a
+new descriptor during the operation.  There was a detailed description of
+how migration uses <tt>struct page</tt> fields, and a conclusion that,
+initially, enabling descriptors would force migration to be disabled.
+<p>
+<a
+href="https://drive.google.com/file/d/1dZvblZDvplxS5vJfAwwiD0ETbTSBQvIx/view">Moola's
+slides</a> contain a number of examples of what descriptors might look like
+once they are separated from <tt>struct page</tt>; most of those details
+were not discussed in the session in any detail, though.  The session
+concluded with a statement that this work appears to be making progress.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Memory descriptors</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1073425/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

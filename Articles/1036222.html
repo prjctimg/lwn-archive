@@ -1,0 +1,1095 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The dependency tracker for complex deadlock detection [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The dependency tracker for complex deadlock detection">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Deadlocks are a constant threat in concurrent settings with shared data; it is thus not surpris [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1036684/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The dependency tracker for complex deadlock detection</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 4, 2025</br>
+           <hr>
+<a href="../Archives/ConferenceByYear/index.html">OSS EU</a>
+</div>
+Deadlocks are a constant threat in concurrent settings with shared
+data; it is thus not surprising that the kernel project has long since
+developed tools to detect potential deadlocks so they can be fixed before
+they affect production users.  Byungchul Park thinks that he has developed
+a better tool that can detect more deadlock-prone situations.  At the 2025 <a
+href="https://events.linuxfoundation.org/open-source-summit-europe/">Open
+Source Summit Europe</a>, he presented an introduction to his dependency
+tracker (or "DEPT") tool and the kinds of problems it can detect.
+<p>
+<a href="/Articles/1036238/"><img
+src="../_static/images/conf/2025/osseu/ByungchulPark-sm.png" alt="[Byungchul Park]"
+title="Byungchul Park" class="lthumb"></a>
+
+Park began by presenting a simple ABBA deadlock scenario.  Imagine two
+threads running, each of which makes use of two locks, called <tt>A</tt>
+and <tt>B</tt>.  The first thread acquires <tt>A</tt>, then <tt>B</tt>,
+ending up holding both locks; meanwhile, the second thread acquires the
+same two locks but in the opposite order, taking <tt>B</tt> first.  That
+can work, until the bad day when each thread succeeds in taking the first
+of its two locks.  Then one holds <tt>A</tt>, the other holds <tt>B</tt>,
+and each is waiting for the other to release the second lock it needs.
+They will wait for a long time.
+<p>
+Deadlocks like this can be hard to reproduce, and thus hard to track down
+and fix; it is far better to detect the possibility of such a deadlock
+ahead of time.  The kernel has a tool called "lockdep", originally written
+by Ingo Molnar, that can perform this detection.  Whenever a thread
+acquires a lock, lockdep remembers that acquisition, along with the context
+— specifically, any other locks that are currently held.  It will thus
+notice that, in the first case, <tt>A</tt> is acquired ahead of <tt>B</tt>.
+When lockdep observes the second thread acquiring the locks in the opposite
+order, it will raise the alarm.  The problem can then be fixed, hopefully
+before this particular deadlock ever occurs on a production system.
+<p>
+Park continued with a more complex example, presented in this form:
+<br clear="all">
+<p>
+<blockquote>
+<table class="OddEven">
+<tr><th>Thread X</th><th>Thread Y</th><th>Thread Z</th></tr>
+<tr><td><tt>mutex_lock(A)</tt></td><td><tt>mutex_lock(C)</tt></td><td></td></tr>
+<tr><td></td><td><tt>mutex_lock(A)</tt></td><td><tt>mutex_lock(C)</tt></td></tr>
+<tr><td><tt>wait_for_event(B)</tt></td><td></td><td></td></tr>
+<tr><td></td><td><tt>mutex_unlock(A)</tt></td><td><tt>mutex_unlock(C)</tt></td></tr>
+<tr><td><tt>mutex_unlock(A)</tt></td><td><tt>mutex_unlock(C)</tt></td><td></td></tr>
+<tr><td></td><td></td><td>event <tt>B</tt></td></tr>
+</table>
+</blockquote>
+<p>
+Thread <tt>Y</tt>, holding lock <tt>C</tt>, will be blocked waiting for
+<tt>A</tt> to become available.  Thread <tt>Z</tt>, meanwhile, is blocked
+waiting for&nbsp;<tt>C</tt>.  Thread <tt>X</tt> is waiting for some sort of
+event to happen; it is up to <tt>Z</tt> to produce that event, but that
+will never happen because <tt>Z</tt> is waiting on a chain of locks leading
+back to <tt>A</tt>, held by <tt>X</tt>.  Park's point here is that
+deadlocks are not driven only by locks, other types of events can be part
+of deadlock scenarios as well.  Lockdep, being focused on locks, is unable
+to detect these cases.
+<p>
+Park's DEPT tool, currently in <a
+href="/ml/all/20250519091826.19752-1-byungchul@sk.com/">its 16th
+revision</a>, is meant to address this type of problem.  The core idea
+behind DEPT is a new definition of a dependency; while lockdep sees
+dependencies as lock acquisitions, DEPT looks at events more generally.  If
+one event occurs prior to another, DEPT will notice the dependency between
+them.  In the example above, the release of <tt>A</tt> depends on the
+occurrence of <tt>B</tt>, which in turn depends on the release of
+<tt>C</tt>, which itself depends on the release of&nbsp;<tt>A</tt>.  That
+is a dependency loop that can cause a deadlock; DEPT will duly report it.
+<p>
+Back in 2023, kernel developers were beating their heads against a complex
+deadlock problem, and Linus Torvalds <a
+href="/ml/all/CAHk-=whpkWbdeZE1zask8YPzVYevJU2xOXqOposBujxZsa2-tQ@mail.gmail.com/">asked</a>
+whether DEPT might be able to track the problem down.  Using DEPT, Park was
+<a
+href="/ml/all/1674268856-31807-1-git-send-email-byungchul.park@lge.com/">able
+to pinpoint the problem</a>, which involved a wait on a bit lock; events
+involving bit locks are invisible to lockdep.  Earlier this year, Andrew
+Morton was <a
+href="/ml/all/20250513175633.85f4e19f4232a68ab04c8e41@linux-foundation.org/">struggling</a>
+with a similar problem:
+<p>
+<blockquote class="bq">
+	Nostalgia.  A decade or three ago many of us spent much of our
+	lives staring at ABBA deadlocks.  Then came lockdep and after a few
+	more years, it all stopped.  I've long hoped that lockdep would
+	gain a solution to custom locks such as folio_wait_bit_common(),
+	but not yet.
+</blockquote>
+<p>
+He, too, asked if DEPT could find this problem; once again, <a
+href="/ml/all/b6e00e77-4a8c-4e05-ab79-266bf05fcc2d@igalia.com/">DEPT
+located the deadlock</a> so that it could be fixed.
+<p>
+DEPT, Park said, has a number of benefits, starting with the fact that it
+uses a more generalized concept of dependencies rather than just looking at
+specific locks.  It can handle situations involving folio locks,
+completions, or DMA fences that lockdep cannot.  DEPT is also able to
+properly deal with reader-writer locks.  It is, he said, less likely than
+lockdep to generate false-positive reports, and it is able to continue
+operating after the first report (unlike lockdep, which shuts down once a
+problem is found).
+<p>
+Lockdep, he allowed, is better in that it produces far fewer false-positive
+reports now; he noted that kernel developers have spent 20&nbsp;years
+achieving that result.  It will, though, miss some deadlock situations.  In
+cases where the deadlock scenario is more complex than lockdep can handle,
+he concluded, DEPT should be used instead.
+<p>
+I could not resist asking why DEPT is not upstream after 16 revisions and
+more than three years (the <a
+href="/ml/all/1645095472-26530-1-git-send-email-byungchul.park@lge.com/">first
+version</a> was posted in February 2022).  Park answered that the real
+source of resistance is the number of false positives.  Lockdep is just a
+lot quieter.
+<p>
+Another attendee said that, since DEPT is a build-time option, it is hard
+to use with problems that affect production systems in the field; he
+suggested that perhaps an approach using BPF would be useful.  Park agreed,
+but seemed to not have considered the BPF option until now; he said that he
+would look into it.
+<p>
+Finally, another audience member said that he did not think that the
+false-positive problem should block the merging of this code; he asked what
+the <i>real</i> problem is.  Park did not answer that question, but
+declared that he would keep working on the code until he manages to get it
+upstream.
+<p>
+After the talk, with beer in hand, I asked a core-kernel developer about
+why DEPT has run into resistance.  The answer was indeed false positives;
+the tool generates so many reports that it is difficult to get a real
+signal out of the noise.  The root of the problem, they said, was that Park
+is attempting to replace lockdep all at once with a large patch set.
+Something like DEPT could be useful and welcome, but it would need to go
+upstream as a set of smaller changes that evolve lockdep into something
+with DEPT's view of dependencies, making the kernel better with every step.
+Until that approach is taken, attempts to merge DEPT into the mainline are
+unlikely to be successful.
+<p>
+
+<a
+href="https://static.sched.com/hosted_files/osseu2025/62/DEPT_introduction_0716.pdf">The
+slides from Park's talk</a> are available for interested readers.
+<p>
+
+[Thanks to the Linux Foundation, LWN's travel sponsor, for supporting my
+travel to this event.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Open Source Summit Europe/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1036222/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1036811"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2025 17:53 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1036811/">Link</a>] (15 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036811" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Something like DEPT could be useful and welcome, but it would need to go upstream as a set of smaller changes that evolve lockdep into something with DEPT's view of dependencies</span><br>
+<p>
+It's shockingly common for open source projects to miss innovations that help both developers and users just because the people who do the innovative work are so energetic, excited, and industrious and tend to express their works all at once in the form of large, cohesive patches.<br>
+<p>
+Some days, I think Linux and other mature projects would reject a patch that at once cured cancer and made fusion power practical all at once if it came in the form of a patch more than 50 lines long.<br>
+<p>
+It's not a good use of that brilliant and energetic person's time to slice and dice an opus of a work into a thousand tiny steps, especially when everyone knows that the intermediate steps will never see any use and exist only to satisfy a Process.<br>
+<p>
+Once a project would rather not innovate than innovate in large-ish chunks, it's dead. It's in maintenance mode.  It's no longer about improving the world, but consolidating improvements already made.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036811/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036823"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2025 19:35 UTC (Thu)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1036823/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036823" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're missing that large changes have a large chance of problems. I dare say the folio project is one of the most ambitious changes made to the kernel in the last ten years. If I'd waited for it to be "done" before submitting it, it (a) would not be done yet and (b) would never be merged.<br>
+<p>
+Instead, I have roughly 2000 patches over the last five years slowly converting us to folios. Almost every patch results in a mild improvement. Some of those patches contain bugs! Because each one is so small, it's been relatively easy to track those bugs down and fix them.<br>
+<p>
+I haven't looked at DEPT in detail. Maybe it's not possible to transform lockdep into DEPT one small patch at a time. But it'd be awfully fun for somebody to give it a try.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036823/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2025 20:21 UTC (Thu)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1036826/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036826" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; You're missing that large changes have a large chance of problems. I dare say the folio project is one of the most ambitious changes made to the kernel in the last ten years. If I'd waited for it to be "done" before submitting it, it (a) would not be done yet and (b) would never be merged.</span><br>
+<p>
+Folios are not an innovation. It is literally *refactoring* — a purely internal, housekeeping work, cleaning up some APIs by introducing some new types. It may be "one of the most ambitious changes made to the kernel," but it's purely due to how invasive it is, and not because it's some kind of a notable invention.<br>
+<p>
+Of course, it makes sense for a *refactoring* to be made slowly and in pieces. That's an entirely different weight category from the subject of the present discussion (and the article).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036829"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2025 21:35 UTC (Thu)
+                               by <b>acarno</b> (subscriber, #123476)
+                              [<a href="/Articles/1036829/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="acarno" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036829" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think dismissing folios as mere refactoring does a disservice to the amount of careful design work needed to achieve the benefits that folios bring. But that's a matter of opinion, so I'll leave it at that...<br>
+<p>
+From the link in the article, the DEPT diff stat shows 6500 lines of changes to 69 files; only 13 of those are new. I'm not a kernel developer, but it seems entirely reasonable to ask that the other 56 files worth of changes be merged in a few commits at a time. I can't speak for anyone else, but I certainly wouldn't want to review 6500 lines in a single PR, even if carefully split across 42 commits; that's just unmanageable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036829/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2025 23:22 UTC (Thu)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1036833/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036833" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  I think dismissing folios as mere refactoring does a disservice to the amount of careful design work needed to achieve the benefits that folios bring. But that's a matter of opinion, so I'll leave it at that...</span><br>
+<p>
+No disregard was intended to the vast amount and high quality of the design and engineering work that went into the folios conversion or the follow-up projects.<br>
+<p>
+However, all of that is unrelated to the point I was making, which is that the folios were neither an innovation (the concept of a folio, with all the accompanying engineering effort, serves no purpose outside of specific particulars of Linux kernel design) nor a self-contained work, which is why comparing them to DEPT (or any other "innovations" the OP was talking about) is arguably incorrect.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 4:11 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1036846/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036846" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; However, all of that is unrelated to the point I was making, which is that the folios were neither an innovation (the concept of a folio, with all the accompanying engineering effort</span><br>
+<p>
+Not much stuff is truly innovative, but after the folio conversion, Linux will be the first "large" OS to gain true flexible memory units as a kernel-level primitive.<br>
+<p>
+Windows NT uses a page frame database with "prototype" entries for shared pages, it does support large pages, but not automatic splitting/merging in filesystems. Darwin also uses fixed pages.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1036933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 23:59 UTC (Fri)
+                               by <b>SLi</b> (subscriber, #53131)
+                              [<a href="/Articles/1036933/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="SLi" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036933" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Do you think there's a guarantee that all clearly merge-worthy work _can_ be done in small incremental changes?<br>
+<p>
+Now, I think one would do really well to at least demand exceptionally good reasoning for why something couldn't, and that is not just "it's too much work"—getting things upstreamed into Linux is hard work, often for a good reason, that you sign up for if you try.<br>
+<p>
+I guess there are some mechanisms that try to alleviate the problem somewhat: The more isolated and optional a change is, the less scrutiny even a larger PR tends to get.<br>
+<p>
+But, in general, I think "it must be done in small pieces" is often taken as a gospel without asking if that's in general possible. And maybe it is, maybe it isn't... (although opening this door would also have more developers arguing why their code is so special)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2025 1:56 UTC (Sat)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1036935/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036935" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think there are some cases where something is tightly coupled with itself and loosely coupled with the existing kernel, and no part of the new code makes sense (or compiles) without much of the rest of the new code. For something like that, you'd want a big explanation, then a big chunk of code in its own new directory, then small incremental changes to the existing kernel code.<br>
+<p>
+Then a reviewer can look at patch 3 to see (e.g.) adding tracking to the first type of kernel lock, then look at patch 1 to see why the added code makes sense, then look at patch 2 to see what the added code is actually doing, and that provides a starting point to understand the purpose of the new engine and consider whether its implementation makes sense. It also allows for reviews that assume the new subsystem works as described and review the small incremental changes to the existing kernel to use it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1038096"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2025 12:39 UTC (Mon)
+                               by <b>maxbyungchulpark</b> (guest, #179345)
+                              [<a href="/Articles/1038096/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="maxbyungchulpark" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1038096" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As you know, there was an attempt to incrementally improve the existing lockdep through the cross-release (see <a href="https://lwn.net/Articles/709849/">https://lwn.net/Articles/709849/</a> and <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=b09be676e0ff25bd6d2e7637e26d349f9109ad75">https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/...</a>). However, this effort was quickly reverted due to the generation of false positives. It's important to note that lockdep ceases reporting after the first instance, regardless of whether it is a false positive or a genuine issue.<br>
+<p>
+From my experience, I can say it's nearly impossible to achieve meaningful progress based on lockdep, as expanding its coverage tends to result in an increase in false positives, thus diminishing its usefulness.<br>
+<p>
+In summary, our available options are as follows:<br>
+1) Incrementally improve the existing lockdep, following the approach by cross-release,<br>
+2) Completely transform it into a new tool in one step, or<br>
+3) Enable the development of a separate tool that can be improved independently.<br>
+<p>
+I explained why we should not go for 1). 2) is too risky - it's no way to replace the mature tool with a unverified tool for sure - thus we shouldn't take 2). The best option we must take is 3). I'm trying to achieve 3) with DEPT. Thoughts?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038096/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1037013"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2025 2:28 UTC (Sun)
+                               by <b>ssmith32</b> (subscriber, #72404)
+                              [<a href="/Articles/1037013/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ssmith32" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037013" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;It's not a good use of that brilliant and energetic person's time to slice and dice an opus of a work</span><br>
+<p>
+The idea that iterative software development is to be preferred over the big bang approach is certainly not limited to open source. It's rather wide spread throughout every domain of software development, and has spread out to other areas (e.g. military, aerospace, etc).<br>
+<p>
+If you thing DEPT is an opus of a brilliant mind, it pales in comparison to what's been developed iteratively in other areas.<br>
+<p>
+Heck, _actual_ opuses are often developed iteratively...<br>
+<p>
+<a href="https://en.m.wikipedia.org/wiki/Symphony_No._9_">https://en.m.wikipedia.org/wiki/Symphony_No._9_</a>(Beethoven)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037013/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1037085"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 8:37 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1037085/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037085" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is a big difference between developing something iteratively and finding an iterative path from some existing thing you didn't write to some other existing thing you did write. The latter seems like much more of a waste of time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037085/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1037090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 9:29 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1037090/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037090" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The latter would give people confidence that you actually understood the former and the needs that it was meeting, and hence confidence that your replacement at least met those same needs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1037092"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 9:46 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1037092/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037092" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The idea that iterative software development is to be preferred over the big bang approach is certainly not limited to open source. It's rather wide spread throughout every domain of software development, and has spread out to other areas (e.g. military, aerospace, etc).</span><br>
+<p>
+My biggest criticism of iterative software (and it's a criticism of how it's usually done, not the iteration itself) is that all too often, it leads to buggy software with missing functionality - "here's a problem, let's fix it".<br>
+<p>
+If you work together with a strict exhaustive spec [1] yes, it'll slow down the speed of iteration, but there'll be far fewer bugs for the next iteration.<br>
+<p>
+[1] "ten minutes spent preparing saves an hour debugging". And by "in conjunction with the spec" I don't mean you need a spec for the entire program, just the bit you're working on. I've moaned about this many times, usually in conjunction with things like file save, where a 2x2 matrix presents the user with three options - "yes this time", "yes always", "no this time". Where's "no always"? This manifests itself very much with software nowadays where you are nagged with the options "now" or "later". Very conspicuous by its absence is "bugger off and don't come back !!!" (Okay, I understand that's because they think "a fool and his money are soon parted", but it's quite obvious they consider you are a fool for wanting to use their software ...)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037092/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1037106"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 13:25 UTC (Mon)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1037106/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037106" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; like file save, where a 2x2 matrix presents the user with three options - "yes this time", "yes always", "no this time". Where's "no always"?</span><br>
+<p>
+My favorite has been on some Android permission dialogs, there was Allow/Disallow and a separate checkbox for "Don't ask again". Great! However, the wise guys decided that if the "Don't ask again" checkbox was checked…the Disallow button should be disabled. Thanks, but no thanks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037106/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1037160"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 15:08 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1037160/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037160" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My worst was - gentoo of all things - "automount /boot when building the kernel".<br>
+<p>
+Obviously you can have or not have a /boot. By default it can be mounted or not mounted. When building a kernel I would have thought all three possible options (obviously automount a non-existent /boot doesn't make sense) were reasonable choices, but if you selected "don't automount the /boot partition" it just aborted the kernel build. ???? So the only options that worked were no separate boot, or automount. So what on earth was the point of asking ????<br>
+<p>
+(I didn't want kernel build trampling over my multi-boot /boot! The consequences typically were the system crashing into the systemd recovery shell on reboot!)<br>
+<p>
+I can't remember what the workarounds suggested were, but they basically boiled down to "don't update /boot in any way shape or form", which isn't a workaround, or made the build crash with "can't find path" (for an option which allegedly didn't affect the build itself in any way). So the whole thing was buggy as hell, but nobody could see the (non)sense of it all.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037160/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1038100"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Large changes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2025 13:31 UTC (Mon)
+                               by <b>maxbyungchulpark</b> (guest, #179345)
+                              [<a href="/Articles/1038100/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="maxbyungchulpark" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1038100" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+DEPT should be enhanced through iterative software development. While the concept of DEPT is headed in the right direction, the implementation could be improved. I hope it's not misled.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038100/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1036835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 0:59 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1036835/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036835" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I've long hoped that lockdep would gain a solution to custom locks such as folio_wait_bit_common(), but not yet. </span><br>
+<p>
+Isn't this just an SMC??<br>
+<p>
+spin_lock, mutex_lock, etc are also "custom locks" in that someone had to write the code.  And they had to make the relevant lockdep calls so that lockdep could see the locks.  What is stopping someone doing the same for folio_wait_bit_common()???<br>
+<p>
+Each lock requires a 'struct lockdep_map' and adding those for bit-locks is slightly more clumsy than for locks that are represented by a struct.  But it is far from impossible.  rhashtable uses bitlocks for each buckets and has lockdep monitoring.<br>
+<p>
+folio_wait_bit_common only ever waits for PG_locked, PG_private_2, or PG_writeback.  So we just need 3 lockdep_maps.<br>
+<p>
+And that is where we hit the problem. the lock bits are in 'struct folio' and making that bigger, even for debug-only kernels, isn't going to fly.<br>
+<p>
+So the solution we need isn't for "custom locks" but for "space constrained" locks.<br>
+<p>
+For rhashtables we use one lockdep_map for each "bucket_table" which covers multiple buckets and so multiple locks.  On reflection we probably could simply use a single global lockdep_map.  For most locks that don't nest I don't think the lockdep_map contains anything that isn't in the global lock_class.  I wonder if the folio locks nest.  I wonder how much it matters.  I'm guess the nesting-related info in lockdep_map is more for performance than functionality (the word 'cache' gives it away).  We might need to be able to disable LOCK_STAT for locks with a shared lockdep_map....<br>
+<p>
+Of course this would be much easier to reason about if there were good documentation for lockdep (lockdep-design.rst contains lots of detail but doesn't mention lockdep_map explicitly) .... but we've got the code which should be enough.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036840"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 1:28 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1036840/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036840" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The reason this doesn't work for folio locks is the same reason there's no support for semaphores in lockdep: lockdep is built around the concept of ownership.<br>
+<p>
+Mutexes have to be released by their owner. Semaphores and the folio lock can be (and are) unlocked by other tasks and even interrupt context.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036840/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036843"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 1:48 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1036843/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036843" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interesting and useful - thanks.<br>
+<p>
+Surely it would be possible to transfer ownership.  At some point a process that locked a folio will "release" it (e.g. submit for writeback) and which point is can disavow the lock (i.e. tell lockdep it is no longer locked, without actually unlocking).  At some other point some other process (or irq handler) will become responsible for the locked folio and so it can adopt the lock (i.e. tell lockdep that it just successfully locked the lock).<br>
+<p>
+Maybe that wouldn't be quite such a "simple" matter of coding, but I imagine it would create valuable documentation of control flow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036843/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 2:01 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1036844/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036844" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've considered things like that before. It never seems to work out quite right. I wouldn't have a "release lockdep without releasing the lock" though. I'd want an API that says "context FOO is now responsible for unlocking". That would also support XFS using a work queue to unlock a lock. It'd also allow lockdep to track actual deadlocks like something that prevents FOO from running.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036937"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2025 4:30 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1036937/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036937" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  I wouldn't have a "release lockdep without releasing the lock" though. I'd want an API that says "context FOO is now responsible for unlocking". </span><br>
+<p>
+While I can see the value of being completely explicit about a chain of ownership, I can also see that it add substantial complexity.  The other contexts, which aren't processes, are not yet well defined.  Some might be queues, but there are likely other possibilities.  Then the mechanism which realises the handover from the queue to some other process might need to wait for a thread (as you suggested) or might need to wait for memory (for a new thread to be allocated) or maybe other things.<br>
+Getting that all well understood would be useful, but not trivial.<br>
+<p>
+<span class="QuotedText">&gt;  It never seems to work out quite right. </span><br>
+<p>
+could that be because you aimed too high as discussed above?  As has been mentioned in other comments, an incremental approach might be more likely to succeed.<br>
+<p>
+Yes, I know, I should propose a patch....<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036937/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1036950"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2025 10:48 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1036950/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1036950" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you remember, lockdep comes from the RT patchset. They really want locks to have owners so they can priority boost the owner when a higher priority task blocks on it.<br>
+<p>
+Now, if the folio is locked because of I/I, there's obviously no owner. You just have to wait for the storage. So that's fine. But if a work queue owns the lock, that should be boostable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036950/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1037078"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 4:54 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1037078/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037078" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+????<br>
+I don't think lockdep is at all related to boosting lock owners.<br>
+If CONFIG_PROVE_LOCKING isn't set, lockdep doesn't track lock owners (or do anything).<br>
+And if it is set, then lots of data structures are significantly bigger so it isn't something you'd do in production.<br>
+And lock owner boosting that doesn't work in production seems pointless.<br>
+<p>
+But maybe I misunderstood....<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037078/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1037096"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2025 10:32 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1037096/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1037096" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The relationship between lockdep and boosting lock owners is indirect, not direct; they both need clarity around lock ownership to work well, but they're not tied together in code.
+<p>In effect, lockdep is "we will need lock ownership to be clear out for the RT patchset to do lock boosting - let's do something useful for mainline so that mainline cares about lock ownership, not just RT".
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1037096/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1038283"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simple Matter of Coding??</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2025 7:50 UTC (Tue)
+                               by <b>maxbyungchulpark</b> (guest, #179345)
+                              [<a href="/Articles/1038283/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="maxbyungchulpark" />
+                <input type="hidden" name="return" value="/Articles/1036222/#CommAnchor1038283" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's exactly what cross-release feature was working for, about 10 years ago. (see <a href="https://lwn.net/Articles/709849/">https://lwn.net/Articles/709849/</a> and <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/">https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/</a>...)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1038283/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,146 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Anatomy of a kernel vulnerability [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Anatomy of a kernel vulnerability">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Linux kernel has seen a great deal of code auditing work.  Even so, longstanding security i [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/114990/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Anatomy of a kernel vulnerability</h1>
+<div class="Byline">[Posted December 15, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+The Linux kernel has seen a great deal of code auditing work.  Even so,
+longstanding security issues turn up regularly.  Consider, for example, the
+<a href="/Articles/115584/"><tt>__scm_send()</tt> vulnerability</a> recently
+disclosed by Paul Starzetz.  This problem, present in the 2.6.9 kernel,
+is also present in 2.4; it has been there for some years.
+<p>
+
+This particular vulnerability hits the kernel socket API.  Messages sent
+with the <tt>sendmsg()</tt> system call can have, embedded within them,
+control messages which can be used to transfer certain access rights to the
+recipient of the message.  The control message header is defined as:
+<p>
+
+<pre>
+struct cmsghdr {
+	__kernel_size_t	cmsg_len;	/* data byte count, including hdr */
+        int		cmsg_level;	/* originating protocol */
+        int		cmsg_type;	/* protocol-specific type */
+};
+</pre>
+<p>
+
+These control messages are passed to <tt>__scm_send()</tt> for checking.
+One of the first things done with each control message is to look at the
+length of the message; the 2.6.9 code which performs this check looks like
+this:
+<p>
+<pre>
+if (cmsg-&gt;cmsg_len &lt; sizeof(struct cmsghdr) ||
+    (unsigned long)(((char*)cmsg - (char*)msg-&gt;msg_control)
+		    + cmsg-&gt;cmsg_len) &gt; msg-&gt;msg_controllen)
+	goto error;
+</pre>
+<p>
+The programmer who wrote this code probably thought that all the bases were
+covered; the control message length was verified to be at least the minimum
+necessary, but not so large as to overflow the space allocated for control
+messages in the structure read in from kernel space.  
+<p>
+
+The problem is that the <tt>cmsg_len</tt> field is of type
+<tt>__kernel_size_t</tt>, which is an unsigned integer type.  If a very
+large value is stored in <tt>cmsg_len</tt>, it will cause an overflow in
+this calculation:
+<p>
+<pre>
+	((char*)cmsg - (char*)msg-&gt;msg_control) + cmsg-&gt;cmsg_len)
+</pre>
+<p>
+When this overflow occurs, the resulting sum can be a small number, so
+<tt>cmsg_len</tt> does not appear 
+to be overly large to this particular test.  At a later point, however,
+that length will be added to a pointer into the list of control
+messages.  Once again, the addition will cause an integer overflow, with
+the result that the pointer moves backward.
+<p>
+
+The exploit created by Mr. Starzetz works by creating a message with two
+embedded control messages.  The second one sets <tt>cmsg_len</tt> to
+<tt>-12</tt>.  That length gets translated to a very large unsigned number
+(<tt>0xfffffff4</tt> on 32-bit systems); it happens to be just the right value to bump the
+pointer in <tt>__scm_send()</tt> backward in the list, where it encounters
+the same control message structure again.  An infinite loops results.
+<p>
+
+Interestingly, this particular vulnerability seems to have been found
+by another researcher at about the same time.  <a
+href="/Articles/115726/">The fix</a> was merged on
+December&nbsp;8; the identification of the bug is credited to Georgi
+Guninski.  It is, in any case, fixed, at least for 2.6.10.  Some
+distributors have already made updated kernels available.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Vulnerabilities</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/115720/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

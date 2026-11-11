@@ -1,0 +1,237 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Realtime adaptive locks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Realtime adaptive locks">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The realtime patchset has one overriding goal: provide deterministic response times in all situ [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/271243/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Realtime adaptive locks</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 5, 2008</br>
+           </div>
+The realtime patchset has one overriding goal: provide deterministic
+response times in all situations.  To that end, much work has been done to
+eliminate places in the kernel which can be the source of excessive
+latencies; quite a bit of that work has been merged into the mainline over
+the last two years or so.  One of the biggest remaining out-of-tree
+components is the sleeping spinlock code.  Sleeping spinlocks have
+advantages and disadvantages.  A recently posted set of patches has the
+potential to significantly reduce one of the biggest disadvantages of the
+realtime spinlock code.
+<p>
+
+Mainline spinlocks work by repeatedly polling a lock variable until it
+becomes available.  This busy-waiting code thus "spins" while waiting for a
+lock.  Spinlocks are quite fast, but they can also be a source of
+significant latencies: a processor which is holding a lock can delay others
+for indefinite amounts of time.  In the mainline kernel, it is also not
+possible to preempt a thread which holds a spinlock - another source of
+latencies.  (See <a href="http://lwn.net/Articles/267968/">this article</a>
+for a more detailed description of the mainline spinlock implementation).
+<p>
+
+The realtime patch set addresses this problem in a couple of ways.  One of
+those is to cause threads waiting for a contended lock to sleep rather than
+spin.  As a result, lock contention cannot create latencies on processors
+which are not holding the lock.  When spinning is removed, it is also
+possible to make code preemptible even when it holds a lock without causing
+deadlock problems.  That allows a high-priority process to run regardless
+of any lower-priority processes which might currently hold locks on the
+current CPU.  Finally, the realtime patch set has added priority awareness
+and priority inheritance to the locking code to ensure that the
+highest-priority process is always able to run.
+<p>
+
+This is all good stuff, but there is one little disadvantage: the extra
+overhead imposed by the more complicated locks can reduce system throughput
+considerably.  This is a cost that the realtime developers have been
+willing to pay; it is often necessary to make trade-offs between throughput
+and latency.  Recently, though, some developers at Novell have come to the
+conclusion that the throughput cost of the realtime patch set need not be
+as severe as it currently is; the resulting <a
+href="http://lwn.net/Articles/270778/">adaptive realtime locks patch</a>
+brings the throughput of the realtime kernel to a level much closer to that
+found in the mainline - at least, for some workloads.
+<p>
+
+The core observation encapsulated in this patch set is that hold times for
+spinlocks tend to be quite short, especially in the realtime kernel.  So
+the cost of putting a waiting thread to sleep may well exceed the cost of
+simply busy-waiting until the lock becomes free.  So adaptive locks behave
+more like their mainline counterpart and simply spin until the lock becomes
+available.  There are some twists, though, which are necessitated by the
+realtime system:
+<p>
+<ul>
+<li> The spinning cannot go on forever, since it may cause unacceptable 
+     latencies elsewhere in the system.  So an adaptive lock will only spin
+     up to a configurable number of times (the default is 10,000) before
+     giving up and going to sleep.
+<p>
+<li> Since lock holders are preemptible in the realtime kernel, it is
+     possible that the thread which currently holds the lock was previously
+     running on the same CPU as the process trying to acquire the lock.  In
+     that situation, spinning for the lock is 
+     clearly a bad thing to do.  In the absence of a loop counter, it would
+     be a hard deadlock situation; with the counter, it would just be an
+     unnecessary delay.  Either way, the result is undesirable, so, if the
+     lock owner is running on the same 
+     processor, the thread waiting for the lock simply goes to sleep.
+<p>
+<li> If the lock owner is, instead, itself sleeping while waiting for something,
+     there is little point in having another thread stay awake in the hope
+     that the owner will release the lock soon.  So, in this case too, a thread
+     contending for a lock will simply go to sleep rather than spin.
+</ul>
+<p>
+One other throughput improvement is obtained by changing the lock-stealing
+code.  Locks in the realtime system are normally fair, in that threads
+waiting for a lock will get it in first-come-first-served order.  A
+higher-priority process will jump the queue, however, and "steal" the lock
+from lower-priority processes which have been waiting for longer.  The
+adaptive locks patch tweaks this algorithm by allowing a running process to
+steal a lock from another, equal-priority process which is sleeping.  This
+change adds some unfairness to the locking code, but it allows the system
+to avoid a context switch and keep a running, cache-warm process going.
+<p>
+<a href="ftp://ftp.novell.com/dev/ghaskins/adaptive-locks.pdf">Some
+benchmark results [PDF]</a> have been posted.  On the test system, the
+dbench benchmark runs at about 1500&nbsp;MB/s on a stock 2.6.24 system, but
+at just under 170&nbsp;MB/s on a system with the realtime patches applied.
+The adaptive lock patch raises that number back to over 700&nbsp;MB/s -
+still far from a mainline system, but much better than before.  The
+improvement in hackbench results is even better, while the change in the
+all-important "build the kernel" benchmark is small (but still positive).
+A fundamental patch like this will require quite a bit of review and
+testing before it might be accepted.  But the initial results suggest that
+adaptive locks might be a big win for the realtime patch set.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Realtime</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Spinlocks</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/271817/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor271905"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Realtime adaptive locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2008 3:44 UTC (Thu)
+                               by <b>cventers</b> (guest, #31465)
+                              [<a href="/Articles/271905/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cventers" />
+                <input type="hidden" name="return" value="/Articles/271817/#CommAnchor271905" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+How does the loop counter interact with cpu_relax() - wouldn't that 
+introduce some variability in how the loop counter translates into time 
+spent spinning?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/271905/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor273177"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">well, innovation too to me</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2008 10:27 UTC (Thu)
+                               by <b>gvy</b> (guest, #11981)
+                              [<a href="/Articles/273177/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gvy" />
+                <input type="hidden" name="return" value="/Articles/271817/#CommAnchor273177" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Now who'd still talk on "no innovation happening outta there"?  I've recognized at least one
+formal invention theory principle upfront in the adaptive lock idea :)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/273177/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

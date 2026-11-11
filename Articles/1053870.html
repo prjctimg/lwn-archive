@@ -1,0 +1,251 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Removing a pointer dereference from slab allocations [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Removing a pointer dereference from slab allocations">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Al Viro does not often stray outside of the core virtual filesystem area; when he does, it is u [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1054412/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Removing a pointer dereference from slab allocations</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 15, 2026</br>
+           </div>
+Al Viro does not often stray outside of the core virtual filesystem area;
+when he does, it is usually worthy of note.  Recently, he wandered into
+memory management with <a
+href="/ml/all/20260110040217.1927971-1-viro@zeniv.linux.org.uk">this patch
+series</a> to the slab allocator and some of its users.  Kernel developers
+will often put considerable effort into small optimizations, but it is
+still interesting to look at just how much effort has gone toward the purpose of
+avoiding a single pointer dereference in some memory-allocation hot paths.
+<p>
+<h4>The slab cache</h4>
+<p>
+The kernel's <a
+href="https://docs.kernel.org/core-api/mm-api.html#the-slab-cache">slab
+allocator</a> exists to provide quick allocations of fixed-sized objects.
+For example, the kernel uses large numbers of <a
+href="https://elixir.bootlin.com/linux/v6.18.4/source/include/linux/dcache.h#L92"><tt>dentry</tt></a>
+structures to cache information about file names; on the system where this
+is being written, there are currently over 800,000 active <tt>dentry</tt>
+structures, as reported by <tt>/proc/slabinfo</tt>.  Requests to allocate
+and free these structures are frequent, so their performance matters.
+<p>
+The slab allocator provides a function, <a
+href="https://docs.kernel.org/core-api/mm-api.html#c.kmem_cache_create"><tt>kmem_cache_create()</tt></a>,
+that returns a pointer to a newly allocated and initialized
+<tt>kmem_cache</tt> structure.  This pointer, in turn, can be used (by
+calling <a
+href="https://docs.kernel.org/core-api/mm-api.html#c.kmem_cache_alloc"><tt>kmem_cache_alloc()</tt></a>),
+to allocate a new object of the size that this particular cache was
+configured for.  The virtual filesystem layer, for example, can use a slab
+cache to allocate <tt>dentry</tt> structures.  The slab allocator will
+maintain a cache of available structures, handing them out on request; it
+will also make an effort to lay
+them out optimally in pages of memory obtained from the page allocator.
+Even simple operations in the kernel may involve allocating and freeing a
+number of objects, so considerable effort has gone into optimizing the slab
+allocator over time.
+<p>
+While slab caches can be created and destroyed dynamically, there are a
+number of them that exist for the life of the system.  The cache for
+<tt>dentry</tt> structures, for example, is created during the system
+bootstrap process, and the <tt>struct kmem_cache</tt> pointer for this
+cache is stored (as <tt>dentry_cache</tt>) in memory that is made
+read-only once the bootstrap is complete.  Code that needs to allocate or
+free a <tt>dentry</tt> structure will, once compiled, contain the address of
+<tt>dentry_cache</tt>, which can be used to fetch the pointer to the
+<tt>kmem_cache</tt> structure that must be passed to the slab allocator.
+Most of the time, this extra dereference will be a small cost relative to
+the cost of allocating a new object but, according to Viro, it does have a
+measurable effect for heavily used caches.
+<p>
+Optimizing out that dereference thus has some appeal, and it should be
+possible.  The value of the <tt>dentry_cache</tt> pointer is constant; once
+it has been set, it will not change for the life of the system.  All that
+is needed is to replace the address of <tt>dentry_cache</tt>, in every
+place in the kernel binary where it appears, with the address of the
+<tt>kmem_cache</tt> structure that is stored there.
+<p>
+<h4>Run-time constants</h4>
+<p>
+The above description of how the dentry cache slab is accessed is not, as
+it turns out, fully accurate for current kernels.  If one looks in <a
+href="https://elixir.bootlin.com/linux/v6.19-rc4/source/fs/dcache.c#L89"><tt>fs/dcache.c</tt></a>
+in a 6.19-rc kernel, one will see that the slab pointer is declared as:
+<p>
+<pre>
+    static struct kmem_cache *__dentry_cache __ro_after_init;
+    #define dentry_cache runtime_const_ptr(__dentry_cache)
+</pre>
+<p>
+The pointer to the slab cache used for <tt>dentry</tt> structures is
+actually stored in a variable called <tt>__dentry_cache</tt>; the unadorned
+<tt>dentry_cache</tt> name is created by the <tt>#define</tt> in the second
+line.  This declaration sequence demonstrates the "run-time constant"
+mechanism that was added to the 6.11 kernel by Linus Torvalds.  He never
+quite got around to documenting this new feature — surely it must be near
+the top of his "to-do" list at this point — so one has to reverse engineer
+it.  In short, run-time constants do what was described above: they patch
+an address directly into the code, at run time, so that a dereference
+operation can be avoided.
+<p>
+To set up a pointer as a run-time constant, the first step is to declare it
+using the <tt>runtime_const_ptr()</tt> macro as seen above.  That macro
+returns a value that, using <tt>#define</tt>, is bound to the name that the
+rest of the code uses for the pointer (<tt>dentry_cache</tt>, without
+underscores, in this case).  There are other macros used to set the value
+of a run-time constant; for the <tt>dentry</tt> slab, the constant is set, in <a
+href="https://elixir.bootlin.com/linux/v6.19-rc4/source/fs/dcache.c#L3261"><tt>dcache_init()</tt></a>,
+using <tt>runtime_const_init()</tt>:
+<p>
+<pre>
+    __dentry_cache = KMEM_CACHE_USERCOPY(dentry,
+	    SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|SLAB_ACCOUNT,
+	    d_shortname.string);
+    runtime_const_init(ptr, __dentry_cache);
+</pre>
+<p>
+The <tt>kmem_cache</tt> is allocated with <a
+href="https://elixir.bootlin.com/linux/v6.18.4/source/include/linux/slab.h#L484"><tt>KMEM_CACHE_USERCOPY()</tt></a>,
+which is a macro wrapping <tt>kmem_cache_create()</tt>; the resulting
+pointer is then used to set the value of the run-time constant. This
+initialization will cause any instruction in the kernel code that
+references <tt>dentry_cache</tt> to contain the <tt>kmem_cache</tt> pointer
+instead.  So the extra dereference is eliminated; this was the motivation
+for the addition of the run-time constant machinery in the first place.
+<p>
+So it might appear that the problem is already solved, but there are a
+couple of ways in which this solution falls short.  The first is that not
+all architectures support run-time constants, though it seems that the most
+important architectures do.  But this mechanism only works during the
+system bootstrap process; once the system is fully booted, it is no longer
+possible to modify the kernel text to reflect the actual value of a
+run-time constant.  That, in turn, means that run-time constants cannot be
+used in loadable modules.
+<p>
+<h4>Static <tt>kmem_cache</tt> structures</h4>
+<p>
+Rather than try to fix run-time constants to address those problems, Viro
+decided to focus on the slab problem specifically.  It is easy enough to
+have kernel code contain a pointer to the <tt>kmem_cache</tt> structure it
+needs to use, without the need for run-time code patching, if that
+structure is allocated statically on the caller's side.  The address of
+that structure becomes a compile-time constant.  Even loadable
+modules would be able to use such a feature, at least for slabs allocated
+and managed within the module itself.
+<p>
+One small obstacle that needs to be overcome is that the definition of
+<tt>struct kmem_cache</tt> is hidden from code outside of the slab
+allocator itself, and for good reasons.  That will make it hard to declare
+those structures elsewhere in the kernel.  The key to the solution is the
+realization that this code really only needs to allocate some memory that
+is large enough to hold a <tt>kmem_cache</tt> structure.  So Viro's patch
+set introduces a new type, <tt>struct kmem_cache_opaque</tt>, that is
+defined in such a way that it is the same size as <tt>struct
+kmem_cache</tt>, but which does not reveal any of the details of that
+structure.  There is a new macro, <tt>to_kmem_cache()</tt>, that will cast a
+pointer to the opaque form of the structure to the regular type expected by
+the slab subsystem.
+<p>
+With these changes, the declaration of <tt>dentry_cache</tt> becomes:
+<p>
+<pre>
+    static struct kmem_cache_opaque __dentry_cache;
+    #define dentry_cache to_kmem_cache(&amp;__dentry_cache)
+</pre>
+<p>
+A few other changes are needed to convert a subsystem over to a static
+<tt>kmem_cache</tt> structure.  The usual call to
+<tt>kmem_cache_create()</tt> becomes, instead, a call to
+<tt>kmem_cache_setup()</tt> with the same parameters.  (In the dentry
+cache, the more specialized <tt>KMEM_CACHE_USERCOPY()</tt> macro becomes
+<tt>KMEM_CACHE_SETUP_USERCOPY()</tt>).  Otherwise, code that allocates and
+frees objects works without change.
+<p>
+Making this feature work in modules required a bit more plumbing to ensure
+that the cleanup of statically allocated slab caches is completed before
+the module that created those caches is removed.  Within the slab allocator
+itself, the main change was to make note of preallocated <tt>kmem_slab</tt>
+structures so that the slab code does not try to allocate or free them
+itself.  Statically allocated slab caches also cannot be merged with any
+others.
+<p>
+The patch series converts a fair number of caches in the core kernel and
+filesystem subsystems to the static variant.  There are no benchmark
+results showing how much of a performance improvement ensues.  Torvalds <a
+href="/ml/all/CAHk-=wiibHkNcsvsVpQLCMNJOh-dxEXNqXUxfQ63CTqX5w04Pg@mail.gmail.com">was
+happy</a> with the patch set, calling it "<q>much better than runtime_const
+for these things</q>".  Thus far, there have not been many comments from
+the memory-management developers.  Assuming they have no complaints, the
+path for this work into the mainline looks relatively smooth.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Slab allocators</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Run-time constants</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1053870/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

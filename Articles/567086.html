@@ -1,0 +1,314 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Copy offloading with splice() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Copy offloading with splice()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the most common things to do on a computer is to copy a file, but operating systems have [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/566522/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Copy offloading with splice()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 18, 2013</br>
+           </div>
+One of the most common things to do on a computer is to copy a file, but
+operating systems have traditionally offered little in the way of
+mechanisms to accelerate that task.  The <tt>cp</tt> program can replicate
+a filesystem hierarchy using links — most useful for somebody wanting to
+work with multiple kernel trees — but that trick speeds things up by not
+actually making copies of the data; the linked files cannot be modified
+independently of each other.  When it is necessary to make an
+independent copy of a file, there is little alternative to reading the
+whole thing through the page cache and writing it back out.  It often seems
+like there should be a better way, and indeed, there might just be.
+<p>
+Contemporary systems often have storage mechanisms that could speed copy
+operations.  Consider a filesystem mounted over the network using a
+protocol like NFS, for example; if a file is to be copied to another
+location on the same server, doing the copy on the server would avoid a lot
+of work on the client and a fair amount of network traffic as well.
+Storage arrays often operate at the file 
+level and can offload copy operations in a similar way.  Filesystems like
+Btrfs can "copy" a file by sharing a single copy of the data between the
+original and the copy; since that sharing is done in a copy-on-write mode,
+there is no way for user space to know that the two files are not
+completely independent.  In each of these cases, all that is needed is a
+way for the kernel to support this kind of accelerated copy operation.
+<p>
+Zach Brown has recently posted <a href="/Articles/566263/">a patch</a>
+showing how such a mechanism could be added to the <tt>splice()</tt> system
+call.  This system call looks like:
+<p>
+<pre>
+    ssize_t splice(int fd_in, loff_t *off_in, int fd_out, loff_t *off_out,
+    		   size_t len, unsigned int flags);
+</pre>
+<p>
+Its job is to copy <tt>len</tt> bytes from the open file represented by
+<tt>fd_in</tt> to 
+<tt>fd_out</tt>, starting at the given offsets for each.  One of the key
+restrictions, though, is that one of the two file descriptors must be a
+pipe.  Thus, <tt>splice()</tt> works for feeding data into a pipe or for
+capturing piped data to a file, but it does not perform the simple task of
+copying one file to another.
+<p>
+As it happens, the machinery that implements <tt>splice()</tt> does not
+force that limitation; instead, the "one side must be a pipe" rule comes
+from the history of how the <tt>splice()</tt> system call came about.
+Indeed, it already does file-to-file copies when it is invoked behind the
+scenes from the <tt>sendfile()</tt> system call.  So there should be no
+real reason why <tt>splice()</tt> would be unable to do accelerated
+file-to-file copies.  And that is exactly what Zach's patch causes it to
+do.
+<p>
+That patch set comes in three parts.  The first of those adds a new flag
+(<tt>SPLICE_F_DIRECT</tt>) allowing users to request a direct file-to-file
+copy.  When this flag is present, it is legal to provide values for both
+<tt>off_in</tt> and <tt>off_out</tt> (normally, the offset corresponding to
+a pipe must be NULL); when an offset is provided, the file will be
+positioned to that offset before the copying begins.  After this patch, the
+file copy will happen without the need to copy any data in memory and
+without filling up the page cache, but it will not be optimized in any
+other way.
+<p>
+The second patch adds a new entry to the ever-expanding
+<tt>file_operations</tt> structure:
+<p>
+<pre>
+    ssize_t (*splice_direct)(struct file *in, loff_t off_in, struct file *out, 
+			     loff_t off_out, size_t len, unsigned int flags);
+</pre>
+<p>
+This optional method can be implemented by filesystems to provide an
+optimized implementation of <tt>SPLICE_F_DIRECT</tt>.  It is allowed to
+fail, in which case the <tt>splice()</tt> code will fall back to copying
+within the kernel in the usual manner.
+<p>
+Here, Zach worries a
+bit in the comments about how the <tt>SPLICE_F_DIRECT</tt> flag works: it
+is used to request both 
+direct file-to-file copying and filesystem-level optimization.  He suggests
+that the two requests should be separated, though it is hard to imagine a
+situation where a developer who went to the effort to use <tt>splice()</tt>
+for a file-copy operation would <i>not</i> want it to be optimized.  A
+better question, perhaps, is why <tt>SPLICE_F_DIRECT</tt> is required at
+all; a call to <tt>splice()</tt> with two regular files as arguments would
+already appear to be an unambiguous request for a file-to-file copy.
+<p>
+The last patch in the series adds support for optimized copying to the
+Btrfs filesystem.  In truth, that support already exists in the form of the
+<tt>BTRFS_IOC_CLONE</tt> <tt>ioctl()</tt> command; Zach's patch simply
+extends that support to <tt>splice()</tt>, allowing it to be used in a
+filesystem-independent manner.  No other filesystems are supported at this
+point; that work can be done once the interfaces have been nailed down and
+the core work accepted as the right way forward.
+<p>
+Relatively few comments on this work have been posted as of this writing;
+whether that means that nobody objects or nobody cares about this
+functionality is not entirely clear.  But there is an ongoing level of
+interest in the idea of optimized copy operations in general; see <a
+href="333783.html">the lengthy discussion of the proposed
+<tt>reflink()</tt> system call</a> for an example from past years.  So,
+sooner or later, one of these mechanisms needs to make it into the
+mainline.  <tt>splice()</tt> seems like it could be a natural home for this
+type of functionality.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">splice()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/567086/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor567760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Copy offloading with splice()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2013 12:03 UTC (Sat)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/567760/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/567086/#CommAnchor567760" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; operating systems have traditionally offered little in the way of mechanisms to accelerate that task</font><br>
+<p>
+Though the windows API provides CopyFile<br>
+&lt;<a href="http://en.wikipedia.org/wiki/CopyFile">http://en.wikipedia.org/wiki/CopyFile</a>&gt;<br>
+(not making any claim about the speed)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/567760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor567772"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Copy offloading with splice()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2013 13:22 UTC (Sat)
+                               by <b>Jonno</b> (subscriber, #49613)
+                              [<a href="/Articles/567772/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Jonno" />
+                <input type="hidden" name="return" value="/Articles/567086/#CommAnchor567772" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; operating systems have traditionally offered little in the way of mechanisms to accelerate that task</font><br>
+<p>
+<font class="QuotedText">&gt; Though the windows API provides CopyFile</font><br>
+<p>
+That is a library function, not an OS-level interface.<br>
+<p>
+The closest equivalent on GNU/Linux would probably be (q)copy_file_preserving() in Gnulib (<a href="https://gnu.org/s/gnulib">https://gnu.org/s/gnulib</a>).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/567772/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor567787"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Copy offloading with splice()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2013 23:55 UTC (Sat)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/567787/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="meyert" />
+                <input type="hidden" name="return" value="/Articles/567086/#CommAnchor567787" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+List of syscall names a developer searching for a direct file to file copy functionality will look for: splice() ... Of course!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/567787/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor568283"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Copy offloading with splice()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2013 17:38 UTC (Wed)
+                               by <b>ricwheeler</b> (subscriber, #4980)
+                              [<a href="/Articles/568283/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ricwheeler" />
+                <input type="hidden" name="return" value="/Articles/567086/#CommAnchor568283" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Copy offload is supported in SCSI and NFS as part of the standard. Some file systems also support reflink() which can be another back end for Zach's splice() work.<br>
+<p>
+Windows 2012 supports offload as does vmware, so we are lagging others in this space.<br>
+<p>
+At plumbers, we had a very good session that focused on this.  I do hope to see this land upstream soon with the various backends to let us start to catch up here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/568283/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,357 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The perils of printk() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The perils of printk()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One might be tempted to think that there is little to be said about the kernel's printk() funct [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/705482/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The perils of printk()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 9, 2016</br>
+           <hr>
+<a href="/Articles/KernelSummit2016/">2016 Kernel Summit</a>
+</div>
+One might be tempted to think that there is little to be said about the
+kernel's <tt>printk()</tt> function; all it does, after all, is output a
+line of text to the console.  But <tt>printk()</tt> has its problems.  In a
+Kernel Summit presentation, Sergey Senozhatsky said that he is simply
+unable to use <tt>printk()</tt> in its current form.  The good news, he
+said, is that it is not unfixable — and that there are plans for addressing its
+problems.
+<p>
+<h4>Locking the system with printk()</h4>
+<p>
+One of the biggest problems associated with <tt>printk()</tt> is deadlocks,
+which can come about in a couple of ways.  One of those is reentrant calls.
+Consider an invocation of <tt>printk()</tt> that is preempted by a
+non-maskable interrupt (NMI).  The handler for that NMI will, likely as
+not, want to print something out; NMIs are extraordinary events, after all.
+If the preempted <tt>printk()</tt> call holds a necessary lock, the second
+call will deadlock when it tries to acquire the same lock.  That is just
+the sort of unpleasantness that operating system developers normally go far
+out of their way to avoid.  <p> This particular problem has been solved;
+<tt>printk()</tt> now has a special per-CPU buffer that is used for calls
+in NMI context.  Output goes into that buffer and is flushed after the NMI
+completes, avoiding the need to acquire the locks normally needed by a
+<tt>printk()</tt> call.
+<p>
+
+Unfortunately, <tt>printk()</tt> deadlocks do not end there.  It turns out
+that <tt>printk()</tt> calls can be recursive, the usual ban on recursion
+in the kernel notwithstanding.  Recursive calls can happen as the result of
+warnings issued from deep within the kernel; lock debugging was also listed as
+a way to create <tt>printk()</tt> calls at inopportune times.  If
+something calls <tt>printk()</tt> at the wrong time, the result is a
+recursive call that can deadlock in much the same way as preempted calls.
+
+<p>
+
+The problem looks similar to the NMI case, so it should not be surprising
+that the solution is similar as well.  Sergey has <a
+href="/Articles/705941/">a proposal</a> to extend the NMI idea, creating
+more per-CPU buffers for <tt>printk()</tt> output.  Whenever
+<tt>printk()</tt> wanders into a section of code where recursion could
+
+<a href="/Articles/705953/"><img
+src="../_static/images/conf/2016/ks/SergeySenozhatsky-sm.jpg" class="rthumb"
+alt="[Sergey Senozhatsky]" title="Sergey Senozhatsky"></a>
+
+happen, output from any recursive calls goes to those buffers, to be
+flushed at a safe time.  Two new functions, <tt>printk_safe_enter()</tt>
+and <tt>printk_safe_exit()</tt>, mark the danger areas.  Perhaps
+confusingly, <tt>printk_safe_enter()</tt> does <i>not</i> mark a safe area;
+instead, it marks an area where the "safe" output code must be used.
+
+
+<p> Given
+that the per-CPU buffers are required in an increasing number of situations,
+Peter Zijlstra wondered whether <tt>printk()</tt> should just use the
+per-CPU buffer always.  Sergey responded that this approach is under
+consideration.
+
+<p>
+Hannes Reinecke said that part of the problem results from the two distinct
+use cases for <tt>printk()</tt>: "chit-chat" and "the system is about to
+die now."  The former type of output can go out whenever, while the latter
+is urgent.  In the absence of better information, <tt>printk()</tt> must
+assume that everything is urgent, but a lot of problems could be solved by
+simply deferring non-urgent output to a safe time.  Linus Torvalds pointed
+out that the log level argument should indicate which output is urgent, but
+Peter said that just deferring non-urgent output is not close to a full
+solution.  The real problem, he said, is in the console drivers; this
+subject was revisited later in the session.
+<p>
+One problem with deferring non-urgent output, Sergey said, is that the
+ordering of messages can be changed and it can be hard to sort them out
+again.  Peter suggested that this was not much of a problem; Hannes said,
+rather forcefully, that <tt>printk()</tt> output has timestamps on it, so placing it
+back into the proper order should not be difficult.  The problem there,
+according to Linus, is that timestamps are not necessarily consistent
+across CPUs; if a thread migrates, the ordering of its messages could be
+wrong.
+<p>
+Petr Mladek, who joined Sergey at the front of the room, said that there is
+a problem with per-CPU buffers: they will almost necessarily be smaller
+than a single, global buffer, and can thus limit the amount of output that
+can be accumulated.  So it is more likely that the system will lose
+messages if it is using per-CPU buffers.  It was pointed out that the
+ftrace subsystem has solved this problem for a long time, but it was also
+pointed out that the cost of that solution is a lot of complicated
+ring-buffer code.  Linus said that the one thing that must be carefully
+handled is oops messages resulting from a kernel crash; those must make it
+immediately to the console.
+<p>
+Sergey went on to say that there is a larger set of <tt>printk()</tt>
+deadlocks that needs to be dealt with.  Thus far, the conversation had
+concerned "internal" locks that are part of <tt>printk()</tt> itself.  But
+<tt>printk()</tt> often has to acquire "external" locks in other parts of
+the kernel.  The biggest problem area appears to be sending output to the
+console; there are locks and related problems in various serial drivers
+that can, once again, deadlock the system.  Unlike internal locks, external
+locks are not controlled by <tt>printk()</tt>, so the problem is harder to
+solve.
+<p>
+The kernel already has a <tt>printk_deferred()</tt> function that goes out
+of its way to avoid taking external locks, once again deferring output to a
+safer time.  Sergey's proposal is to make <tt>printk()</tt> always behave like
+<tt>printk_deferred()</tt>, eliminating the distinction between the two and
+enabling the eventual removal of <tt>printk_deferred()</tt> itself.  The
+only exception would be for emergency output, which will always go directly
+to the console.  Linus suggested going one step further, and taking the
+deferred path even in emergencies, but then flushing the buffers
+immediately thereafter.
+<p>
+<h4>Console troubles and more</h4>
+<p>
+Locks are not the only problem with <tt>printk()</tt>, though.  To output
+its messages, it must call into the console drivers and, at completion, it
+must call <a
+href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/kernel/printk/printk.c#n2335"><tt>console_unlock()</tt></a>
+which will, among other things, flush any pending output to the console.
+This function has some unfortunate properties: it can loop indefinitely, it
+may not be preemptible, and the time it takes depends on the speed of the
+console — which may not be fast at all.  As a result, nobody knows how long
+a <tt>printk()</tt> call will take, so it's not really safe to call it in
+any number of situations, including atomic context, RCU critical sections,
+interrupt context, and more.
+<p>
+To get around this kind of problem, Jan Kara has <a
+href="https://lkml.org/lkml/2016/4/4/389">proposed</a> making <tt>printk()</tt>
+completely asynchronous.  Once again, output would be directed to a buffer
+and sent to the console later, but, with this proposal, the actual writing
+to the console would be done in a dedicated kernel thread.  A call to
+<tt>printk()</tt> would simply store the message, then use the <a
+href="/Articles/411605/"><tt>irq_work</tt></a> mechanism to kick off that
+thread.  This suggestion passed by without much in the way of complaints
+from the group in the room.
+<p>
+Then, there is the problem of <tt>pr_cont()</tt>, a form of
+<tt>printk()</tt> used to print a single line using multiple calls.  This
+function is not safe on SMP systems, with the result that output generated
+with it can be mixed up and corrupted.  There is a strong desire to get rid
+of the "continuation line" style of printing, but, as Sergey pointed out,
+the number of <tt>pr_cont()</tt> calls in the kernel is growing rapidly.
+The problem, as Linus pointed out, is that there is no other convenient way
+to output variable-length lines in the kernel.  Changing
+<tt>pr_cont()</tt>, to use a per-CPU buffer, for example, is possible, but
+one would want to create a well thought-out helper function.  Then,
+perhaps, <tt>pr_cont()</tt> users could be easily fixed up with a
+Coccinelle script.
+<p>
+Ted Ts'o asked how much of a problem interleaved output really is on a
+production system; the consensus seemed to be that it was rarely a
+problem.  Linus said that, on occasion, he sees ugly oops output as a
+result of continuation lines.  Andy Lutomirski said, with a grin, that his
+algorithm for dealing with interleaved oops output is to wait for Linus to
+straighten it out for him.  That solution seemed to work for the group as a
+whole; there does not seem to be any work planned in this area in the
+immediate future.
+<p>
+The final topic, covered in a bit of a hurry at the end of the session, was
+the <tt>console_sem</tt> semaphore.  This semaphore covers access to all
+consoles in the system, so it is a global contention point.  But there are
+paths that acquire <tt>console_sem</tt> that do not need to modify the
+console list or even write to a console.  For example, simply reading
+<tt>/proc/consoles</tt> from user space will acquire that semaphore.  That
+can cause unpleasant delays, including in <tt>printk()</tt> itself.  And releasing
+this semaphore, once again, results in a call to <tt>console_unlock()</tt>,
+with the same associated problems.
+<p>
+
+Sergey suggested that <tt>console_sem</tt> should be turned into a
+reader/writer lock.  That way, any path that does not need to modify the
+console list itself can acquire the lock in reader mode, increasing
+parallelism.  That still won't help direct callers of
+<tt>console_unlock()</tt>, who will still be stuck flushing output to the
+device.  For them, there was discussion of splitting
+<tt>console_unlock()</tt> into synchronous and asynchronous versions; the
+latter would just wake the <tt>printk()</tt> thread rather than flushing
+any pending console output itself.  There does not appear to be any urgency
+to this work, though.
+
+<p>
+That is where time ran out and the session ended.  <a
+href="http://www.slideshare.net/SergeySENOZHATSKY/printk-considered-harmful">Sergey's
+slides</a> are available for those who are interested.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Kernel messages</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">printk()</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Kernel Summit/2016</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/705938/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor706091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The perils of printk()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2016 11:42 UTC (Thu)
+                               by <b>ajdlinux</b> (subscriber, #82125)
+                              [<a href="/Articles/706091/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ajdlinux" />
+                <input type="hidden" name="return" value="/Articles/705938/#CommAnchor706091" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The recent changes to KERN_CONT are sensible, but it's going to take quiiiiite a while to fix all the badly formatted messages...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/706091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor706295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The perils of printk()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2016 12:31 UTC (Sat)
+                               by <b>kugel</b> (subscriber, #70540)
+                              [<a href="/Articles/706295/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kugel" />
+                <input type="hidden" name="return" value="/Articles/705938/#CommAnchor706295" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+With asynchronous printk, how can I be sure the printk is visible on the console before the next line of code that's causing the crash I debug?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/706295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor706650"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The perils of printk()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2016 2:44 UTC (Thu)
+                               by <b>sergey.senozhatsky</b> (subscriber, #91933)
+                              [<a href="/Articles/706650/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sergey.senozhatsky" />
+                <input type="hidden" name="return" value="/Articles/705938/#CommAnchor706650" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+we still print the messages from the logbuf. async printk moves console_unlock() call to a preemptible kthread, that's pretty much it.<br>
+<p>
+-ss<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/706650/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

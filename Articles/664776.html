@@ -1,0 +1,1547 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Supporting secure DNS in glibc [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Supporting secure DNS in glibc">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the many weak links in Internet security is the domain name system (DNS); it is subject  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/664239/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Supporting secure DNS in glibc</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 18, 2015</br>
+           </div>
+One of the many weak links in Internet security is the domain name system
+(DNS); it is subject to attacks that, among other things, can mislead
+applications regarding the IP address of a system they wish to connect to.
+That, in turn, can cause connections to go to the wrong place, facilitating
+man-in-the-middle attacks and more.  The <a
+href="https://en.wikipedia.org/wiki/Domain_Name_System_Security_Extensions">DNSSEC</a>
+protocol extensions are meant to address this threat by setting up a
+cryptographically secure chain of trust for DNS information.  When DNSSEC
+is set up properly, applications should be able to trust the results of
+domain lookups.  As the discussion over <a href="/Articles/664790/">an
+attempt to better integrate DNSSEC into the GNU C Library</a> shows,
+though, ensuring that DNS lookups are safe is still not a straightforward
+problem.
+<p>
+
+In a sense, the problem was solved years ago; one can configure a
+local nameserver to perform full DNSSEC verification and use that
+server via glibc calls in applications.  DNSSEC can even be used to
+increase security in other areas; it can, for example, carry SSH or TLS key
+fingerprints, allowing applications to verify that they are talking to the
+right server.  Things get tricky, though, when one wants to be sure that
+DNS results claiming to have DNSSEC verification are actually what they
+claim to be — when one wants the security that DNSSEC is meant to provide,
+in other words.
+<p>
+<h4>The /etc/resolv.conf problem</h4>
+<p>
+Part of the problem, from the glibc perspective, is that glibc itself does
+not do 
+DNSSEC verification.  Instead, it consults <tt>/etc/resolv.conf</tt> and
+asks the servers found therein to do the lookup and verification;
+the results are then returned to 
+the application.  If the application is using the low-level 
+<tt>res_query()</tt> interface, those results may include the
+"authenticated data" (AD) flag (if the nameserver has set it) indicating
+that DNSSEC verification has been 
+successfully performed.  But glibc knows nothing about the trustworthiness
+of the nameserver that has provided those results, so it cannot tell the
+application anything about whether they should really be trusted.
+<p>
+One of the first steps suggested by glibc maintainer Carlos O'Donell is to
+add an option (<tt>dns-strip-dnssec-ad-bit</tt>) to the
+<tt>resolv.conf</tt> file telling glibc to unconditionally remove the AD
+bit.  This option could be set by distributions to indicate that the DNS
+lookup results cannot be trusted at a DNSSEC level.  Once things have been
+set up so that the results <i>can</i> be trusted, that option can be
+removed.  In the meantime, though, applications would have a way to judge
+the DNS lookup results they get from glibc, something that does not exist
+now.
+<p>
+What would a trustworthy setup look like?  The standard picture looks
+something like this: there is a local nameserver, accessed via the loopback
+interface, as the only entry in <tt>/etc/resolv.conf</tt>.  That nameserver
+would be configured to do verification and, in the case that verification
+fails, simply return no results at all.  There would, in almost all cases,
+be no need to worry about whether applications see the AD bit or not; if
+the results are not trustworthy, applications will simply not see them at
+all.  A number of distributions are moving toward this model, but the
+situation is still not as simple as some might think.
+<p>
+One problem is that this scheme makes <tt>/etc/resolv.conf</tt> into a
+central point of trust for the system.  But, in a typical Linux system,
+there are no end of DHCP clients, networking scripts, and more that will
+make changes to that file.  As Paul Wouters <a
+href="/Articles/664794/">pointed out</a>, locking down this file in the
+short term is not really an option.  Sometimes those changes are necessary:
+when a 
+diskless system is booting, it may need name-resolution service before it
+is at a point where it can start up its own nameserver.  A system's entire
+DNS environment may change depending on which network it is attached to.
+Systems in containers may be best configured to talk to a nameserver on the
+host.  And so on.
+<p>
+So there seems to be a general belief that <tt>/etc/resolv.conf</tt> cannot
+really be trusted on current systems.  Ideas to add secondary configuration
+files 
+(<tt>/etc/secure-resolv.conf</tt> or whatever) have been floated, but they
+don't much change the basic nature of the situation.  Beyond that, some
+participants felt that even a local nameserver running on the loopback
+interface is not really trustworthy; Zack Weinberg <a
+href="/Articles/664782/">suggested</a> that administrators might
+intentionally short out DNSSEC validation, for example.
+<p>
+Since the configuration cannot be trusted on current systems, the reasoning
+goes, glibc needs to have a way to indicate to applications when the
+situation has improved and things
+<i>can</i> be trusted.  That could include the AD-stripping option
+described above (or, conversely, an explicit "this nameserver is trusted"
+option); that, of course, would require that the system be locked down
+to a level where surprising changes to <tt>/etc/resolv.conf</tt> no longer
+happen.  A variant, as <a href="/Articles/664784/">suggested</a> by Petr
+Spacek, is to have a way for an application to ask glibc whether it is
+talking to a local nameserver or not.
+<p>
+<h4>Do it in glibc?</h4>
+<p>
+An alternative would be to dispense with the nameserver and have glibc do
+DNSSEC validation itself.  There is, however, resistance to putting a big
+pile of cryptographic code into glibc itself.  That would increase the size
+of the library and, it is felt, increase the attack surface of any
+application using it.  A variant of this idea, <a
+href="/Articles/664796/">suggested</a> by Zack, would be to put the 
+validation code into the name-service caching daemon (<tt>nscd</tt>)
+instead.  Since <tt>nscd</tt> is part of glibc, it is under the control of
+the glibc developers and there could be a certain amount of confidence that
+DNSSEC validation is being performed properly.  The location of the
+<tt>nscd</tt> socket is well known, so the <tt>/etc/resolv.conf</tt> issues
+don't come into play.  Carlos <a href="/Articles/664786/">worried</a>,
+though, that this approach might deter adoption by users who do not want
+the caching features of <tt>nscd</tt>; in his mind, that seems to rule out
+the <tt>nscd</tt> option.
+<p>
+So, in the short term, at least, it seems unlikely that glibc will take on the
+full task of performing validated DNSSEC lookups.  That means that, if
+security-conscious applications are going to use glibc for their name
+lookups, the library will have to provide an indication of how trustworthy
+the results received from a separate nameserver are.  And that will almost
+certainly require explicit action on 
+the part of the distributor and/or system administrator.  As Simo Sorce <a
+href="/Articles/664787/">put it</a>:
+<p>
+<div class="BigQuote">
+	A situation in which glibc does not use an explicit configuration
+	option to signal applications that it is using a trusted resolver
+	is not useful ... no scratch that, it is actively harmful, because
+	applications developers will quickly realize they cannot trust any
+	information coming from glibc and will simply not use it for DNSSEC
+	related information.
+</div>
+<p>
+Configuring a system to properly use DNSSEC involves change to many of the
+components of that system — it is a distribution-wide problem that will
+take time to solve fully.  The role that glibc plays in this transition is
+likely to be relatively small, but it is an important one: glibc is
+probably the only place where applications can receive some assurance that
+their DNS results are trustworthy without implementing their own resolver
+code.  Running multiple DNSSEC implementations on a system seems like an
+unlikely path to greater security, so it would be good to get this right.
+<p>
+The glibc project has not yet chosen a path by which it intends to get
+things right, though some sort of annotation in <tt>/etc/resolv.conf</tt>
+looks like a likely outcome.  Any such change would then have to get into
+a release; given the conservative nature of glibc development, it may
+already be late for the 2.23 release, which is likely to happen in
+February.  So higher DNSSEC awareness in glibc may not happen right away,
+but there is at least some movement in that direction.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">DNSSEC</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/664776/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor664908"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 18, 2015 23:05 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/664908/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor664908" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This kind of difficulty, as well as the need for a local resolver, motivated libnss-resolve and the resolved daemon.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/664908/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor664921"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 1:41 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/664921/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor664921" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It doesn't solve the issue though, it just defines it away by obsoleting /etc/resolv.conf, or at least making it read-only and always pointing to 127.0.0.1.<br>
+<p>
+The issue here is playing nice with non-glibc resolvers, like c-ares, adns, and the untold number of similar resolvers floating around. Not to mention non-systemd DHCP clients and other code that manipulates /etc/resolv.conf directly.<br>
+<p>
+The resolved approach also effectively moves the real query code outside the library and into the local [systemd] resolver. But per the article glibc wasn't prepared to always assume the local resolver to be trusted, presumably reasoning that trusting unrelated processes is not something they're prepared to do. Obviously this not reasoning that systemd folk would agree with. But the underlying judgments relate to stances on portability, standards conformance (POSIX, historical, etc), forwards and backwards compatibility, and ultimately where the real interface boundaries should be. Which is basically the whole systemd debate in a nut shell. And perhaps why systemd has felt compelled (rightly or wrongly, for better or worse) to buildup an entire parallel ecosystem of infrastructure software--DNS, NTP, DHCP, etc.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/664921/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665136"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 8:27 UTC (Fri)
+                               by <b>pr1268</b> (guest, #24648)
+                              [<a href="/Articles/665136/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pr1268" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665136" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">it just defines it away by obsoleting /etc/resolv.conf, or at least making it read-only and always pointing to 127.0.0.1.</font></blockquote>
+
+<p>Oh, PLEASE don't take away my resolv.conf&mdash;I (ab)use it by adding some 0.0.0.0 entries to get ad.doubleclick.net (and some others) to STFU when web-browsing.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665136/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665138"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 8:43 UTC (Fri)
+                               by <b>zdzichu</b> (subscriber, #17118)
+                              [<a href="/Articles/665138/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zdzichu" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665138" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You put this in resolv.conf, not in /etc/hosts? Are you sure?<br>
+<p>
+Note that there is also nsswitch.conf, which governs sources and their order. /etc/hosts is "files" source, while resolv.conf is used by for example "dns" source.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665138/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665361"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 21, 2015 5:06 UTC (Sat)
+                               by <b>pr1268</b> (guest, #24648)
+                              [<a href="/Articles/665361/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pr1268" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665361" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">You put this in resolv.conf, not in /etc/hosts? Are you sure?</font></blockquote>
+
+<p>I stand corrected.  Not sure what I was thinking when I typed that... :-\</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665361/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor665286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 20:51 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/665286/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665286" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's /etc/hosts, not /etc/resolv.conf.  Also, adblockers do a much better job than hosts file entries, because they can block specific resources and paths rather than entire hosts.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665287"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 21:36 UTC (Fri)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/665287/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665287" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IMHO, adblockers that can be configured down to the XPath/CSS selector level are overkill. On the other hand I agree with you, blocking entire hosts just to hide ads on webpages is too.<br>
+<p>
+In practice I've found that things filtering on source/destination host pairs (NoScript, RequestPolicy, Policeman, uMatrix) are good enough 90% of the time, and closer to 99% if you add content type to the filter. In Chromium-based browsers there's even a special fast path for this specific use case.<br>
+<p>
+Having said that, I also took the malware/spam hosts lists in uMatrix and converted them to empty BIND zones for my LAN. A bit of defence in depth can't hurt.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665287/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor665498"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 23, 2015 2:55 UTC (Mon)
+                               by <b>edmonds42</b> (guest, #42670)
+                              [<a href="/Articles/665498/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edmonds42" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665498" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that ads aren't exclusive to the web, and not all browsers have adblocking extensions available (e.g. Chrome on Android).<br>
+<p>
+I have an SSID on my home network especially for Android devices on which the DNS server handed out by DHCP is a local Unbound server configured with a hosts file style blacklist. It does a great job killing both in-browser and in-app ads.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665498/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor666632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2015 1:16 UTC (Thu)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/666632/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="luto" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor666632" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Fedora seems to be moving toward using a local unbound instance and a 'server 127.0.0.1' entry for this purpose.<br>
+<p>
+I've yet to see a convincing reason why hooking at the NSS level (like libnss-resolve does) is any better than speaking the DNS protocol directly (like unbound would do).  There's a straightforward respect in which it's worse, thouggh: the unbound approach works with all the non-glibc third-party asynchronous resolvers.<br>
+<p>
+(Of course, both approaches will want some way to signal to apps that the local resolver is validating, but I think they're on equal footing there in that neither one actually succeeds without library and API changes.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/666632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor666665"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2015 6:46 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/666665/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor666665" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the main problem is the utter horribleness of DNS as a local IPC protocol. Even resolver-over-dbus sounds better.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/666665/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor666770"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2015 17:56 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/666770/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor666770" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+“You are in a maze of twisty little DNS libraries, all alike but not interoperable”...<br>
+<p>
+It's a pretty dire situation when an average Linux desktop has more ways of looking up a hostname than graphical toolkits installed.<br>
+<p>
+I wish someone would come along and do for gethostbyname() what sqlite did for fopen() - a library that doesn't suck and offers *no* excuses for not using it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/666770/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor664955"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 10:50 UTC (Thu)
+                               by <b>runekock</b> (subscriber, #50229)
+                              [<a href="/Articles/664955/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="runekock" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor664955" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't really see the problem.<br>
+<p>
+If you want secure DNS, the administrator needs to set up the system with a trustworthy resolv.conf.  If you can't trust the admin to do that, how can you fix that at the application level?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/664955/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor664983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 15:05 UTC (Thu)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/664983/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smoogen" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor664983" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Simple case: Your laptop at a coffeeshop or hotel room. The environment is potentially hostile or just poorly dealt with. [I have seen some really weird DNS at various coffeeshops and hotels.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/664983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor664985"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 15:26 UTC (Thu)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/664985/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anselm" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor664985" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+This is why you want a validating resolver on your own machine.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/664985/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665111"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 2:51 UTC (Fri)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/665111/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gerdesj" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665111" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"This is why you want a validating resolver on your own machine."<br>
+<p>
+... or a VPN back to base which has trusted DNS servers.  This has the bonus of working for all your users without having to maintain multiple funky resolvers.  Either method will work - I do both for myself but my staff (who generally wouldn't know what a resolver is) get a (Open)VPN which forces all traffic via base.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665111/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor664982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Secure&quot; DNS?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 14:58 UTC (Thu)
+                               by <b>civodul</b> (guest, #58311)
+                              [<a href="/Articles/664982/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="civodul" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor664982" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One issue is that DNSSEC falls short when it comes to privacy concerns.  A practical concern is NSA's MORECOWBELL program, as described at <a href="https://gnunet.org/mcb">https://gnunet.org/mcb</a> .  The "secure" label may give people a wrong sense of security.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/664982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665132"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Secure&quot; DNS?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 7:44 UTC (Fri)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/665132/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665132" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To be fair, encryption and authentication are somewhat orthogonal problems which can be addressed separately. What people mean by the term "secure" here kinda depends on where you are coming from. Hiding the contents of DNS is certainly an interesting goal, but since you can't encrypt the IP headers of packets it's less urgent than some of the other issues we're facing...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665132/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor665723"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Secure&quot; DNS?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 24, 2015 20:03 UTC (Tue)
+                               by <b>shane</b> (subscriber, #3335)
+                              [<a href="/Articles/665723/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="shane" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665723" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+DNSSEC deliberately declared hiding contents to be out of scope, because when work on it started back in the 20th century the idea was to limit the problem space to something tractable. Progress has been slow....<br>
+<p>
+Nevertheless, Snowden did give the IETF a wake-up call and work is proceeding. There is the excellent RFC 7626 by Stephane Bortzmeyer which covers the problem space:<br>
+<p>
+<a href="https://www.rfc-editor.org/info/rfc7626">https://www.rfc-editor.org/info/rfc7626</a><br>
+<p>
+As far as actual standards work, there is DPRIVE, the DNS Privacy working group, which was chartered recently to tackle some of these issues. Current work focuses on moving DNS over TLS or the UDP variant thereof (DTLS). It's not enough, but we are adding more tools to protect against pervasive monitoring via DNS. Sadly a 30 year old protocol is hard to update....<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665723/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor665064"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 18:44 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/665064/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665064" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have a semi-serious proposal - why not do secure DNS over HTTPS? Using simple tunneling or more complicated websocket-like protocol?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665064/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665070"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 19:52 UTC (Thu)
+                               by <b>cstrotm</b> (subscriber, #55963)
+                              [<a href="/Articles/665070/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cstrotm" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665070" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Like this?<br>
+<p>
+<a href="https://tools.ietf.org/html/draft-ietf-dprive-dns-over-tls-01">https://tools.ietf.org/html/draft-ietf-dprive-dns-over-tl...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665070/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665071"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 19:58 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/665071/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665071" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Almost. It has to work through normal HTTP[S] as well.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665071/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665101"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 23:47 UTC (Thu)
+                               by <b>edmonds42</b> (guest, #42670)
+                              [<a href="/Articles/665101/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edmonds42" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665101" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <a href="https://tools.ietf.org/html/draft-hoffman-dprive-dns-tls-https-00">draft-hoffman-dprive-dns-tls-https</a> is probably the draft you're looking for, then.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665101/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 3:46 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/665115/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665115" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, almost.<br>
+<p>
+I think that HTTP[S] tunneling should only solve the problem of filtering middleboxes and DNSSEC should be used for everything else.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665116"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 3:51 UTC (Fri)
+                               by <b>edmonds42</b> (guest, #42670)
+                              [<a href="/Articles/665116/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edmonds42" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665116" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Ah, sounds like you also might be interested in <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-dnssec-roadblock-avoidance/?include_text=1">draft-ietf-dnsop-dnssec-roadblock-avoidance</a>, then.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665116/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor665083"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 21:42 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/665083/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665083" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Probably not.<br>
+<p>
+I think Cyberax suggested using HTTPS to get authentication, but that draft seems to only talk about using SSL to get privacy.<br>
+<p>
+I don't think HTTPS is the best choice for authentication though made it is so widely used that it is OK.<br>
+<p>
+Would it make sense to put a public key in resolv.conf and configure your trusted DNS server (whether on localhost or in the machine room or whatever) to sign all verified responses with the matching public key?<br>
+<p>
+Then a relatively small amount of crypto code in glibc could verify local responses.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665083/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665096"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 23:44 UTC (Thu)
+                               by <b>edmonds42</b> (guest, #42670)
+                              [<a href="/Articles/665096/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edmonds42" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665096" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p><i>I think Cyberax suggested using HTTPS to get authentication, but that draft seems to only talk about using SSL to get privacy.</i></p>
+
+<p>draft-ietf-dprive-dns-over-tls-01 specifies two different usage profiles in section 4, "Opportunistic Privacy Profile" and "Pre-Deployed Profile". The pre-deployed profile requires that the server be authenticated.</p>
+
+<p><i>Would it make sense to put a public key in resolv.conf and configure your trusted DNS server (whether on localhost or in the machine room or whatever) to sign all verified responses with the matching public key?</i></p>
+
+<p><i>Then a relatively small amount of crypto code in glibc could verify local responses.</i></p>
+
+<p>The short answer is: <a href="https://mailarchive.ietf.org/arch/msg/dns-privacy/P9kHBNpPFmPbMHzfOI-JpVfEDuc">don't design your own cryptosystem, it will look bad when cryptographers review it</a>.</p>
+
+<p>There have been a few attempts at adding non-TLS crypto privacy to stub lookups, e.g. <a href="https://dnscrypt.org/">DNSCrypt</a>, <a href="https://tools.ietf.org/html/draft-wijngaards-dnsop-confidentialdns-03">draft-wijngaards-dnsop-confidentialdns</a>, and <a href="https://tools.ietf.org/html/draft-krecicki-dprive-dnsenc-01">draft-krecicki-dprive-dnsenc</a>. Probably the most successful of those so far is DNSCrypt (e.g., see OpenDNS's deployment), but even that one relies on a local proxy daemon.</p>
+
+<p>There are a few IETF-standardized DNS extensions that allow crypto authentication for lookups, TSIG and SIG(0). But these are rarely used (the big problem is key distribution) and don't provide privacy. (TSIG is probably more familiar to people as a mechanism used to protect DNS zone transfers.)</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665096/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor665114"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 3:44 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/665114/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665114" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'd actually prefer for a straightforward forwarding of DNS requests through HTTPS+WebSockets or even plain HTTP and then the regular signature validation through DNSSEC. This way middleboxes (even MITM-ing abominations) won't affect the security of DNSSEC. <br>
+<p>
+And then trusted DNS information can be used by other layers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665114/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor665304"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2015 22:16 UTC (Fri)
+                               by <b>imMute</b> (guest, #96323)
+                              [<a href="/Articles/665304/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="imMute" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665304" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+DNS already can run over TCP.  TLS layers very well on top of TCP.  Why bring in all the overhead and fun of HTTP when DNS+TLS would be sufficient?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665304/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor665366"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 21, 2015 5:40 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/665366/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665366" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Middleboxes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665366/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor665055"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting secure DNS in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2015 23:09 UTC (Thu)
+                               by <b>edmonds42</b> (guest, #42670)
+                              [<a href="/Articles/665055/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edmonds42" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor665055" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      
+<p>
+Hi,
+</p>
+
+<p>I have a few brief comments.</p>
+
+<p>
+It looks like these two proposals come down to implementing what the DNSSEC RFCs
+call a "Non-Validating Security-Aware Stub Resolver" (the first proposal
+described in the article) and a "Validating Security-Aware Stub Resolver" (the
+second proposal). Here are the definitions from RFC 4033:
+</p>
+
+<p><pre>
+   Non-Validating Security-Aware Stub Resolver: A security-aware stub
+      resolver that trusts one or more security-aware recursive name
+      servers to perform most of the tasks discussed in this document
+      set on its behalf.  In particular, a non-validating security-aware
+      stub resolver is an entity that sends DNS queries, receives DNS
+      responses, and is capable of establishing an appropriately secured
+      channel to a security-aware recursive name server that will
+      provide these services on behalf of the security-aware stub
+      resolver.  See also security-aware stub resolver, validating
+      security-aware stub resolver.
+
+   Non-Validating Stub Resolver: A less tedious term for a
+      non-validating security-aware stub resolver.
+
+   [...]
+
+   Validating Security-Aware Stub Resolver: A security-aware resolver
+      that sends queries in recursive mode but that performs signature
+      validation on its own rather than just blindly trusting an
+      upstream security-aware recursive name server.  See also
+      security-aware stub resolver, non-validating security-aware stub
+      resolver.
+
+   Validating Stub Resolver: A less tedious term for a validating
+      security-aware stub resolver.
+</pre></p>
+
+<p>
+The first definition refers to "an appropriately secured channel", which is
+further mentioned in RFC 4035:
+</p>
+
+<p><pre>
+4.9.3.  Handling of the AD Bit
+
+   A non-validating security-aware stub resolver MAY chose to examine
+   the setting of the AD bit in response messages that it receives in
+   order to determine whether the security-aware recursive name server
+   that sent the response claims to have cryptographically verified the
+   data in the Answer and Authority sections of the response message.
+   Note, however, that the responses received by a security-aware stub
+   resolver are heavily dependent on the local policy of the
+   security-aware recursive name server.  Therefore, there may be little
+   practical value in checking the status of the AD bit, except perhaps
+   as a debugging aid.  In any case, a security-aware stub resolver MUST
+   NOT place any reliance on signature validation allegedly performed on
+   its behalf, except when the security-aware stub resolver obtained the
+   data in question from a trusted security-aware recursive name server
+   via a secure channel.
+
+   A validating security-aware stub resolver SHOULD NOT examine the
+   setting of the AD bit in response messages, as, by definition, the
+   stub resolver performs its own signature validation regardless of the
+   setting of the AD bit.
+</pre></p>
+
+<p>
+The RFCs generally treat the "stub resolver" and applications that rely on the
+stub resolver as separate components that communicate via an interface, and this
+is true enough if you are using high-level interfaces like
+<tt>getaddrinfo()</tt>, but in practice on GNU/Linux and *BSD systems this
+abstraction becomes very leaky when you want to do anything other than an
+address lookup (A/AAAA). On Linux systems, the DNS "stub resolver" consists of
+the <tt>res_*()</tt> functions and related <tt>ns_*()</tt> and <tt>dn_*()</tt>
+helper functions, which are provided by a separate library <tt>libresolv</tt>,
+which is shipped by glibc.
+</p>
+
+<p>
+glibc's <tt>libresolv</tt> is very old. As near as I've been able to track down,
+it's a cut down version of the "<tt>libbind</tt>" stub resolver that was
+included with CSRG BSD, BIND 4, BIND 8, and BIND 9 (up until BIND 9.6.0, when it
+was removed). glibc first(?) imported this code from BIND 4.9.1 in May 1993,
+and periodically synchronized with the upstream codebase until the last update
+from BIND 8.2.3-T5B in July 2000, at which point it continued to evolve
+independently in glibc. This is why if you execute <tt>libc.so.6</tt> glibc will
+print out <tt>BIND-8.2.3-T5B</tt> as an "available extension". (The upstream
+codebase is still kicking around; ISC split it out into a standalone "libbind"
+distribution when it was removed from BIND 9.6.0, and it was later adopted from
+ISC by the NetBSD project a few years ago where it was renamed to "netresolv".)
+</p>
+
+<p>
+(A digression: parts of the <tt>nss_dns</tt> code in glibc, which interfaces
+<tt>libresolv</tt> to the glibc Name Service Switch, is similarly old and
+descended from CSRG on stone tablets. This code in its modern glibc form is not
+easy to read; to take a cherry-picked example,
+
+<a
+href="https://sourceware.org/git/?p=glibc.git;a=commitdiff;h=2f1687b96b25af512b095c9ebfa283f63c13bb78;hp=a15ccd8f07d7afbbd7635f350e318ede84709ac6">
+this 2007 commit
+</a>
+
+<a href="https://sourceware.org/bugzilla/show_bug.cgi?id=4381">
+[corresponding bug report BZ#4381]
+</a>
+
+introduced a vulnerability which was later fixed in
+
+<a
+href="https://sourceware.org/git/?p=glibc.git;a=commitdiff;h=2959eda9272a03386;hp=7bf8fb104226407b75103b95525364c4667c869f">
+this 2015 commit,
+</a>
+
+<a href="https://sourceware.org/bugzilla/show_bug.cgi?id=18287">
+[corresponding bug report BZ#18287]
+</a>
+
+resulting in CVE-2015-1781, which could have been exploited remotely by
+malformed DNS response packets under certain conditions. If you're a moderately
+skilled C programmer who only rarely ventures into the glibc codebase, your
+reaction to reading these diffs will probably be similar to
+
+<a href="http://i.imgur.com/E3ui9OC.gif">this fellow</a>, or perhaps <a
+href="http://i.imgur.com/B9NGjSn.gif">this one</a>. This code is seriously hard
+to read.
+
+Fortunately, it appears this bug wasn't likely to be exploitable in practice, at
+least in instances of calling code which were audited. According to Florian
+Weimer, then of Red Hat Product Security: "This can only happen if these
+functions are called with a misaligned buffer. I looked at quite a bit of source
+code, and tested applications with a patched glibc that logs misaligned buffers.
+I did not observe any such misaligned buffers.")
+
+</p>
+
+<p>
+The <tt>res_*</tt> interface is not very fun to use. The result returned by the
+<tt>res_query()</tt>, <tt>res_search()</tt>, and <tt>res_send()</tt> functions
+is a bare DNS protocol wire-format message which must be parsed by the
+application. <tt>libresolv</tt> offers a number of <tt>ns_*()</tt> functions
+(<tt>ns_initparse()</tt>, <tt>ns_parserr()</tt>, etc.) that don't quite amount
+to a parser, but are rather a collection of helper functions that can be used to
+construct a parser. The <tt>ns_*()</tt> functions aren't fully documented on
+GNU or even BSD systems, though; the best API reference available is probably
+contained in chapter 15 of the O'Reilly "DNS and BIND" book.
+
+<a href="https://github.com/farsightsec/wrapsrv/blob/tags/v1.0.0/wrapsrv.c#L235-L262">Here</a>
+
+is a trivial example I wrote of using this interface to parse a DNS <tt>SRV</tt>
+response. Note how the caller is responsible for checking that the resource
+record is well-formed and for knowing the precise layout of the data fields
+within the <tt>SRV</tt> resource record. In practice, the <tt>ns_*()</tt>
+functions tend to be avoided by applications that use the <tt>res_*()</tt>
+interface to perform lookups. A good example is the Postfix
+MTA, which uses the <tt>res_*()</tt> functions to send a query, but implements
+its own wire-format message parser. <a
+href="https://codesearch.debian.net/">Debian Code Search</a> finds only <a
+href="https://codesearch.debian.net/perpackage-results/ns_parserr/2/page_0">34
+packages with <tt>ns_parserr</tt> references</a>, though not all of these
+instances are actual users of the interface.
+
+</p>
+
+<p>
+Taking the Postfix example, Postfix together with <tt>libresolv</tt>
+participate jointly in the parsing of the DNS message, and in particular Postfix
+examines the AD bit, which arguably puts that application code within the
+boundary of what the DNSSEC RFCs call the "non-validating security-aware stub
+resolver". RFC 4035 specifically says, "In any case, a security-aware stub
+resolver MUST NOT place any reliance on signature validation allegedly performed
+on its behalf [i.e., the AD bit], except when the security-aware stub resolver
+obtained the data in question from a trusted security-aware recursive name
+server via a secure channel." Postfix tries to conform with that "MUST NOT" by
+
+<a href="https://www.ietf.org/mail-archive/web/dane/current/msg06294.html">warning</a>
+
+that it's the sysadmin's responsibility to configure the system's resolver
+correctly.
+
+(BTW, there is a
+
+<a href="https://github.com/vdukhovni/postfix/blob/e3c9d425eee3cb2088add18025cdd0d141018f8b/postfix/src/dns/dns_lookup.c#L304-L306">comment</a>
+
+in the Postfix codebase that they might make <tt>libunbound</tt>, a
+validating stub resolver library, a mandatory dependency, which would allow
+Postfix to do its own validation.)
+</p>
+
+<p>
+
+Another example is the OpenSSH client on Debian and Fedora systems, which is
+compiled without <tt>ldns</tt> support. In order to look up <tt>SSHFP</tt>
+records it uses the <tt>res_*()</tt> interface with
+<tt>RES_USE_EDNS0|RES_USE_DNSSEC</tt> and examines the AD-bit, and it also uses
+its
+
+<a href="http://sources.debian.net/src/openssh/1:6.9p1-2/openbsd-compat/getrrsetbyname.c/">
+own DNS message parsing implementation</a>
+
+rather than relying on <tt>libresolv</tt>'s <tt>ns_*()</tt> interface.
+</p>
+
+<p>
+If I understand correctly, since e.g. Postfix and OpenSSH currently assume the
+AD-bit is trustworthy, the AD-bit stripping proposal described in this article
+amounts to declaring that the glibc stub resolver does not always obtain its
+data from "a trusted security-aware recursive name server via a secure channel",
+and if there were some way to determine that the system's upstream resolver is
+both trustworthy and that the system communicates with it over a secure channel,
+the AD-bit could be unmasked. Both of those determinations are pretty hard to
+evaluate, and to communicate to relying processes with the existing APIs/ABIs.
+Especially when those relying processes might use their own stub resolver (e.g.,
+<tt>adns</tt>, <tt>c-ares</tt>) and the only ABI you have is the contents of the
+<tt>/etc/resolv.conf</tt> file.
+</p>
+
+<p>
+The second proposal described in the article appears to be to add a "Validating
+Security-Aware Stub Resolver" to glibc, which is the "trust, but verify" (i.e.,
+don't trust) mode, where the stub resolver on the end host is responsible for
+performing the cryptographic validation itself. However, since DNSSEC validation
+requires obtaining additional DNS records
+
+<a href="https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=679828;msg=10">this
+results in short-lived processes spamming the upstream resolver with more
+DNS queries</a>.
+
+Reducing this query spam requires either a local cache, and/or the deployment
+of a proposal like
+
+<a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-edns-chain-query/?include_text=1">draft-ietf-dnsop-edns-chain-query</a>.
+
+Moreover, in-process validation would result in pulling in a heavyweight library
+like <tt>libunbound</tt>, which may spawn threads, perform long-lived heap
+allocations for its cache, load hairy crypto libraries like OpenSSL into the
+process, etc. As a proof-of-concept, a few years ago I attempted an
+
+<a href="https://github.com/edmonds/nss-ubdns"><tt>nss-ubdns</tt></a>
+
+module for the Name Service Switch that could replace <tt>nss_dns</tt> and use
+<tt>libunbound</tt> rather than <tt>libresolv</tt> for DNS resolution. This
+turned out to be very crashy in practice with nontrivial applications like
+Firefox, and I lost interest in the approach.
+</p>
+
+<p>
+There are also developments on the horizon that lean towards having a local
+daemon on the system: the IETF's
+
+<a href="https://datatracker.ietf.org/wg/dprive/charter/">DNS PRIVate Exchange
+(DPRIVE)</a>
+
+working group is coalescing around proposals to protect the privacy of the "last
+mile" of DNS with TLS and/or D(TLS) sessions between stub resolvers and
+recursive DNS servers. (IANA has provisionally allocated TCP/UDP port 853 for
+this.) To scale, this is going to require maintaining a long-lived session with
+the recursive DNS server, to minimize the overhead and latency of TCP and TLS
+session initiation. That means the end host's stub resolver needs to have a
+nearby long-lived daemon somewhere between it and the recursive DNS server.
+Probably that means something like a local unbound instance on the system
+operating in forwarding mode and speaking the port 853 protocol to its upstream
+resolver.
+</p>
+
+<p>
+
+Finally, folks writing new applications that want to rely on
+DNSSEC-authenticated resource records from the DNS are unlikely to want to rely
+on the old resolver interface, even if eventually bleeding edge versions of the
+glibc resolver grow the capability to tell the caller that the results are
+trustworthy. (What do you do if you're running on an older glibc version, or the
+distro you're running on hasn't set things up properly, or you're on a BSD,
+etc.) Easier to add an external dependency on something like <a
+href="https://getdnsapi.net/"><tt>getdnsapi</tt></a>, which currently only has a
+<tt>libunbound</tt> backend but will hopefully have an alternate implementation
+provided by a library form of CZ.NIC's <a
+href="https://github.com/CZ-NIC/knot-resolver/issues/5">Knot Resolver</a>.
+
+</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/665055/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor667209"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why Do We Need Secure DNS, Again?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2015 21:49 UTC (Tue)
+                               by <b>ldo</b> (guest, #40946)
+                              [<a href="/Articles/667209/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ldo" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor667209" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Both the secure protocols in common use—TLS and SSH—don’t care about DNS spoofing, since they have their own ways of verifying the authenticity of the other end.<br>
+<p>
+Given this, why do we care about DNS security?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/667209/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor667234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why Do We Need Secure DNS, Again?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 9, 2015 1:23 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/667234/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor667234" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And one of the ways OpenSSH verifies the authenticity of a new host on first use is... (*drumroll*) SSHFP records in DNS!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/667234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor667251"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why Do We Need Secure DNS, Again?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 9, 2015 9:01 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/667251/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/664776/#CommAnchor667251" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The "own way" of TLS often relies on protocols that rely on DNS for security (e.g., sending emails, putting data files on webservers to prove you own the domain, etc.).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/667251/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

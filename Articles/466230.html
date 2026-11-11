@@ -1,0 +1,273 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Better device power management for 3.2 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Better device power management for 3.2">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Linux kernel has long had the ability to regulate the CPU's voltage and frequency for optim [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/465537/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Better device power management for 3.2</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 8, 2011</br>
+           </div>
+The Linux kernel has long had the ability to regulate the CPU's voltage and
+frequency for optimal behavior, where "optimal" is a function of both
+performance and power consumption.  But a system is more than just a CPU,
+and there are many other components which are able to run at multiple
+performance levels.  It is unsurprising that a proper infrastructure for
+managing device operating points has lagged that for the CPU, since the
+amount of power to be saved is usually smaller.  But now that CPU power
+behavior is fairly well optimized, the power infrastructure is growing to
+encompass the rest of the system.  The 3.2 kernel will have a new set of
+APIs intended to allow drivers to let the system find the best operating
+level for the devices they manage.
+<p>
+There are three separate pieces to the dynamic voltage and frequency
+scaling (DVFS) API, the first of which was
+actually merged for the 2.6.37 release.  The "operating power points"
+module simply tracks the various operating levels available to a given
+device; the API is declared in <tt>&lt;linux/opp.h&gt;</tt>.  Briefly,
+operating points are managed with:
+<p>
+<pre>
+    int opp_add(struct device *dev, unsigned long freq, unsigned long u_volt);
+    int opp_enable(struct device *dev, unsigned long freq);
+    int opp_disable(struct device *dev, unsigned long freq);
+</pre>
+<p>
+Operating points are enabled by default; a driver may disable specific
+points to reflect temperature or performance concerns.  There is a set of
+functions for retrieving operating points above or below a given frequency,
+useful for moving up or down the power/performance scale.
+<p>
+A driver wanting to support DVFS on a specific device would start by
+filling in one of these 
+structures (declared, along with the rest of the API, in
+<tt>&lt;linux/devfreq.h&gt;</tt>):
+<p>
+<pre>
+    struct devfreq_dev_profile {
+	unsigned long initial_freq;
+	unsigned int polling_ms;
+
+	int (*target)(struct device *dev, unsigned long *freq);
+	int (*get_dev_status)(struct device *dev,
+			      struct devfreq_dev_status *stat);
+	void (*exit)(struct device *dev);
+    };
+</pre>
+<p>
+
+Here <tt>initial_freq</tt> is, unsurprisingly, the original operating
+frequency of the device.  Almost everything else in this structure is there
+to help frequency governors do their jobs.  If <tt>polling_ms</tt> is
+non-zero, it tells the governor how often to poll the device to get its
+usage information; that polling will take the form of a call to
+<tt>get_dev_status()</tt>.  That function should fill the <tt>stat</tt>
+structure with the relevant information:
+<p>
+<pre>
+    struct devfreq_dev_status {
+	/* both since the last measure */
+	unsigned long total_time;
+	unsigned long busy_time;
+	unsigned long current_frequency;
+	void *private_data;
+    };
+</pre>
+<p>
+The governor will use this information to decide whether the current
+operating frequency should be changed or not.  Should a change be needed,
+the <tt>target()</tt> callback will be called to change the operating point
+accordingly.  This function should pick a frequency at least as high as the
+passed in <tt>*freq</tt>, then update <tt>*freq</tt> to reflect the actual
+frequency chosen.  The <tt>exit()</tt> callback gives the driver a chance
+to clean things up if the DVFS layer decides to forget about the device.
+<p>
+Once the <tt>devfreq_dev_profile</tt> structure is filled in, the driver
+registers it with:
+<p>
+<pre>
+    struct devfreq *devfreq_add_device(struct device *dev,
+				       struct devfreq_dev_profile *profile,
+				       const struct devfreq_governor *governor,
+				       void *data);
+</pre>
+<p>
+If need be, a driver can supply its own governor to manage frequencies, but
+the kernel supplies a few of its own:  <tt>devfreq_powersave</tt> (keeps
+the frequency as low as possible), <tt>devfreq_performance</tt> (keeps the
+frequency as high as possible), <tt>devfreq_userspace</tt> (allows control
+of the frequency through sysfs), and <tt>devfreq_simple_ondemand</tt>
+(tries to strike a balance between performance and power consumption).
+<p>
+The notifier mechanism built into the operating power points code can be
+used to automatically invoke the governor should the set of available power
+points change.  There are a number of ways in which that change could come
+about; one of those is a change in expectations regarding how quickly the
+device can respond.  For this case, 3.2 also gained an enhancement to the
+<a href="386139.html">quality-of-service (pm_qos) code</a> to handle
+per-device QOS requirements.  Kernel code can express its QOS expectations
+for a device using these functions (all from
+<tt>&lt;linux/pm_qos.h&gt;</tt>): 
+<pre>
+    int dev_pm_qos_add_request(struct device *dev, struct dev_pm_qos_request *req,
+			       s32 value);
+    int dev_pm_qos_update_request(struct dev_pm_qos_request *req, s32 new_value);
+    int dev_pm_qos_remove_request(struct dev_pm_qos_request *req);
+</pre>
+<p>
+The <tt>dev_pm_qos_request</tt> structure is used as a handle for managing
+requests, but calling code does not need to access its internals.  The
+passed <tt>value</tt> describes the desired quality of service; the
+documentation is surprisingly vague on just what the units of
+<tt>value</tt> are.  It would appear to describe the desired latency, but
+the desired precision is unclear.
+<p>
+On the driver side, the notifier interface is used:
+<p>
+<pre>
+    int dev_pm_qos_add_notifier(struct device *dev,
+			    	struct notifier_block *notifier);
+    int dev_pm_qos_remove_notifier(struct device *dev,
+			           struct notifier_block *notifier);
+</pre>
+<p>
+When a device's quality-of-service requirements are changed, the notifier
+will be called with the new value.  The driver can then adjust the
+available operating power points, disabling any that would render the
+device unable to meet the specified QOS requirement.
+<p>
+It is worth noting that none of the new code has any in-tree users as of
+this writing.  That suggests that the interface might be more than usually
+volatile; once developers try to make use of this facility, they are likely
+to find things that can be improved.  But, then, internal interfaces are
+always subject to change; regardless of any evolution here, the underlying
+capability should prove useful.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Power management/Device power management</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/466230/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor466624"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better device power management for 3.2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2011 4:50 UTC (Thu)
+                               by <b>nmenon</b> (subscriber, #62037)
+                              [<a href="/Articles/466624/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nmenon" />
+                <input type="hidden" name="return" value="/Articles/466230/#CommAnchor466624" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nitpick minor comment - OPP was meant to stand for Operating Performance Points (Documentation/power/opp.txt)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/466624/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor467697"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better device power management for 3.2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2011 2:54 UTC (Thu)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/467697/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kevinm" />
+                <input type="hidden" name="return" value="/Articles/466230/#CommAnchor467697" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You missed a perfect chance to use the headline "Who's down with OPP?"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/467697/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2011, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

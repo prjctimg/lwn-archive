@@ -1,0 +1,295 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improving control-flow integrity for Linux on RISC-V [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Improving control-flow integrity for Linux on RISC-V">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Redirecting execution flow is a common malware technique that can be used to compromise operati [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/978239/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improving control-flow integrity for Linux on RISC-V</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="GAByline">
+           <p>June 13, 2024</p>
+           <p>This article was contributed by Carlos Bilbao</p>
+           <hr>
+<a href="../Archives/ConferenceByYear/index.html">LSS NA</a>
+</div>
+<p>
+Redirecting execution flow is a common malware
+technique that can be used to compromise operating systems. To protect from such attacks,
+the chip makers of leading architectures like x86 and arm64 have implemented
+<a
+href="900099.html">control-flow-integrity (CFI) extensions</a>, though they need system
+software support to function. At the <a
+href="https://events.linuxfoundation.org/linux-security-summit-north-america/">Linux
+Security Summit North America</a>,  <a
+href="https://riscv.org/">RISC-V</a> kernel developer Deepak Gupta described the CFI
+protections for that architecture and  invited community input on the
+kernel support for them.</p>
+
+<p>RISC-V
+is an instruction set architecture (ISA) that <a href="/Articles/749185/">follows the philosophy of
+open-source hardware</a>. Its attractiveness lies in its lack of ISA licensing
+fees and that it is extensible, allowing designers to integrate custom
+instructions and features tailored to their specific needs. Notably, startups have chosen to adopt
+RISC-V and <a
+href="https://www.eetimes.com/european-union-seeks-chip-sovereignty-using-risc-v/">the European Union has made substantial 
+investment</a> toward developing its own chips based on the
+architecture.</p>
+
+<!-- middle-ad -->
+
+<p>
+Gupta's talk was entitled
+"<em>Control Flow Integrity on RISC-V Linux</em>"; it is available as a <a
+href="https://www.youtube.com/watch?v=H0Er5gDl9AU">YouTube video</a> for
+those interested. He began by explaining
+that CFI techniques address vulnerabilities originating from
+memory-safety issues in C and C++ code bases; these vulnerabilities can be
+exploited using the usual suspects (memory attacks, such as stack buffer
+overflow) to divert the proper execution flow and redirect it somewhere
+else within the address space.</p>
+
+<blockquote>
+<img src="../_static/images/2024/rv-fwd-bkwd.png" class="photo"
+alt="[Forward vs. backward]" title="Forward vs. backward">
+</blockquote>
+
+<p>An important thing to remember regarding control flow is the
+distinction between forward and backward directions of the function-call process.
+Forward control-flow integrity protects the flow into functions (the green
+arrow in the diagram). Indirect function calls, such as by calling a
+function via a pointer, present opportunities for attackers to alter the
+pointer value to jump to an address of their choosing, thus they need CFI protection. 
+Backward control-flow integrity is concerned with returns from functions (the red arrow in
+the diagram); the return addresses stored on the stack or in a register can
+also be altered by attackers. Gupta discussed the protection options for both
+directions for the RISC-V architecture.</p>
+
+<h4>Forward control flow</h4>
+
+<p>Previous efforts to protect forward control flow mainly involved
+keeping track of indirect calls and jumps using the CPU and/or system-software extensions. A few years ago, a <a
+href="810077.html">popular approach</a>
+involved validating indirect function pointers in some way to ensure that the
+flow remained as expected. This was done by checking the function
+prototype, including the type of the return value and all of the argument
+types.  If the forward
+flow was hijacked, the only place an attacker could jump to was the start
+of a function in the kernel that matched the required prototype.
+</p>
+
+<p>
+However,
+this approach had limited success and coarse granularity, since it left many
+kernel functions that met the requirements as valid options. A more direct
+approach is modifying the functions directly. In the case of the x86
+architecture, this is done through <a href="889475.html">indirect
+branch tracking</a> (IBT), which introduced new instructions, <tt>endbr64</tt>
+and <tt>endbr32</tt>, 
+where indirect branches must land. With IBT, the CPU implements a state
+machine to track indirect jump and call instructions, marking valid target
+addresses. If a violation is detected, it triggers a Control Protection
+exception (<tt>#CP</tt>).</p>
+
+<blockquote>
+<img class="photo" src="../_static/images/2024/rv-indcall.png"
+alt="[Indirect branch]" title="Indirect branch">
+</blockquote>
+
+<p>Gupta introduced the <a href="https://github.com/riscv/riscv-cfi/blob/main/src/cfi_forward.adoc">
+Zicfilp</a> CPU extensions, designed to protect RISC-V systems against
+forward-control-flow threats. He had sent <a
+href="/Articles/959465/">patches</a> to support this feature earlier in the
+year. Zicfilp makes sure that all indirect branches (shown in the diagram above) must land on the new instruction <tt>lpad</tt>, which
+essentially acts as a landing pad. <tt>lpad</tt> includes a label that must
+match a corresponding value stored into register <tt>t2</tt> by
+the caller. Enforcing this matching label ensures control-flow integrity:
+if the CPU fails to find a match, it raises a new software-check exception,
+indicating a detected error. For example, consider the following snippet
+from Gupta's talk:</p>
+
+<pre>
+    lui t2, 0x1       # Set up label value in t2
+    jalr a5
+    (...)
+    foo_lpad_loc:
+        lpad &lt;label&gt;  # Landing pad with label 0x1
+</pre>
+
+<p>In this code, the <tt>lui</tt> instruction loads a specific value (in this
+case, 0x1) into register <tt>t2</tt>, setting up the label value required
+to validate the integrity of the flow. The subsequent <tt>jalr</tt> instruction
+jumps to the target location indirectly, meaning that it obtains the target
+address at run time from a register (<tt>a5</tt>). The execution flow then
+reaches the designated landing pad at function <tt>foo_lpad_loc</tt>, where
+the <tt>lpad</tt> instruction with the embedded label (0x1) resides and
+serves as a reference point to ensure proper flow. In this example, the
+combination of the <tt>jalr</tt> instruction's indirect jump
+and the <tt>lpad</tt>
+instruction's label validation mechanism ensures the integrity of the forward
+flow.</p>
+
+<h4>Backward control flow</h4>
+
+<p>In the case of backward control flow, the most popular attacks to
+CFI typically involve 
+<a href="https://en.wikipedia.org/wiki/Return-oriented_programming">
+return-oriented programming</a> (ROP). With ROP attacks, vulnerabilities in
+backward indirect control transfers are exploited. These transfers
+are vulnerable because the function return addresses are determined dynamically at
+run time, allowing execution to be redirected to sequences of
+existing code fragments.
+</p>
+
+<p>
+In RISC-V, as in arm64, the function return
+address is stored in a register (in <tt>x1</tt> based on the RISC-V 
+<a
+href="https://riscv.org/wp-content/uploads/2015/01/riscv-calling.pdf">calling
+convention</a>), which
+provides protection to that address from stack-based attacks. However,
+subsequent calls require pushing the return addresses
+onto the stack. Such addresses need to be protected with something better
+than regular store operations, either via software with the compiler adding
+additional checks (for example, LLVM's  <a
+href="https://clang.llvm.org/docs/ControlFlowIntegrity.html">CFI
+protection</a> and 
+<a href="https://clang.llvm.org/docs/SafeStack.html">SafeStack</a> insert extra security checks
+into programs) or hardware-based solutions. For this, x86 <a
+href="https://docs.kernel.org/next/x86/shstk.html">Control-flow Enforcement
+Technology</a> (CET) relies on a
+shadow stack and arm64, similarly, uses its <a
+href="940403.html">guarded control stack</a>
+(GCS).</p>
+
+<p>As with the case of forward control flow, a <tt>#CP</tt> exception may
+be issued in scenarios where shadow stacks are enabled. The return addresses get
+pushed onto both the regular and the shadow stack on a function
+call. Then, when returning from the function call, both stacks are
+popped. If the addresses retrieved from the two stacks don't match,
+indicating potential corruption, a <tt>#CP</tt> exception is raised.</p>
+
+<p>This is the same approach followed by
+<a href="https://github.com/riscv/riscv-cfi/blob/main/src/cfi_backward.adoc">Zicfiss</a>, which is used on
+RISC-V to protect backward control flow, Gupta said. With Zicfiss, the ISA is
+extended to include a shadow stack and instructions to safely manipulate
+the stack (<tt>sspush</tt> for pushing and <tt>sspopchk</tt> for popping
+and checking). The <tt>sspush</tt> instruction executes a
+store operation similar to existing store instructions, with the distinction that the base is implicitly the new shadow-stack
+pointer (<tt>ssp</tt>).  There is also a new instruction, <tt>ssrdp</tt>, to read
+the <tt>ssp</tt>; its width is determined by the word length of the architecture. The
+virtual address stored in <tt>ssp</tt> needs a shadow-stack attribute (for
+more information on this, refer to RISC-V's <a
+href="https://github.com/riscv/riscv-cfi/blob/main/src/cfi_backward.adoc#shadow-stack-memory-protection">Shadow Stack Memory Protection</a> documentation).  The shadow stack can be
+located anywhere in the address space and can even be discontiguous (this
+reduces the memory footprint when multiple threads share an address space).
+To ensure security, the CPU is informed that a region is a shadow stack
+through a new page-table bit added by
+the ISA extension, which ensures that the memory is writable only with the
+new specialized instructions.</p>
+
+<h4>Additional extensions</h4>
+
+<p>RISC-V flow control extensions also provide the new instruction
+<tt>ssamoswap</tt> for atomically swapping a value on the stack, designed
+for asynchronous operations within the kernel — similar to the RISC-V
+<tt>amoswap</tt> atomic-swap instruction but tailored to the shadow stack.  Gupta
+mentioned that it is needed for signal handling in Linux, where the
+execution flow 
+can be hijacked, and the stack needs to be switched.
+</p>
+
+<p>
+Concurrent operation
+of multiple threads on the same shadow stack can be problematic and
+a source of security concerns; for example, an adversarial thread can reuse return addresses
+placed by the primary thread or inject return addresses into the shadow
+stack. To switch securely when the shadow stack is enabled, certain tokens are
+used to verify stack switching at run time: <tt>ssamoswap</tt> makes this
+possible by atomically storing these tokens, thereby mitigating any
+concurrency issues during validation (and raising software check exceptions
+if needed). The <tt>ssamoswap</tt> instruction is the RISC-V counterpart to
+x86's <tt>rstorssp</tt> and <tt>saveprevssp</tt>, as well as Arm v9's
+<tt>gcsss1</tt> and <tt>gcsss2</tt>, providing analogous functionality for
+asynchronous shadow-stack operations.</p>
+
+<p>Gupta recently submitted <a href="/ml/all/20240329044459.3990638-28-debug@rivosinc.com/">patches</a> to test Zicfiss with straightforward kselftests. In these
+tests, a child process attempts to write to the memory location of a shadow
+stack (which should result in the process being killed with a
+<tt>SIGSEGV</tt>). The 
+parent process then checks if the memory contents have been changed.</p>
+
+<p>The patches for improving RISC-V kernel defenses against
+control-flow attacks are still in the works. It's exciting to see the
+community getting behind the effort to make open-source hardware more
+secure. Moreover, it's worth noting that the kernel work led by Gupta and
+others shares similarities and builds upon previous methods for control-flow
+integrity — a characteristic generally desirable in open-source
+development.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Control-flow integrity</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Linux kernel</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">RISC-V</a></td></tr>
+            <tr><td><a href="../Archives/GuestIndex/index.html">GuestArticles</a></td><td><a href="../Archives/GuestIndex/index.html">Bilbao, Carlos</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Linux Security Summit North America/2024</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/977720/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,441 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Retrieving pixels from Android phones with Pixnapping [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Retrieving pixels from Android phones with Pixnapping">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="A new class of attacks on Android phones, called 'Pixnapping', was announced on October 13.  It [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1042981/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Retrieving pixels from Android phones with Pixnapping</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>October 29, 2025</br>
+           </div>
+<p>
+A new class of attacks on Android phones, called "<a
+href="https://www.pixnapping.com/">Pixnapping</a>", was announced on
+October 13.  It allows a malicious app to gather output rendered in a
+victim app, pixel-by-pixel, by exploiting a GPU side-channel.  Depending on
+what the victim app displays, anything from sensitive email and chats to
+two-factor authentication (2FA) codes could be captured—and shipped off to
+an attacker's site.
+</p>
+
+<p>
+As noted in the Pixnapping <a
+href="https://www.pixnapping.com/pixnapping.pdf">paper</a> (with seven
+authors from various universities), pixel-stealing attacks are not new.
+They were <a
+href="https://web.archive.org/web/20130821233359/http://contextis.co.uk/files/Browser_Timing_Attacks.pdf">described
+in 2013</a> in the context of web browsers, using iframes and SVG filters;
+since then, browsers have largely mitigated those kinds of attacks with
+various restrictions.  Pixnapping applies the ideas behind pixel stealing to
+Android's apps, completely outside of the browser context—though the
+browser is also an app so it can also be targeted.  The demo video
+on the Pixnapping site shows a malicious app relaying 2FA credentials from
+the Google Authenticator app in less than the 30-second timeout, which
+allowed the "attacker" to log into a Reddit account.
+</p>
+
+<p>
+The vulnerability uses Android <a
+href="https://developer.android.com/guide/components/intents-filters">intents</a>
+to cause a specific app to start, thus to send its output into the
+rendering pipeline, but it does so with flags that cause the victim app's
+output not to appear on the phone screen.  A stack of semi-transparent
+Android <a
+href="https://developer.android.com/guide/components/activities/intro-activities">activities</a>
+are added on top of the output via the malicious app sending more intents.
+All of that can be done without the user realizing any of it has happened,
+even if the intended victim app is not installed—normally sending an intent
+to a nonexistent app gives a warning to the user, but that can be bypassed
+by catching an exception in the malicious app.
+</p>
+
+<p>
+In order to determine whether a pixel is white or non-white (though there
+are variants to distinguish more colors), a mask is used.  One of the
+activities in the stack consists of all white pixels except for a
+transparent pixel at the location of interest; if that pixel is non-white,
+the victim app is displaying something there.  The malicious app then uses
+the blurring operation, which is the only GPU operation that can be applied
+to another app's output in Android, to enlarge the pixel and make it easier
+to detect its value via the side-channel.
+</p>
+
+<p>
+The Pixnapping attack measures the timing of frame rendering by registering
+a callback for the <a
+href="https://source.android.com/docs/core/graphics/implement-vsync">Android
+VSync signal</a>, which is called when the <a
+href="https://source.android.com/docs/core/graphics/surfaceflinger-windowmanager">SurfaceFlinger
+compositor</a> has completed rendering for the screen.  The malicious app
+invalidates the transparent window of the activity at the bottom of the
+stack it created (i.e. the one directly above the victim app). That means
+SurfaceFlinger needs to re-render and compose all of the windows above it
+in the stack and consult the victim app's output to do so.  By measuring
+the time it takes, the malicious app can derive the status of the pixel in
+a hardware-specific manner, though it requires multiple measurements (34 or
+64) for each pixel to get an accurate result.  In addition, for many of the
+attacks described in the paper, a 1.5 second delay between pixels was
+inserted to avoid Android throttling the  CPU, which might affect the
+measurements.
+</p>
+
+<p>
+The actual side-channel is called <a
+href="https://www.hertzbleed.com/gpu.zip/">GPU.zip</a>, which "<q>exploits
+an optimization that is data dependent, software transparent, and present
+in nearly all modern GPUs: graphical data compression</q>".  In order to
+save memory bandwidth, GPUs compress the data they operate on in a way that
+causes measurable differences in the rendering speed; the lossless
+compression algorithm used is dependent on the type of GPU installed.  So a
+non-white pixel will result in less compression for the mask than a white
+pixel will—measurably so.  The Pixnapping paper reports on attacks against
+Google Pixel phones (versions 6-9) and the Samsung Galaxy S25, but the
+underlying ideas are more widely applicable.  The researchers empirically
+determined the right number of transparent activities to add into the stack
+to be able to derive a signal from the noisy render-time measurements.
+</p>
+
+<p>
+The paper describes attacks against a number of different web sites and
+apps.  For example, an intent can be used to open a specific web site, such
+as myaccounts.google.com, where the attack was able to retrieve specific
+information, such as the user's full name or home address.  It can also
+sift through email in the Gmail web site, recover timeline information from
+the Google Maps app, access financial information in the Venmo app,
+retrieve messages from the Signal app, and more.
+</p>
+
+<p>
+None of those attacks is particularly speedy however.  Depending on the
+amount of screen real estate the desired information covers, these attacks
+can take <i>hours</i> to effect.  For example, an unoptimized attack on a
+Google Maps timeline entry, which covers around 60,000 pixels, takes 20-27 hours to complete depending on the
+phone model.  One suspects a user just might notice a non-sleeping, likely
+fairly warm, phone in their pocket long before the battery ran out while
+running the malicious app, but the
+attack against the Google Authenticator app shows an optimization path that
+targeted attacks could use.
+</p>
+
+<p>
+The key to the optimization is recognizing that there is no need to recover
+all of the pixels of the six-digit numbers displayed by the app.  In fact,
+depending on the font used, single pixels can be enough to eliminate
+multiple digits.  In the Google Sans font used by Authenticator, a single
+pixel can determine whether the digit is in one set of digits (2, 3, 4, 7,
+8) or not; it only takes four pixels to uniquely determine the actual
+value.  Beyond that, this attack reduced the number of samples used for
+each pixel to 16 (instead of 34 or 64) and the delay from 1.5 seconds to
+70ms.  The attack also awaited the start of the 30-second time interval to
+give the attack the maximum amount of time to leak the information while it
+was still valid.
+</p>
+
+<p>
+The results were generally good (from an attacker's perspective) though far
+from perfect.  The accuracy ranged from 28% on a Pixel 8 to 73% on a Pixel
+6; Pixel 7 and 9 were both 53%.  Average time to recover a code ranges from
+14.3s on Pixel 6 to 25.8s on Pixel 7; the other two were around 25s.  The
+Samsung device thwarted the researchers' efforts to leak the codes within
+30s "<q>due
+to significant noise</q>" and they left tuning the attack on that device
+for future work.
+</p>
+
+<p>
+According to the Pixnapping web site, Google has already <a
+href="https://android.googlesource.com/platform/frameworks/native/+/20465375a1d0cb71cdb891235a9f8a3fba31dbf6">attempted
+a fix</a> for the problem by limiting the number of activities that an app
+can apply the blur operation to. But the researchers found a way around
+that, which is still under embargo.  There are three conditions required
+for the attack, but two of them may not lend themselves to mitigations for
+the vulnerability.  Activities and intents are a major part of the Android
+architecture, so making changes to those mechanisms may not be popular with
+users.  The paper notes that attackers generally find another side-channel
+after one is closed down, so focusing on the side-channel is not their
+recommended path to fix the problem either.  As Google has already tried,
+they suggest restricting the ability of apps to arbitrarily add layers on
+top of other app's output:
+
+<blockquote class="bq">
+We therefore believe that our attack would be best mitigated by
+targeting condition two, i.e., by preventing attacker computations
+on victim pixels. One way to achieve this would be to allow developers to restrict transparent layering over their activities to an
+explicit allowlist. 
+</blockquote>
+
+</p>
+
+<p>
+Pixnapping is a clever attack and the difficulty in mitigating it, at least
+so far, means that it
+will be around for a while longer.  It does seem somewhat impractical for
+various reasons, but, as with most attacks, will likely improve over time.
+It may be much more useful for targeted attacks against specific phones
+(people) or apps, however.  As the web site notes, Android users should
+ensure that security patches get installed as soon as they are available.
+That's good advice, of course, though the fix for this hole may still be a
+ways off.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Android</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Vulnerabilities/Information leak</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1042715/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1044100"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apps that are not installed?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2025 8:25 UTC (Thu)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1044100/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1042715/#CommAnchor1044100" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; All of that can be done without the user realizing any of it has happened, even if the intended victim app is not installed</span><br>
+<p>
+Presumably that just refers to the fact that the user does not notice an attempt is made, not that the attack somehow successfully extracts data from apps that are not even installed?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044100/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1044114"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apps that are not installed?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2025 10:58 UTC (Thu)
+                               by <b>smitty_one_each</b> (subscriber, #28989)
+                              [<a href="/Articles/1044114/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smitty_one_each" />
+                <input type="hidden" name="return" value="/Articles/1042715/#CommAnchor1044114" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It sounds as though the exceptions are trapped:<br>
+<p>
+<span class="QuotedText">&gt; normally sending an intent to a nonexistent app gives a warning to the user, but that can be bypassed by catching an exception in the malicious app. </span><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044114/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1044295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apps that are not installed?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2025 19:55 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1044295/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1042715/#CommAnchor1044295" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would be extremely surprising if you could exfiltrate data from apps that are not installed by a method like this.<br>
+<p>
+You might think that we can just dismiss this interpretation out of hand, on the basis that you can't exfiltrate data that does not exist. But it might be the case that the app was installed (previously or on another device) and has saved something to the cloud or to a local storage folder (that was not erased at uninstall time). Then we could meaningfully talk of exfiltrating that data, even if the app is not presently installed on this device.<br>
+<p>
+But the real problem is that this method uses a rendering side channel. If you're going to exfiltrate data *via rendering*, then the victim app has to render something, which means it has to be running, which means it has to be installed. We might suppose that the attacker can somehow cause the victim app to become installed as part of the attack, but that is described nowhere in the article and would be a serious problem in its own right (you could install a second attacker app, that requests a higher level of privileges in its manifest, and now you have a trivial privilege escalation attack).<br>
+<p>
+TL;DR: I think you're right and this "user does not notice the attempt" interpretation is the only interpretation that makes any sense in context.<br>
+<p>
+Disclaimer: I work for Google, but not on Android, so I don't actually know what I'm talking about. The above is my semi-informed speculation as a software engineer, not based on anything I've heard internally.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1044324"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">That particular side channel does not seem hard to close</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2025 9:19 UTC (Fri)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/1044324/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/1042715/#CommAnchor1044324" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I suppose Google could kill this particular side channel, by injecting random noise in transparent overlays by third party apps. That would be less pretty and less battery friendly, though I can not imagine situations where users would terribly care (apart from semi-transparent widgets but I doubt leaking the background wallpaper is a security risk).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044324/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1044332"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">That particular side channel does not seem hard to close</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2025 10:14 UTC (Fri)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1044332/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1042715/#CommAnchor1044332" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The simplest and most battery friendly way to fix this would be to just remove transparency. Does anyone but the screenshot crowd even care about that feature on either mobile or desktop?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044332/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1044478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">That particular side channel does not seem hard to close</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 1, 2025 13:44 UTC (Sat)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1044478/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1042715/#CommAnchor1044478" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It might also be sensible to arrange that VSync signals arrive late, on a fixed schedule, if the compositing involved data from different apps. You don't have to make the rendering speed actually data-independent if the speed of reporting rendering is data-independent.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

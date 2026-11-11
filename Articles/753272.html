@@ -1,0 +1,210 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>get_user_pages() continued [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="get_user_pages() continued">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="At a plenary session held relatively early during the 2018 Linux Storage, Filesystem, and Memor [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/753394/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>get_user_pages() continued</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 4, 2018</br>
+           <hr>
+<a href="/Articles/lsfmm2018/">LSFMM</a>
+</div>
+At <a href="753027.html">a plenary session</a> held
+relatively early during the 2018 Linux Storage, Filesystem, and
+Memory-Management Summit, the developers discussed a number of problems
+with the kernel's <tt>get_user_pages()</tt> interface.  During the waning
+hours of LSFMM, a tired (but dedicated) set of developers convened again in
+the memory-management track to
+continue the discussion and try to push it toward a real solution.
+<p>
+Jan Kara and Dan Williams scheduled the session to try to settle on a way
+to deal with the issues associated with <tt>get_user_pages()</tt> — in
+particular, the fact that code that has pinned pages in this way can modify
+those pages in ways that will surprise other users, such as filesystems.
+During the first session, Jérôme Glisse had suggested using the MMU
+notifier mechanism as a way to solve these problems.  Rather than pin pages
+with <tt>get_user_pages()</tt>, kernel code could leave the pages unpinned
+and respond to notifications when the status of those pages changes.  Kara
+said he had thought about the idea, and it seemed to make some sense.
+<p>
+His current thinking is to audit all existing <tt>get_user_pages()</tt>
+callers and see which of those could be changed to use notifiers instead.
+Changing away from <tt>get_user_pages()</tt> would not be mandatory for
+device drivers (or other code) that couldn't handle that mode of
+operation.  That leaves open the question of how to solve the problems for
+code that cannot be converted; in the worst case, operations on affected
+pages might just have to
+hang until all references to the pages in question are dropped.
+<p>
+The problem there is it's not always easy to know whether there are
+references to a page created by <tt>get_user_pages()</tt> or not.  With
+memory accessed via DAX, life is relatively simple, and one can just wait
+until the reference count drops to one.  For page-cache pages it's harder;
+it would be necessary to compare the reference and map counts for each page
+of interest.  Glisse suggested just forcing <tt>get_user_pages()</tt> to
+lock the pages as it pins them.  That would "be mean" to
+<tt>get_user_pages()</tt> callers, he said, but he thought that was a fine
+idea.
+<p>
+Hugh Dickins worried that this change would result in reduced
+performance and the introduction of kernel regressions.  But Glisse said
+that only "legacy" code would be affected, and perhaps that is not a
+problem.
+An alternative might be to try to find some bits in <tt>struct page</tt>
+that could be used to track these uses, but there is not a lot of space
+available.  Another possibility might be to create a special type of
+virtual memory area (VMA) for use with <tt>get_user_pages()</tt>.
+<p>
+One potential problem is interference with <tt>get_user_pages_fast()</tt>,
+which attempts to pin the pages without taking locks.  Adding those locks
+to avoid contention with the MMU notifiers would cause it to not be fast
+anymore.  Glisse, after trying a couple of suggestions, conceded that MMU
+notifiers are not going to work with <tt>get_user_pages_fast()</tt>; he
+said that he was "running out of bad ideas".  Dave Hansen suggested
+creating some sort of mechanism based on read-copy-update for
+<tt>get_user_pages_fast()</tt> users, but agreed that the idea "sounds
+terrifying".
+<p>
+In the end, the apparent conclusion was that Kara will start by
+experimenting with page locks and, maybe, RCU.  Patches should be
+forthcoming.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/get_user_pages()</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2018</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/753272/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor753548"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">get_user_pages() continued</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2018 14:14 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/753548/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/753272/#CommAnchor753548" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another issue was that we aren't convinced there are no deadlock scenarios where Task A gets Page A, then gets Page B, while Task B gets Page B followed by Page A. Since those are simple refcount bumps today, there's no deadlock; turning the refcount bump into a page lock would make it one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753548/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor753568"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">get_user_pages() continued</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2018 19:05 UTC (Fri)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/753568/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="viro" />
+                <input type="hidden" name="return" value="/Articles/753272/#CommAnchor753568" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that we have (outside of each other's implementations)<br>
+<p>
+* 10 callers of get_user_pages()<br>
+* 1 caller of get_user_pages_locked()<br>
+* 3 callers of get_user_pages_longterm()<br>
+* 4 callers of get_user_pages_unlocked()<br>
+* 11 callers of get_user_pages_remote()<br>
+<p>
+... and 43 callers of get_user_pages_fast() + 6 of __get_user_pages_fast().<br>
+<p>
+With g_u_p_f callers being on a lot of common codepaths, at that...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753568/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

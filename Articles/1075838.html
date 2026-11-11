@@ -1,0 +1,1392 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Splicing out vmsplice() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Splicing out vmsplice()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The splice() and vmsplice() system calls are meant to improve performance for certain data-move [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1076255/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Splicing out vmsplice()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 4, 2026</br>
+           </div>
+The <a
+href="https://man7.org/linux/man-pages/man2/splice.2.html"><tt>splice()</tt></a>
+and <a
+href="https://man7.org/linux/man-pages/man2/vmsplice.2.html"><tt>vmsplice()</tt></a>
+system calls are meant to improve performance for certain data-movement
+tasks by minimizing (or avoiding altogether) system calls and the copying
+of data.  They also have a long history of security problems.  The recent
+flood of LLM-discovered vulnerabilities has drawn attention, once again, to
+<tt>splice()</tt> and <tt>vmsplice()</tt>; as a result, they may end up
+being removed altogether.
+<p>
+<h4>Some history</h4>
+<p>
+Larry McVoy is credited for first raising the idea of a <tt>splice()</tt>
+system call that would connect a file directly to a pipe.  With the classic
+POSIX API, an application would copy file data into a pipe with a loop that
+read chunks of data from the file (thus copying that data into user space),
+then wrote those chunks to the pipe (copying the data back into the
+kernel).  With a single <tt>splice()</tt> call, the application could
+request that the kernel implement that loop, getting the work done with far
+fewer system calls and less data copying.  After years of discussion, a
+<tt>splice()</tt> implementation was <a href="178199.html">added in
+2006</a> to the 2.6.17 kernel by Jens Axboe; it looks like:
+<p>
+<pre>
+    ssize_t splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
+    		   size_t size, unsigned int flags);
+</pre>
+<p>
+It will attempt to copy up to <tt>size</tt> bytes from <tt>fd_in</tt> to
+<tt>fd_out</tt>; one of the two file descriptors must be a pipe.  The
+return value is the number of bytes actually copied.
+<p>
+<tt>vmsplice()</tt> was <a href="181169.html">added
+(by Axboe) shortly thereafter</a> (also in time for 2.6.17):
+<p>
+<pre>
+    ssize_t vmsplice(int fd, const struct iovec *iov, size_t nr_segs, unsigned int flags);
+</pre>
+<p>
+Here, <tt>iov</tt> is an array of <tt>nr_segs</tt> <a
+href="https://elixir.bootlin.com/linux/v7.0.10/source/include/uapi/linux/uio.h#L17"><tt>iovec</tt></a>
+structures indicating regions of memory.  If <tt>fd</tt> is a readable pipe
+file descriptor, data will be read into those memory regions from the pipe.
+If, instead, <tt>fd</tt> is writable, the data will move <i>from</i> the
+memory regions into the pipe.  The fact that there is no explicit argument
+indicating the direction of data movement is one of <tt>vmsplice()</tt>'s
+special quirks.  Another is that there is no way to know when the data
+transfer completes and, thus, when it is safe to access the memory given to
+<tt>vmsplice()</tt>.  The <tt>SPLICE_F_GIFT</tt> flag "gifts" the indicated
+memory pages to the kernel; the caller pledges to never touch them again.
+This option is meant to make zero-copy operations available in some
+situations.
+<p>
+The implementation of the splice system calls involves a fair amount of
+complexity within the kernel; it also depends on all kernel subsystems that
+might receive a spliced buffer to handle it properly.  So, arguably, it is
+not surprising that they have been the focus of a lot of vulnerabilities,
+including <a href="268783.html">a high-profile exploit</a> (see also
+<a href="271688.html">this followup article</a>) in 2008.  Many of
+the recently disclosed kernel vulnerabilities involve a combination of
+these system calls and subsystems that do not handle them correctly.
+<p>
+<!-- middle-ad -->
+<h4>Protecting read-only files</h4>
+<p>
+In mid-May, Pedro Falcato sent <a
+href="/ml/all/20260516182126.530498-1-pfalcato@suse.de">a brief patch</a>
+aimed at making the splice system calls harder to exploit.  Specifically,
+the patch adds a new sysctl knob, <tt>fs.splice_needs_write</tt>; if that
+knob is set to a value of one (the default is zero), then it will not be
+possible to <tt>splice()</tt> to a file that the calling process lacks the
+permissions to write to, even if the requested operation is a read from
+that file that would otherwise be permitted.  Similarly,
+<tt>vmsplice()</tt> cannot be invoked with memory backed by an unwritable
+file.
+<p>
+In essence, this patch is an admission of defeat; it is an acknowledgment
+that the splice system calls simply cannot be implemented in a way that
+prevents security vulnerabilities.  Rather than (continue to) try, the
+kernel developers would simply be giving administrators the ability to
+forbid splice operations that might be exploited to give write access to a
+read-only file.  If more such vulnerabilities exist, this change would be a
+quick way to render them all harmless.
+<p>
+The reactions to the proposal were mixed.  Matthew Wilcox <a
+href="/ml/all/agj4mXKRVW44ZJ18@casper.infradead.org">said</a>: "<q>I don't
+have a problem with the idea, other than it's really sad we have to do
+this</q>".  Christian Brauner, though, <a
+href="/ml/all/20260518-starten-messdaten-3b8aa670ec85@brauner">called
+it</a> "<q>a knee-jerk reaction to an exploit class originating in buggy
+modules that we have little control over</q>" and an extension of an
+already problematic API.  Jann Horn <a
+href="/ml/all/CAG48ez0jbSUgT3ZxPKZP7Eu=K7ce2cX7k2NzHCHNMOxQjOGT9w@mail.gmail.com">suggested</a>
+that, rather than blocking operations on read-only files, it would be
+better to degrade the call to an ordinary copy operation.  Mateusz Guzik <a
+href="/ml/all/CAGudoHHeYbPWQbz+vXoS-Oi4PhxX6rh5XsMUkZetyfdnJHNj=g@mail.gmail.com">called
+it</a> "<q>a half-measure which will at best buy few weeks until splice
+bugs dry out and there will be a new attack vector du jour which people
+point their LLMs at</q>".
+<p>
+After the discussion had gone on for a few days, Falcato <a
+href="/ml/all/ahg6JgO0wUkJKjRb@pedro-suse">said</a> that the consensus
+seemed to favor degrading to simple copy operations rather than blocking
+the system call entirely.  There would be a second version of the series
+forthcoming that took that approach.
+<p>
+<h4>Removing <tt>vmsplice()</tt></h4>
+<p>
+Before that second version could appear, though, Askar Safin showed up with
+<a href="/ml/all/20260531010107.1953702-1-safinaskar@gmail.com">a patch
+series</a> that takes away the special functionality of <tt>vmsplice()</tt>
+entirely.  The system call still exists, but the implementation simply
+copies the data within the kernel rather than attempting to provide
+complex, zero-copy semantics.  In short, a <tt>vmsplice()</tt> call would
+be turned into the equivalent <a
+href="https://man7.org/linux/man-pages/man2/readv.2.html"><tt>preadv2()</tt>
+or <tt>pwritev2()</tt></a> call.
+<p>
+Falcato <a href="/ml/all/ahv16ogY8Zx3Rtox@pedro-suse.lan">was
+unimpressed</a> with this development, and suggested that Safin's patches
+should not even be considered.  Brauner had <a
+href="/ml/all/20260601-geldentwertung-aufdecken-aussehen-1502bfad440d@brauner">some
+gentle criticism</a> for the way in which this work was done:
+<p>
+<blockquote class="bq">
+	So I think this is a case where no explicit rules have been
+	broken. But if you know that someone has been posting patches and
+	is working on a problem just racing them to get your own stuff
+	merged is very likely to unnecessarily ruffle feathers. So sync
+	with the person next time.
+</blockquote>
+<p>
+The patches themselves, though, have been reasonably well received.  Andy
+Lutomirski <a
+href="/ml/all/CALCETrW__=8mSusayfXG7UFCfue5BGbx+vqESj1d9wqOfX4s8w@mail.gmail.com">said</a>:
+<p>
+<blockquote class="bq">
+	I have no comment on the code or the history.  But I'm 100% in
+	favor of the solution.  vmsplice is a crappy API, and would be
+	incredibly complex to get the implementation right, and it should
+	be removed.  But it has users, and the approach of just mapping
+	them straight to pread/pwrite makes perfect sense.
+</blockquote>
+<p>
+Linus Torvalds was <a
+href="/ml/all/CAHk-=wiFuud0Nn3B9YpTWyQja08TeXVk2AB-aAkmVXyigOagbQ@mail.gmail.com">cautiously
+in favor</a> of the change; he also <a
+href="/ml/all/CAHk-=wifX_rrDjRGnDnOqE-usptAukuXKrmuPuVDP5bOCBWzGQ@mail.gmail.com">suggested</a>
+making a similar change to <tt>splice()</tt> if the <tt>vmsplice()</tt>
+change does not cause too much anguish.  Brauner, for his part, has <a
+href="/ml/all/20260601-enthusiasmus-canceln-anlehnen-0e62317a9784@brauner">applied
+the series</a> with an eye toward merging during the 7.2 development cycle.
+<p>
+That merging should not be seen as a certainty at this point; it is
+noteworthy that this conversation has happened mostly without the
+participation of developers who actually <i>use</i> the splice calls.  Some
+of those users are beginning to appear now.  Christian Brauner <a
+href="/ml/all/20260603-raumfahrt-unmerklich-ertrugen-c4ecae70d5f9@brauner">passed
+on</a> a report of a test regression pointing out a subtle behavior change
+that can probably be addressed.  Willy Tarreau <a
+href="/ml/all/aiEb8CTM-ovMIq7-@1wt.eu">said</a> that he is a heavy user of
+the splice system calls: "<q>It simply doubles the network bandwidth compared
+to not using that.  (62 Gbps per core vs 31). I would seriously miss it if
+I couldn't use this anymore.</q>"  He suggested perhaps further restricting
+the types of memory that could be passed to <tt>vmsplice()</tt> (such as
+only allowing anonymous memory) instead.
+<p>
+So users of the splice system calls do exist, but there seem to be a lot of
+voices united in their desire to remove the zero-copy logic behind those
+calls.  Torvalds has also <a
+href="/ml/all/CAHk-=wiEwSjfbjfO74xu=UmkkdHXkJg5QNQ8pP-3iYmunmeV9g@mail.gmail.com">indicated</a>
+a desire to make a similar change to the more widely used <a
+href="https://man7.org/linux/man-pages/man2/sendfile.2.html"><tt>sendfile()</tt></a>
+system call which, he said, was "<q>a mistake</q>".  The reimplementation of
+these system calls should not break any code, since the resulting behavior
+should look the same from user space, but it does have the possibility of
+causing performance regressions.  That may be enough to prevent these
+changes from happening in the end.  But, as Torvalds <a
+href="/ml/all/CAHk-=wizkDXRut5xLXRF-CVUVYMaZ5AOexxeghOAoXPb4yAvQg@mail.gmail.com">said</a>:
+"<q>I just suspect we'll never get real answers without going the 'let's
+just see what happens' route</q>".  The time has apparently come to see
+what happens.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">splice()</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">System calls/vmsplice()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1075838/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1076441"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU coreutils</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 16:52 UTC (Thu)
+                               by <b>collinfunk</b> (subscriber, #169873)
+                              [<a href="/Articles/1076441/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="collinfunk" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076441" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess Pádraig and I have good timing [1][2]... It is what it is.<br>
+<p>
+[1] <a href="https://github.com/coreutils/coreutils/commit/2b1c059e6a06eebbb721d010b1221ec54200cc33">https://github.com/coreutils/coreutils/commit/2b1c059e6a0...</a><br>
+[2] <a href="https://github.com/coreutils/coreutils/commit/457f88513a128ce91160c4a60f821cc1612204be">https://github.com/coreutils/coreutils/commit/457f88513a1...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076441/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076442"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU coreutils</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 16:56 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1076442/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076442" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I encourage you to join the conversation, test out the changes to see what performance impacts they have, and let people know what you find — that's how decisions like this are made.  Of course, not many people see <tt>yes</tt> as a performance-critical application :)  But <tt>cat</tt> might be another story.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076442/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076445"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU coreutils</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 17:19 UTC (Thu)
+                               by <b>collinfunk</b> (subscriber, #169873)
+                              [<a href="/Articles/1076445/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="collinfunk" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076445" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'll see if I can once I am back home with access to my main system.<br>
+<p>
+The 'yes' change was actually more meaningful, in my opinion. Although we probably use it a bit more than most, e.g., for generating a lot of bytes for testing. The 'cat' change is a bit more niche, since we still try using copy_file_range first and only attempt splice if that fails.<br>
+<p>
+Since 'cat' doesn't use vmsplice, it seems a bit safer for now.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076445/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU coreutils</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 18:34 UTC (Thu)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1076453/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076453" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The numbers you posted are pretty dramatic - profiles would be really interesting to see<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1076451"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On safer zero-copy IO</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 18:23 UTC (Thu)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1076451/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076451" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So the thing that made the splice() family a giant footgun was working directly at the level of struct page; you can splice a page into a pipe - a page you don't own - and the pipe now owns a ref to that page, and everything that consumes spliced pages has to get COW semantics correct. "Ownership" in this model was always unclear.<br>
+<p>
+But obviously, we do want zero copy IO, and we do it all the time in other areas of the kernel without the same footguns.<br>
+<p>
+Half of the solution is doing it via a real iterator - struct bio in the block layer, and iov_iter in vfs/filesystem code. These are just scatter/gather lists, and they're much simpler to use. Notably, iov_iter generalizes what it can point to - it can be a biovec (used to make loopback devices in O_DIRECT mode zero copy), internal kernel memory, user buffers - and the code that consumes it doesn't know or care.<br>
+<p>
+Iterators are also higher performance than sending pages around because the struct page operations are not cheap; the atomic refcount operations can be some of the most expensive parts of the O_DIRECT io path. They're necessary, you have to pin memory for the IO, but you want that done once at the top of the IO stack and avoid touching struct page at all after that - even if you're not getting/putting, any struct page access after that point is a pointer deref and likely cache miss you don't want.<br>
+<p>
+Networking does have skbs - iterators aren't a foreign concept there. The other part of the problem is networking code that does legitimately need to do complex operations with those data buffers; iterators won't save you if buggy code is just writing into a buffer it doesn't own.<br>
+<p>
+For that the solution is just going to be getting more driver code rewritten in Rust.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076451/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076804"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rewrite the network stack in Rust?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2026 13:57 UTC (Sun)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1076804/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076804" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the network stack deserves a rewrite.  Is there any kernel code that doesn't?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076804/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1076461"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 19:11 UTC (Thu)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/1076461/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Sesse" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076461" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+cubemap, my video reflector, relies _heavily_ on sendfile() being fast. I can't imagine I'm the only one :-/ (I started being worried as I read the article, given that sendfile() was reimplemented in terms of splice at some point.)<br>
+<p>
+Granted, I don't push multi-ten-gigs of video anymore myself, but, yes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076461/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076466"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 19:13 UTC (Thu)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/1076466/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Sesse" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076466" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thinking of it… perhaps the idea is that anyone who really cares about networking performance runs DPDK or XDP or something?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076466/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 19:42 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1076470/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076470" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Netflix uses sendfile on FreeBSD for streaming. It can zero-copy straight from disk to the network card (with TLS offload), though only when using UFS as the design of ZFS isn't amenable to that sort of optimization. DPDK, etc is popular for routing, filtering, and other low-level network-related tasks. I don't think it's very common for application servers (except for doing the former stuff at the edges?); you're basically writing your own unikernel at that point.<br>
+ <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076481"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2026 23:32 UTC (Thu)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1076481/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076481" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+it would be more writing your own L2--L5 stack in userspace, but that kind of functionality is already present if desired in DPDK. XDP is definitely not how you would want to implement anything that relies on reassembling buffers, in my experience.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076481/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1076493"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 3:31 UTC (Fri)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1076493/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076493" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Then please participate to that thread! There seems to be an untold belief that vmsplice() and splice() are just not used and can be sacrificed. We NEED implementers to participate so that a reasonable tradeoff can be found, that is sufficient to block the attacks, has no performance impact for applications, while possibly requiring slight restrictions (e.g. a sysctl or checking the original page is writable etc). But without real applications participating, you'll only see a competition of ideas from people who just want to plug the splice() holes without perceiving the real-world impacts!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076493/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076500"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 6:22 UTC (Fri)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/1076500/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Sesse" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076500" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just to be clear, since this is quite surprising: Is the problem that nobody in the kernel actually knows that e.g. Apache is using sendfile() for performance reasons? Or is it more that nobody will care unless the actual implementers step in and argue their case? (vmsplice() is pretty obscure and I've honestly never gotten it to work well in practice; splice() with two sockets also feels quite niche, but splice() between a file and a socket is indeed sendfile() and I'm having a hard time understanding how anyone would go back to pre-2.2 levels of performance for sendfile().)<br>
+<p>
+I can imagine less stressful things in my life to do than to jump into a heated lkml debate, though :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076500/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076682"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 18:09 UTC (Fri)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1076682/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076682" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's a bit of a mix. I think that people using splice() in general are not very vocal about it because it's complex and looks dirty, so as a result the whole ecosystem is not well known. In addition Linus already stated his dislike for sendfile(). He stated he clearly wants to stop sending file-backed pages to the network.<br>
+<p>
+I think it's a mistake, possibly driven by a lack of knowledge of the real use cases and their benefits for certain users.<br>
+<p>
+In my opinion, a sysctl to enable/disable vmsplice() from file-backed pages would just do the work pretty well. Indeed there are actually two totally distinct populations using splice()/vmsplice()/sendfile() and friends:<br>
+  - high-performance servers which are always tuned and which never load any of the outdated network protocols that nobody even remembers what they used to be used for and that are used in LPE exploits<br>
+  - smartphones, tables and end-user PCs who want to have everything available but don't care about extreme network speeds.<br>
+<p>
+The sysctl perfectly does the job here. Enable it to have your sendfile() or vmsplice() bypass the copy, disable it to have a copy. In both cases the application works, but at different speeds.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076682/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1076720"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 21:53 UTC (Fri)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1076720/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076720" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+According to a recent example [1], users of syscalls should just not implement fallbacks for ENOSYS so that removing the syscall would break userspace.<br>
+<p>
+[1] <a href="1070072.html">https://lwn.net/Articles/1070072/</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076720/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1076502"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 6:47 UTC (Fri)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1076502/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076502" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think there's any silver bullet here - only allowing it if the original file is writeable isn't terrible but that still disallows it in a lot of setups (and introduces another variable to track down when looking at performance), and I think lots of people are aware of sendfile()'s use in networking. It's just a sticky situation.<br>
+<p>
+But, if you look at what the load is on webservers these days, most of them aren't trying to dump tons and tons of static content onto the wire as fast as possible - it's basically all dynamic content where the cost of generating the content dominates, by far. We're not trying to saturate gigabit ethernet links on Pentium IIs anymore, and memcpy() has gotten a lot faster relative to the branchy logic required for everything else in satisfying a request.<br>
+<p>
+I don't think anyone's webservers are going to be suddenly falling over under load if sendfile is flipped off. The spectre mitigations (especially when they were first released) were probably more impactful.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076502/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076683"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 18:16 UTC (Fri)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1076683/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076683" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; if you look at what the load is on webservers these days, most of them aren't trying to dump tons and tons of static content onto the wire as fast as possible - it's basically all dynamic content where the cost of generating the content dominates, by far. We're not trying to saturate gigabit ethernet links on Pentium IIs anymore, and memcpy() has gotten a lot faster relative to the branchy logic required for everything else in satisfying a request.</span><br>
+<p>
+It really depends. I'm dealing with users running multi-100G links and where zero-copy is crucial. memcpy() is fast but only when run in the cache and on small blocks. When you're duplicating data, you're pumping data from the RAM into the cache, then evicting other pages to make your copy, and do that in loops. At the end your cache is totally cold and your data passes twice on the DRAM bus. With zero-copy you don't even need to touch the CPU nor the caches. You just send the NIC the pointer to the data, and it reads them, encrypts them, segments them and emits them over the wire without the CPU ever having to see them. Not only the data only passes once, but in addition your cache remains filled with application data, not data that you're never going to see anymore and that evicted something else. As soon as your network bandwidth becomes a sizeable fraction of the memory bandwidth, splice wins hands on. And with todays networks it's quite common.<br>
+<p>
+BTW the reason for TLS processing to have moved to the NIC is not at all because it's faster there: it's super cheap to do AES on the CPU nowadays. No the only reason for moving it there precisely is to avoid the NIC&lt;-&gt;CPU&lt;-&gt;RAM transfers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076683/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076716"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 21:08 UTC (Fri)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1076716/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076716" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, at those data rates it absolutely does matter - and the second order effects of blowing everything else out of your CPU caches is huge. I saw similar outside performance improvements when I was working on the buffered IO paths - vectorizing generic_file_buffered_read() so that we get all the pages/folios up front and _then_ do the data copies, so that we're not blowing L1 and then walking the radix tree for the next page.<br>
+<p>
+Networking just has some really difficult requirements to deal with - TCP retransmits. That forces you into "we actually own the data buffer even after the syscall has returned", which fs/block has always managed to avoid. <br>
+<p>
+Idle speculative thought: a lot of these design decisions were made back when async anything was really painful - didn't exist for networking, and actually doing async programming in C was always a pita, so we opted for nonblocking IO. Nowadays, we do have io_uring, and async programming in Rust is a dream - so a version of sendmsg() that doesn't return until after the ack, and which you can trivially pipeline with io_uring, could eliminate all the contortions around ownership of pages and be perfectly fine for modern environments (maybe even preferable, it'd get you better error reporting semantics).<br>
+<p>
+If you have that as a primitive, sendfile() is just a version of that that operates from the pagecache directly without faulting it into userspace, similarly for pipes and splice(). And it would actually be faster than splice, because on a pipe there'd be no need for the page refcount operations. For everything else you still need the gup(), like with anything else that DMAs, but the page refcount handling would still probably be simpler overall.<br>
+<p>
+Of course, still doesn't help with drivers that diddle all over buffers that they're not supposed to :) but if userspace bought into the approach it'd be a nice simplification.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076716/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2026 10:55 UTC (Sun)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1076801/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076801" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In fact even without doing architectural code changes like iouring, we could imagine that sendmsg() could return EINPROGRESS just like connect(), as a way to mean "data are in the process of being sent, we'll wakeup poll once no longer needed". But MSG_ZEROCOPY does almost that, via a receive channel indicating what can be freed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076816"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Ugh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2026 21:00 UTC (Sun)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1076816/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076816" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+*twitches involuntarily at -EINPROGRESS*<br>
+<p>
+The problem with -EINPROGRESS is that you're taking something that should be a nice clean RPC/async fn and muddying it - userspace needs to know which sendmsg() completed asynchronously and when so it can free its own buffer, and you want to pipeline multiple sendmsg()s, so you really do need something like io_uring to do this sanely.<br>
+<p>
+And MSG_ZEROCOPY is the same basic mechanic as splice, but if you have an async op with the lifetime of the full send, and can tie the page get/puts to that instead of having them released by the networking code itself, you could potentially get rid of those entirely.<br>
+<p>
+"Is this op to an mlock'd region?" - take a percpu ref that holds the mlock instead, cut the atomic page ref ops out entirely.<br>
+<p>
+Always wanted to do something like this for O_DIRECT.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076816/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1076867"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kTLS offload is missing TLS1.3 and thus post-quantum</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 12:09 UTC (Mon)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1076867/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076867" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+kTLS offload only supports TLS1.2, which will never get post-quantum cryptography support.  That means it dies at the end of 2028 or so.<br>
+<p>
+Why 2028?  Because Google’s timeline for migration is 2029: <a href="https://blog.google/innovation-and-ai/technology/safety-security/cryptography-migration-timeline/">https://blog.google/innovation-and-ai/technology/safety-s...</a>.  And, if I understand IBM’s timelines correctly, they believe they can build a quantum computer by then that will be able to break elliptic curve cryptography.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076867/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1076489"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">is a hybrid compromise possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 2:31 UTC (Fri)
+                               by <b>robert.cohen@anu.edu.au</b> (subscriber, #6281)
+                              [<a href="/Articles/1076489/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="robert.cohen@anu.edu.au" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076489" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is it possible to do a hybrid system where a small number of important subsystems are whitelisted.<br>
+If the source or destination isn't whitelisted it falls back to the preadv/pwritev implementation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076489/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">is a hybrid compromise possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 6:04 UTC (Fri)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1076497/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076497" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This was my thought too. Afaict the use cases people care about are memory to/from pipes and tcp sockets. Make those fast and everything else gets the slow route. You still get to toss out a lot of dodgy code, and the parts that are there are in the most heavily used parts of the system.<br>
+<p>
+Although, since [vm]splice() requires special support in a socket type, I would imagine that there must be a slow fallback path anyway. In which case just deleting the code would have the desired effect. OTOH, if the code was written, someone must have cared.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076501"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">is a hybrid compromise possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 6:28 UTC (Fri)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/1076501/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mirabilos" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076501" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not let it return ENOSYS instead? And then drop the NR from the headers so future builds will not even show it as present.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076501/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1076806"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don’t forget QUIC!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2026 14:02 UTC (Sun)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1076806/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076806" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+QUIC is going to be as important as TLS1.3 for high-performance work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076806/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don’t forget QUIC!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 8:54 UTC (Mon)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1076846/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076846" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+QUIC is slow, and has design decisions that make it very hard to make quick.<br>
+<p>
+IMO, high-performance work will use another protocol (TCP or else a custom protocol).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076849"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don’t forget QUIC!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 10:04 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1076849/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076849" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is nothing that would make QUIC be fundamentally slower than TCP+TLS 1.3<br>
+<p>
+It's purely an issue of implementation, right now QUIC is implemented entirely in userspace, without any hardware offloading.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076849/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don’t forget QUIC!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 10:41 UTC (Mon)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1076855/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076855" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are multiple reasons why QUIC can not be faster than TCP:<br>
+<p>
+1. Its mechanism for acknowledging received data has a level of indirection. Tracking ACKs intrinsically, fundamentally, has more overhead than a transport with a direct mechanism.<br>
+<p>
+2. Packets always have to be re-encrypted to be re-transmitted.<br>
+<p>
+It has other annoying, needless, complications - not total blockers to performance, but just adds friction to writing a really fast QUIC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Don’t forget QUIC!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2026 11:00 UTC (Mon)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1076858/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076858" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, I'd accept these overheads can probably be minimised to a point where QUIC performance wouldn't be far off from TCP, with a good and careful implementation. However, there will always be a cost to them.<br>
+<p>
+Oh, the unbounded number of ACK ranges is another complication. To fully support the standard AND always be performant you must use reasonably sophisticated data-structures, which of themselves come with some constant-time overheads, versus what you could do if # of ACK ranges had some reasonable bound on them. You may argue allowing high number of ACK ranges allows for better performance even under non-trivial loss/re-ordering on v high BDP links, and perhaps you'd be right - but that's not proven, which makes you wonder if the software costs (complexity of code, processing costs) are worth it for the general case.<br>
+<p>
+And, in general, perhaps for each such design decision that adds complexity in QUIC you could argue it is of some benefit in some case, but... certainly the evidence either is missing or is subjective for most (all?) of them. And collectively it leads to a somewhat complex, finicky protocol.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1076520"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SO_SPLICE?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 11:58 UTC (Fri)
+                               by <b>joed</b> (subscriber, #139219)
+                              [<a href="/Articles/1076520/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joed" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076520" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For socket-to-socket operations, why not implement OpenBSD[1]/FreeBSD[2]'s SO_SPLICE? All the copying gets handed off to a thread-pool within the kernel. It's a quite a convenient API, and even allows for bidirectional data flow. <br>
+<p>
+[1]: <a href="https://man.openbsd.org/setsockopt#SO_SPLICE">https://man.openbsd.org/setsockopt#SO_SPLICE</a><br>
+[2]: <a href="https://man.freebsd.org/cgi/man.cgi?query=setsockopt&amp;sektion=2">https://man.freebsd.org/cgi/man.cgi?query=setsockopt&amp;...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076520/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076685"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SO_SPLICE?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 18:45 UTC (Fri)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1076685/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076685" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Socket to socket splicing seems even more niche. I could only find two uses of SO_SPLICE in the OpenBSD tree, both in relayd as variants. Likewise, FreeBSD base only has a single use, AFAICT, and it's in the so_splice command-line test tool, which apparently was written when adding SO_SPLICE to FreeBSD to enable support in their relayd port: <a href="https://klarasystems.com/articles/network-offload-and-socket-splicing-so_splice-in-freebsd/">https://klarasystems.com/articles/network-offload-and-soc...</a> If SO_SPLICE gains support for splicing kTLS sockets (TBD at the time of that article), or can be used with TLS offload NICs, I could definitely see the value, but still more niche than sendfile. I think OpenBSD invented it just because it was simple enough and an easy performance win for relayd relative to the general lack of performance tuning in OpenBSD.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076685/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076810"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SO_SPLICE?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2026 17:34 UTC (Sun)
+                               by <b>erincandescent</b> (subscriber, #141058)
+                              [<a href="/Articles/1076810/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="erincandescent" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076810" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Socket-to-socket splicing is not too common inside edge proxies/load balancers/etc<br>
+<p>
+Go will do this via splice(2) if you do an io.Copy() between a pair of sockets, and so it shows up in e.g. Traefik<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076810/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1076705"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Privacy</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2026 20:17 UTC (Fri)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1076705/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076705" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      One should mention, the only benefit of splice is not just the performance of zero-copy. Using splice and pipes (not necessarily vmsplice, that's a whole different beast) a process may perform i/o and another process with ptrace or similar rights may NOT observe the contents of that i/o unlike the equivalent preadv/pwritev. This matters for the Syd sandbox and I am sure many more programs in the wild. In this perspective making splice not zero-copy does not change anything but removing it does...
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076705/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076807"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Splice and syd</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2026 14:04 UTC (Sun)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1076807/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076807" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does this matter for Syd’s sandbox?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076807/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1076814"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Splice and syd</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2026 19:11 UTC (Sun)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1076814/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1075838/#CommAnchor1076814" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Syd uses the splice/pipe mechanism mainly for two things:<br>
+<p>
+1. Secure forwarding: PTY sandboxing[1] isolates the terminal,<br>
+whereas Proxy sandboxing[2] isolates the network. syd-pty,<br>
+and syd-tor are helper programs that perform the forwarding.<br>
+They're confined to use splice/pipe only. This prevents another<br>
+process from eavesdropping using ptrace/seccomp or other means<br>
+of process interaction. Full implications of this is hard to describe<br>
+here so I'll refer you to the security sections of syd-pty[3] and syd-tor[4].<br>
+<p>
+2. Secure encryption: Crypt sandboxing[5] uses Linux kernel algorithm<br>
+sockets and splice/pipe to perform encryption with minimum information:<br>
+ALG_SET_KEY_BY_KEY_SERIAL socket option allows Syd to directly seed<br>
+the encryption socket using a key id from a Linux keyring. This means<br>
+Syd never keeps key material in memory. Transfer using splice/pipe ensures<br>
+security and privacy: Even Syd itself does not have access to the plain text,<br>
+so even if an attacker compromises Syd having access to the plain text will<br>
+be difficult given also the presence of Syscall Argument Cookies[6].<br>
+<p>
+It's therefore sad to see these useful APIs get deprecated one by one due to<br>
+security issues. At some point in time syd-pty broke because splice support<br>
+for character devices was dropped from Linux kernel, and added back shortly<br>
+after. Now people are discussing to deprecate splice and kernel algorithm sockets<br>
+altogether. I understand the reasoning but the usefulness of these APIs are understated,<br>
+in my humble opinion.<br>
+<p>
+[1]: <a href="https://man.exherbo.org/syd.7.html#PTY_Sandboxing">https://man.exherbo.org/syd.7.html#PTY_Sandboxing</a><br>
+[2]: <a href="https://man.exherbo.org/syd.7.html#Proxy_Sandboxing">https://man.exherbo.org/syd.7.html#Proxy_Sandboxing</a><br>
+[3]: <a href="https://man.exherbo.org/syd-pty.1.html#SECURITY">https://man.exherbo.org/syd-pty.1.html#SECURITY</a><br>
+[4]: <a href="https://man.exherbo.org/syd-tor.1.html#SECURITY">https://man.exherbo.org/syd-tor.1.html#SECURITY</a><br>
+[5]: <a href="https://man.exherbo.org/syd.7.html#Crypt_Sandboxing">https://man.exherbo.org/syd.7.html#Crypt_Sandboxing</a><br>
+[6]: <a href="https://man.exherbo.org/syd.7.html#Syscall_Argument_Cookies">https://man.exherbo.org/syd.7.html#Syscall_Argument_Cookies</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1076814/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,178 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Filtered wakeups [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Filtered wakeups">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Kernel code often finds itself having to wait for a particular physical page; if, for example,  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/82759/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Filtered wakeups</h1>
+<div class="Byline">[Posted May 5, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Kernel code often finds itself having to wait for a particular physical
+page; if, for example, a page is currently under I/O, prospective users
+must wait until that operation has completed.  In the early days of 2.4
+(and before), the <tt>struct page</tt> structure (which the kernel uses to
+track physical memory) contained a wait queue head for this purpose.  This
+technique worked, but adding a wait queue for every page in the system was
+not a particularly efficient use of memory.  At any given time, only a tiny
+percentage of those wait queues are actually in use.
+<p>
+To recover some of the memory used by wait queues, the kernel developers
+added the concept of hashed wait queues.  The per-page queues were replaced
+with a much smaller number of shared queues; when a thread needs to wait on
+a particular page, it hashes the page address to pick the appropriate
+queue.  When the page becomes available, all processes waiting on that
+queue will be awakened.  The use of this technique has since been extended
+to other parts of the kernel as well.
+<p>
+Hashed wait queues have achieved the desired space savings, but, as it
+turns out, at a certain computational cost.  William Lee Irwin <a
+href="/Articles/83635/">did some research</a>, and found that hash queue
+collisions are fairly common.  So, when a wakeup is performed on one of the
+hashed wait queues, it is likely that unrelated processes are being
+awakened.  Each of those processes must run, determine that the event they
+are waiting for has not yet occurred, and go back to sleep.  This variant
+on the "thundering herd" problem can hurt performance.
+<p>
+One possible solution to this problem would be to expand the number of wait
+queues to make collisions less likely.  That approach is simple, but it
+also would bring back the original problem by expanding the amount of
+memory dedicated to wait queues.  So William came up with another approach,
+which he calls "filtered wakeups."
+<p>
+The idea behind a filtered wakeup is fairly simple.  When a process goes to
+sleep on a (shared) filtered wait queue, it provides a "key" value, which
+will typically be the address of the resource being waited for.  The wakeup
+call is made with a key value as well; as the wait queue is traversed, only
+the processes waiting for the given key are awakened.  
+<p>
+<a
+href="/Articles/83507/">The patch</a> which implements filtered waits is
+fairly simple, and includes an example of their use.  It creates a new
+<tt>filtered_wait_queue</tt> structure:
+<p>
+<pre>
+	struct filtered_wait_queue {
+		void *key;
+		wait_queue_t wait;
+	};
+</pre>
+<p>
+A process which is about to go into a filtered wait will use code which
+looks something like the following to create an use a filtered queue entry:
+<p>
+<pre>
+	DEFINE_FILTERED_WAIT(wait, key);
+
+	do {
+		prepare_to_wait(queue, &amp;wait.wait, TASK_INTERRUPTIBLE);
+		if (not_ready_yet(key))
+			schedule();
+	} while(not_ready_yet(key));
+	finish_wait_(queue, &amp;wait.wait);
+</pre>
+<p>
+Awakening a process in this sort of sleep is a simple matter of calling:
+<p>
+<pre>
+    void wake_up_filtered(wait_queue_head_t *queue, void *key);
+</pre>
+<p>
+
+William <a href="/Articles/83506/">claims</a> some significant performance
+improvements from his changes, including large reductions in CPU usage and
+a near tripling of the peak I/O rates in some situations.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filtered wakeups</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Filtered wakeups</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Wait queues</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/83633/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor83694"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Big Wheel Keeps on Turnin'</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2004 3:40 UTC (Thu)
+                               by <b>kbob</b> (guest, #1770)
+                              [<a href="/Articles/83694/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kbob" />
+                <input type="hidden" name="return" value="/Articles/83633/#CommAnchor83694" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      William has almost reinvented Ken Thompson's original single global wait queue which used a wchan parameter to specify the processes to wake.<p>I know it's not quite the same, and it scales much better, but it still feels like deja vu.<p>K&lt;bob&gt;<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/83694/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

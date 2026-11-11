@@ -1,0 +1,451 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fedora and SELinux relabeling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Fedora and SELinux relabeling">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Relabeling filesystems for SELinux is an important, if unloved, requirement for new filesystem [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/693096/">Return to the Distributions page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fedora and SELinux relabeling</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>July 7, 2016</br>
+           </div>
+<p>
+Relabeling filesystems for SELinux is an important, if <a href="http://danwalsh.livejournal.com/38157.html">unloved</a>, requirement
+for new filesystems or when updating SELinux policy.  That relabeling
+process normally occurs at boot time, but there needs to be "enough" of the
+system running to support the operation, which can be tricky to arrange.
+Fedora recently struggled with 
+this problem and a reasonable solution appears to have been found.
+</p>
+
+<p>
+SELinux relies on filesystem extended attributes (xattrs) to store the
+<i>context</i> (or label) for each file.  That context is then used by the
+SELinux 
+security module in the kernel to make access-control decisions based on the
+policy, which gets
+loaded at boot time.  Thus, when the policy changes or a new
+filesystem is created, the file contexts will need to be set or adjusted,
+which is done by walking the mounted filesystems and setting the xattrs
+appropriately. 
+</p>
+
+<p>
+But, as Richard W. M. Jones <a href="/Articles/693772/">noted</a> in a post
+to the Fedora development mailing list, getting the system to the point
+where the 
+<tt>fedora-autorelabel.service</tt> can run entails getting pretty far into
+the boot process.  Since the file labels have not yet been changed, though,
+some of 
+the startup services and programs can fail due to SELinux denials.  So
+systemd may not be able to get to the point of running the relabel service
+and the system "<q>can be
+dumped into a rescue shell, or worse still go into a boot loop</q>".
+</p>
+
+<p>
+Relabeling is typically triggered by the presence of a file called
+<tt>/.autorelabel</tt> at boot time or by the <tt>autorelabel</tt> boot
+parameter.  The process requires that the
+<tt>local-fs.target</tt> be reached and "<q>dozens of services need to be
+started successfully before we even get to local-fs.target</q>". Several
+recent bugs have been filed (Jones mentioned <a
+href="https://bugzilla.redhat.com/show_bug.cgi?id=1351352">1351352</a> and
+<a href="https://bugzilla.redhat.com/show_bug.cgi?id=1349586">1349586</a>),
+but the problem goes back further than that: to bug <a
+href="https://bugzilla.redhat.com/show_bug.cgi?id=1049656">1049656</a> filed
+against systemd in Fedora&nbsp;20.
+</p>
+
+<p>
+One obvious way around the problem would be to turn off SELinux enforcing
+mode before the system boots and then to enable it again once the relabel
+is complete (which will reboot the system).  That opens a window of
+vulnerability, but that outcome may well be unavoidable. As Simo Sorce <a
+href="/Articles/693774/">put it</a>: "<q>if the labeling is broken,
+starting in 
+enforcing may mean you never get to relabel the filesystem as the
+relabeling tool may fail to start altogether</q>". 
+</p>
+
+<p>
+Jones made some other suggestions for possible solutions in his post.  For
+example, the process that switches SELinux to enforcing mode (based on the
+setting in <tt>/etc/selinux/config</tt>) could recognize the presence of the
+<tt>/.autorelabel</tt> file or the boot parameter and trigger the
+relabeling at that point.  After that completes, enforcing mode could be
+turned on.
+</p>
+
+<p>
+But the discussion fairly quickly zeroed in on creating a separate, minimal
+systemd target that would simply mount the local filesystems in preparation
+for doing the relabel.  As Christian Stadelmann <a
+href="/Articles/693777/">pointed out</a>, the requirements are similar to
+those of <tt>dnf&nbsp;system-upgrade</tt>.  Sorce agreed:
+<div class="BigQuote">
+[...] the system should have an autorelabel
+target that is one-shot just like the system upgrades, and it should
+bring up really the minimal system required to boot and mount the
+filesystem to be relabeled and nothing else, it should work in
+permissive mode and possibly with auditing enabled.
+</div>
+</p>
+
+<p>
+Systemd developer Lennart Poettering also <a
+href="/Articles/693778/">concurred</a>:
+<div class="BigQuote">
+ My suggestion would be for SELinux to provide a systemd
+"Generator" tool (see <a href="https://www.freedesktop.org/software/systemd/man/systemd.generator.html">systemd.generator(7)</a> for details) that checks
+for the auorelabel flag file or kernel [command] line option and then
+diverts the boot into a special relabel target that pulls in
+local-fs.target and very little else, then does its relabelling and
+reboots again. During all of this selinux should be in permissive
+mode, after all the labels are generally borked if you boot into this
+mode, and hence not suitable for making security decisions.
+</div>
+</p>
+
+<p>
+A systemd generator is a binary that gets run early in the boot process,
+which can generate unit files and do other configuration tasks at runtime
+for the rest of that boot cycle. Jones <a href="/Articles/693781/">created
+two patches</a> based on the suggestions.  The first changes
+<tt>libselinux</tt> to recognize the autorelabel flag (from the file or
+command line) and sets SELinux to permissive mode.  The second is a systemd
+generator to divert to a different target for that boot that only relies
+on the minimal targets required to have the local filesystems available.
+</p>
+
+<p>
+As it turned out, though, Jones could only get the second patch to work by
+depending on 
+both <tt>local-fs.target</tt> <i>and</i> <tt>sysinit.target</tt>.  Without
+the latter, the <tt>/boot</tt> filesystem was not mounted.  Zbigniew
+Jędrzejewski-Szmek <a href="/Articles/693782/">said</a> that was likely a
+bug, so simply depending on <tt>local-fs.target</tt> would seem to be a
+workable solution eventually.
+</p>
+
+<p>
+In addition, as Adam Williamson (who filed some of the recent bugs) <a
+href="/Articles/693783/">pointed out</a>, the second patch is not strictly
+necessary.  But Jones is <a href="/Articles/693784/">concerned</a> that
+starting other services while SELinux is in permissive mode—network
+services in particular—could be problematic, so he would like to push both
+even though the second is not absolutely necessary. 
+</p>
+
+<p>
+It would seem that a fairly longstanding, but infrequently occurring, bug
+will be closed soon.  Based on the bug reports, it was largely confined to
+virtual machines that QA testers and others set up for their testing, so it
+may not 
+have affected all that many real Fedora users.  But the problem was real,
+with the potential to hang newly updated systems someday, which certainly
+would affect users.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Distribution security</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Security Enhanced Linux (SELinux)</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/693620/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor693914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fedora and SELinux relabeling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2016 21:06 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/693914/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/693620/#CommAnchor693914" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ugh. SELinux people should just stop this nonsense and use name-based policies. <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693925"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fedora and SELinux relabeling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2016 22:52 UTC (Fri)
+                               by <b>eduard.munteanu</b> (guest, #66641)
+                              [<a href="/Articles/693925/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="eduard.munteanu" />
+                <input type="hidden" name="return" value="/Articles/693620/#CommAnchor693925" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Given labels are stored in the filesystem, I wonder, what happens when you plug in an untrusted external device? Is it sound to rely on filesystem labels rather than a secured central store?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693925/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693927"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fedora and SELinux relabeling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2016 23:17 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/693927/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/693620/#CommAnchor693927" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Either you trust it or you apply one label to all of the mounted FS.<br>
+<p>
+Yes, SELinux is that kind of a trainwreck.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693927/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fedora and SELinux relabeling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2016 23:57 UTC (Fri)
+                               by <b>eduard.munteanu</b> (guest, #66641)
+                              [<a href="/Articles/693928/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="eduard.munteanu" />
+                <input type="hidden" name="return" value="/Articles/693620/#CommAnchor693928" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Honestly, I don't think a MAC is the right solution at all, it serves a very limited usecase. It doesn't even work with containers (you can't integrate container policy) (*), for instance. What people want is a more powerful DAC, as policy is inherently layered and decentralized in real-world scenarios.<br>
+<p>
+(*) There was a patch floating around implementing context namespaces, dunno what became of it or if it's enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fedora and SELinux relabeling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2016 0:04 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/693930/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/693620/#CommAnchor693930" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SELinux is a bad idea for many other reasons. In particular, it is so braindead that it's designed to fail dangerously. If you turn off SELinux you get _more_ access, not _less_.<br>
+<p>
+But I don't think DAC is a good idea. Complicated DACs are hard to use and easy to get wrong (just ask Windows admins).<br>
+<p>
+What I'd like is a capability-based security, perhaps implemented as a set of SELinux-like labels and name-based policies (like in AppArmor). Actually, AppArmor comes really close to that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor693980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fedora and SELinux relabeling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 10, 2016 9:55 UTC (Sun)
+                               by <b>misc</b> (subscriber, #73730)
+                              [<a href="/Articles/693980/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="misc" />
+                <input type="hidden" name="return" value="/Articles/693620/#CommAnchor693980" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am not sure what you mean by "name based", but I will assume something like app armor, correct me if I am wrong (and obviously disregard my comment).<br>
+<p>
+So based on that, name based do not permit people to apply a label to a document and move it around (see the classical case of security clearance), and that's a use case required by some selinux user. Of course, this would also be doable if we keep the xattrs tagging and use a name in the policy approach, but this seems to increase the size of the code base and paths to be checked, which is likely something coders may not want.<br>
+<p>
+Using name based also mean that suddenly, the semantic of the type is encoded in the policy ( ie, instead of saying example_t can do this, I have to tell /usr/bin/example can do this), and that mean you can't extend that to more systems (like postgres, xorg) without touching to the kernel. This also requires a syntax that can be easy to extend for the policy. The current system has enough layer of abstraction to ease that kind of setup. <br>
+<p>
+I can see why people think that a model like apparmor is simpler, and that's because it is indeed simpler. Now, since apparmor is extended at every version to add more keywords and everything, I am not sure the simplicity is warranted and will survive as more and more people add more use cases.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fedora and SELinux relabeling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 10, 2016 19:24 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/693999/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/693620/#CommAnchor693999" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  So based on that, name based do not permit people to apply a label to a document and move it around (see the classical case of security clearance), and that's a use case required by some selinux user. </font><br>
+Most users DO NOT care about security clearances model. Designing a system based on the use-cases of three-letter agencies and not actual users is a BAD idea.<br>
+<p>
+Typically users have one label for most of their documents, with perhaps some documents marked as "Extra Private". And the best interface for that is a folder named "Private". You move your important documents there and they gain additional protection.<br>
+<p>
+As additional plus, you don't have to care what happens with your documents after a round-trip on a USB stick. You simply put the file in the right place.<br>
+<p>
+<font class="QuotedText">&gt; Using name based also mean that suddenly, the semantic of the type is encoded in the policy ( ie, instead of saying example_t can do this, I have to tell /usr/bin/example can do this), and that mean you can't extend that to more systems (like postgres, xorg) without touching to the kernel. </font><br>
+Not true. The labels are simply applied to files according to name-based policies. You say that "/home/*/Private/**" files have "private_document" label and then write policies for applications accordingly.<br>
+<p>
+You certainly can have additional labeled sources, like DBUS, Postgres or labeled network packets. But this is a bad idea, anyway. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

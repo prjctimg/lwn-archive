@@ -1,0 +1,515 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Linux capabilities support for user namespaces [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Linux capabilities support for user namespaces">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Linux capabilities are a sparsely used kernel facility to add granularity to the set of privil [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/420064/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Linux capabilities support for user namespaces</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>December 22, 2010</br>
+           </div>
+<p>
+Linux capabilities are a sparsely used kernel facility to add granularity
+to the set of privileges that a process can have.  By using capabilities,
+an administrator can grant a process a limited set of privileges, rather
+than the  
+usual, essentially binary, choice between granting all privileges via
+<tt>setuid()</tt> or granting just those of the user running the program.
+Combining capabilities with user namespaces will allow administrators to
+apply those fine-grained privileges to containers, which is just what a <a
+href="https://lwn.net/Articles/420328/">patch set</a> proposed by Serge
+E. Hallyn sets out to do.
+</p>
+
+<p>
+We have looked at capabilities several times in the past, most recently in
+the context of <a href="256519.html">adding capability
+sets to files</a>, though an <a
+href="199004.html">earlier article</a> provides more
+details on the rules that govern how capabilities are applied and
+inherited.  With the addition of file capabilities, Linux systems have all
+the tools needed to eliminate most setuid programs though, in practice,
+that hasn't happened.  There is an effort underway to <a
+href="http://fedoraproject.org/wiki/Features/RemoveSETUID">eliminate most
+setuid programs</a> for Fedora 15, however.
+</p>
+
+<p>
+Namespaces are part of the Linux containers implementation, which is a
+lightweight virtualization technique that allows groups of processes to run
+in their own little world, separate from the rest of the processes running
+on the system.  These containers must not be able to see or interact with
+things outside, so various global resources (things like process
+IDs, network devices, filesystems, and so on) need to be wrapped in a
+namespace layer that provides the illusion that the container is its own
+system.  User namespaces provide a container with its own set of UIDs,
+completely separate from those in the parent.  Each of the different kinds
+of namespaces can be created by using flags to the <tt>clone()</tt> system
+call. 
+
+<p>
+The idea behind Hallyn's patches, the core of which was originally
+developed by Eric Biederman, is to eventually allow unprivileged users to
+create namespaces.  In order to do that, the capabilities of processes in a
+namespace must not leak out to parent (or even sibling) namespaces.  In the 
+<a href="/Articles/420712/">core patch</a>, Hallyn says that the proposed
+changes accomplish 90% of the goal to allow unprivileged namespace
+creation, with some UID confusion issues still 
+to be addressed.
+</p>
+
+<p>
+In the initial user namespace&mdash;the "normal" namespace that is created
+at boot 
+time&mdash;capabilities for a task are calculated in the usual way, using
+the permitted, effective, and inheritable capability sets associated with
+the task.  The proposed changes will restrict any capabilities in a child
+user namespace to only act within that namespace or on any of its
+descendants.  
+<p>
+Each capabilities set is contained in a structure that
+references the user it corresponds to, and those user structures have a
+namespace to which 
+they are attached.  When checking to determine whether a particular set of
+capabilities should be used, the code looks at whether the user is part of
+the target namespace.  If so, its
+capabilities are used, if not, each parent namespace is checked all the way
+back to the initial user namespace.  Since the capabilities can only be
+associated with one namespace (via a user in that namespace), they are only 
+active in the namespace that contains them or any descendant from that namespace.
+
+
+<p>
+The user that creates the namespace will have all
+capabilities in that namespace, not just the set of capabilities they have
+in the parent.  Essentially, the creator has the privileges of the root
+user in any namespace he or she creates.  
+
+<p>
+In order to ensure that the namespace creator's capabilities don't leak out
+to the rest of the system, a new capability check is added in the patch:
+<pre>
+    int ns_capable(struct user_namespace *ns, int cap);
+</pre>
+The existing <tt>capable()</tt> function, which determines whether a task has a
+particular capability or not, has been changed to call
+<tt>ns_capable()</tt>, but 
+it passes the initial user namespace for <tt>ns</tt>.  That means that the
+existing calls to <tt>capable()</tt> currently sprinkled around the kernel
+do not suddenly change their semantics.  In order to allow specific
+capabilities to function in a user namespace, calls to <tt>capable()</tt>
+need to be changed to <tt>ns_capable()</tt> while passing the appropriate
+namespace.  The <tt>cap_capable()</tt> function, which is eventually called
+from <tt>ns_capable()</tt>, has been changed to properly handle capabilities
+in user namespaces.
+
+<p>
+In this way, kernel functionality that requires certain
+capabilities can be incrementally added to user 
+namespaces while still protecting the rest of the kernel from being
+affected.
+Hallyn's patches enable three specific capabilities for user namespaces by
+making the change from <tt>capable()</tt> to <tt>ns_capable()</tt>.  The
+first, and simplest, just allows the <tt>sethostname()</tt> system call to
+be successfully called if the user in the namespace has
+<tt>CAP_SYSADMIN</tt>.  The second, which is slightly more complicated, but still a pretty small
+change, alters <tt>check_kill_permission()</tt> to allow <tt>CAP_KILL</tt>
+enabled tasks to send a signal to another task.  The last patch allows
+<tt>CAP_SYS_PTRACE</tt> 
+capable tasks to use <tt>ptrace()</tt> on other tasks in the user namespace. 
+</p>
+
+<p>
+This is an incremental approach that will allow each addition of user
+namespace capabilities to be reviewed and tested separately before adding
+them into the mainline.  Hallyn notes his current plans for enabling some
+additional 
+capabilities from user namespaces:
+<div class="BigQuote">
+My near-term next goals will be to enable setuid and setgid,
+and to provide a way for the filesystem to be usable in child
+user namespaces.  At the very least I'd like a fresh loopback
+or LVM mount and proc mounts to be supported.
+</div>
+
+<p>
+Capabilities are something of gnarly corner of the
+kernel, and one that has caused problems in the past (e.g. the "sendmail
+capabilities" bug). Combining them with namespaces is a bit of a
+delicate task.  Clearly, if regular users are able to create these
+namespaces, it is imperative that any tricky interactions caused by
+capabilities in namespaces do not lead to privilege escalations.  From that
+perspective, Hallyn's approach seems sound.</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Containers</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Linux kernel/Linux/POSIX capabilities</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Namespaces</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/420624/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor420969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenWall 3.0</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2010 21:49 UTC (Thu)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/420969/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smoogen" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor420969" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As a Fedora person, I just wanted to point out that there may have been a setuid-less OS shipped before Fedora 15. The openwall project released their 3.0 on December 10th which states that their default install does not have setuid but some setgid programs. I don't know if they are using capabilities or not (have it on my after Xmas list of things to check out) but thought it should be noted.<br>
+<p>
+<a href="http://www.openwall.com/lists/announce/2010/12/15/1">http://www.openwall.com/lists/announce/2010/12/15/1</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor420970"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenWall 3.0</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2010 22:03 UTC (Thu)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/420970/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smoogen" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor420970" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And in reading the next section I see they have instead implemented kernel fixes to allow for setgid programs to open icmp versus capabilities. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420970/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor421878"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenWall 3.0</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2011 16:23 UTC (Thu)
+                               by <b>solardiz</b> (guest, #35993)
+                              [<a href="/Articles/421878/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="solardiz" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor421878" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ping is a special case.  For everything else, we made purely userland changes to eliminate the need for having any SUID programs.  You may want to check out these links:<br>
+<p>
+<a rel="nofollow" href="http://www.openwall.com/tcb/">http://www.openwall.com/tcb/</a><br>
+<a rel="nofollow" href="http://www.openwall.com/presentations/Owl/mgp00013.html">http://www.openwall.com/presentations/Owl/mgp00013.html</a><br>
+<a rel="nofollow" href="http://www.openwall.com/presentations/Owl/mgp00020.html">http://www.openwall.com/presentations/Owl/mgp00020.html</a><br>
+<a rel="nofollow" href="http://www.openwall.com/presentations/Owl/mgp00021.html">http://www.openwall.com/presentations/Owl/mgp00021.html</a><br>
+<a rel="nofollow" href="http://www.openwall.com/presentations/Owl/mgp00022.html">http://www.openwall.com/presentations/Owl/mgp00022.html</a><br>
+<a rel="nofollow" href="http://www.openwall.com/presentations/Owl/mgp00023.html">http://www.openwall.com/presentations/Owl/mgp00023.html</a><br>
+<p>
+also mentioned in the "next section" that you referred to:<br>
+<p>
+<a rel="nofollow" href="http://lwn.net/Articles/420801/">http://lwn.net/Articles/420801/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/421878/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor421879"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenWall 3.0</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2011 16:38 UTC (Thu)
+                               by <b>solardiz</b> (guest, #35993)
+                              [<a href="/Articles/421879/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="solardiz" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor421879" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also, this description - "kernel fixes to allow for setgid programs to open icmp" (from your comment) - is not entirely correct.  What we're proposing on LKML is adding non-raw ICMP sockets (where one can only send certain things and receive certain relevant responses).  This is not the same as permitting some programs to access the existing (raw) ICMP sockets.  And this is post-Owl-3.0 stuff; on our 3.0 release, we left out the ping special case (ping is simply restricted to invocation by root by default, although this is configurable; our traceroute works as non-root fine).<br>
+<p>
+Overall, Owl 3.0 is primarily about the hardened userland.  We do not use filesystem capabilities, and our userland is usable with mainstream kernels (although we do provide and recommend a specific RHEL5/OpenVZ patched kernel).  In fact, some people are running our userland in OpenVZ containers on non-Owl host systems (we provide pre-created OpenVZ templates of the userland), although we generally use Owl for both "host" and "guest" ourselves.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/421879/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor420993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">suid less os's.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2010 5:59 UTC (Fri)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/420993/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiederm" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor420993" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sigh plan 9 did this years ago; without suid, without sgid, and without capabilities.<br>
+<p>
+Linux has all of the capabilities plan 9 did, so going suidless without caveats is possible if someone would care.  <br>
+<p>
+Frankly being able to raise the priveleges of an existing process is such a dangerous mechanism and so limiting on system design that I wish someone would care, and remove all suid, sgid, and capabilities use from a distro.  It is hard to count how many neat new features have been shelved because of the requirement to support suid root executables.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor421669"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">suid less os's.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2011 12:13 UTC (Wed)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/421669/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mjthayer" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor421669" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Sigh plan 9 did this years ago; without suid, without sgid, and without capabilities.</font><br>
+<p>
+I'm no expert on Plan 9, but from a bit of quick googling it looks to me like it had local server processes to do privileged things for other processes that didn't have the rights to do them themselves.  Which sounds rather like DBus/PolicyKit to me.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/421669/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor421086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenWall 3.0</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 26, 2010 22:42 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/421086/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor421086" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't really understand all this setuidless craziness.<br>
+<p>
+Sure, having setuid on 'ping' is crazy, but having setuid bit on 'sudo' is downright logical.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/421086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor421885"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenWall 3.0</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2011 17:01 UTC (Thu)
+                               by <b>solardiz</b> (guest, #35993)
+                              [<a href="/Articles/421885/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="solardiz" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor421885" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Having sudo and allowing for the use of su to elevate privileges is downright illogical in most cases (on servers, which is what Openwall GNU/*/Linux is for).  Here are some excerpts from past discussions on the topic:<br>
+<p>
+<a rel="nofollow" href="http://www.openwall.com/lists/owl-users/2004/10/20/6">http://www.openwall.com/lists/owl-users/2004/10/20/6</a><br>
+<a rel="nofollow" href="http://lwn.net/Articles/413891/">http://lwn.net/Articles/413891/</a><br>
+<a rel="nofollow" href="http://linux.slashdot.org/comments.pl?sid=1915256&amp;cid=34598296">http://linux.slashdot.org/comments.pl?sid=1915256&amp;cid...</a><br>
+<p>
+The alternative to the su/sudo approach is direct root logins.  And the solution to the accountability problem (with multiple sysadmins) is multiple root-privileged accounts (with a distinct naming convention for clarity).<br>
+<p>
+Occasional exceptions do exist.  In our experience, less than 10% of server systems would potentially benefit from sudo, and a safer approach can be used on those anyway: we generally prefer ssh forced commands - that is, command=... in authorized_keys - even if this is to be invoked by a local account on the system itself, such as by a support person who is not a "full" sysadmin.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/421885/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor421893"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenWall 3.0</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2011 17:15 UTC (Thu)
+                               by <b>solardiz</b> (guest, #35993)
+                              [<a href="/Articles/421893/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="solardiz" />
+                <input type="hidden" name="return" value="/Articles/420624/#CommAnchor421893" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As to the "setuidless craziness" in general, it makes more sense once you actually have no SUID programs(*) left on the system - like we do not on a default install of Owl 3.0.  This mitigates the impact of potential vulnerabilities in parts of ld.so, libc, and the kernel.  Relevant vulnerabilities in each one of these components have been discovered (and fixed) in the past, and more are to be introduced/discovered/fixed.<br>
+<p>
+(*) ...nor any similarly-privileged-on-exec programs, such as with fscaps with a root-equivalent capability set.  We do not use fscaps in Owl 3.0.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/421893/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

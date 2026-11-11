@@ -1,0 +1,1668 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A backdoor in a popular Ruby gem [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A backdoor in a popular Ruby gem">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Finding ways to put backdoors into various programming-language package repositories (e.g. npm [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/784932/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A backdoor in a popular Ruby gem</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>April 10, 2019</br>
+           </div>
+<p>
+Finding ways to put backdoors into various programming-language package
+repositories (e.g. <a href="https://www.npmjs.com/">npm</a>, <a
+href="https://pypi.org/">PyPI</a>, and now <a
+href="https://rubygems.org/">RubyGems</a>) seems like it is becoming a new Olympic
+sport or something.  Every time you turn around, there is a
+report of  a new backdoor.  It is now apparently Ruby's turn, with a
+new report of a
+remote-execution backdoor being inserted, briefly, into a popular gem that
+is installed by some sites using the <a href="https://rubyonrails.org/">Ruby on
+Rails</a> web-application framework.
+</p>
+
+<p>
+The <a href="https://rubygems.org/gems/bootstrap-sass">bootstrap-sass</a> gem provides a version of the <a
+href="https://getbootstrap.com/">Bootstrap</a> mobile-centric JavaScript library for <a
+href="https://sass-lang.com/">Sass</a> environments.  It can be easily
+added to web sites, so it is included in many.  As with much of the
+web-application development today, these kinds of dependencies are often
+picked up automatically, built into cloud or container images, and deployed into
+production with little or no human supervision.   Unfortunately,
+bootstrap-sass was backdoored by persons unknown in late March.
+</p>
+
+<p>
+The backdoor was discovered quickly, less than a day after the release was
+made, according to a timeline in a <a
+href="https://snyk.io/blog/malicious-remote-code-execution-backdoor-discovered-in-the-popular-bootstrap-sass-ruby-gem/">Snyk
+blog post</a> about the flaw.
+Version 3.2.0.2 of bootstrap-sass gem was removed from the RubyGems
+repository, presumably by the malicious actor(s), sometime prior to
+March&nbsp;26.  That was done to cause users to pick up a new version,
+3.2.0.3, that was published on RubyGems on March&nbsp;26.  It contained the
+backdoor.
+</p>
+
+<p>
+Later that day, Derek Barnes <a
+href="https://github.com/twbs/bootstrap-sass/issues/1195">reported the problem</a> to
+the bootstrap-sass <a href="https://github.com/twbs/bootstrap-sass">GitHub
+issue tracker</a>. 
+Once it was reported, the malicious version
+was removed from RubyGems within an hour, but that did obviously provide a
+window of vulnerability.  In addition, that window was accidentally <a
+href="https://github.com/rubygems/rubygems.org/issues/1941">extended for a
+week or so</a> due to the way the gem was removed; the malicious version
+could  still be specifically requested by its version number.
+</p>
+
+<p>
+The backdoor code stands out fairly well, unlike some others, perhaps.  As shown in
+the bug report, and described in the Snyk post, the backdoor lives in a
+bootstrap-sass file called <tt>lib/active-controller/middleware.rb</tt>.
+Looking at that code shows a few lines that look suspect even to programmers
+who do not know Ruby:
+<pre>
+    x = Base64.urlsafe_decode64(e['http_cookie'.upcase].
+               scan(/___cfduid=(.+);/).flatten[0].to_s)
+    eval(x) if x
+</pre>
+</p>
+
+<p>
+Even to an untrained eye, that would seem to be grabbing the value of a
+cookie sent over by the client, base64-decoding it, and then executing it
+with <tt>eval()</tt>.  And, in fact, that is what's happening; the
+"__cfduid" cookie, which is normally only <a
+href="https://support.cloudflare.com/hc/en-us/articles/200170156-What-does-the-Cloudflare-cfduid-cookie-do-">used
+by Cloudflare</a>, is decoded and executed in the context of the web
+server.  Actually, though, it is the "___cfduid" cookie that is being used
+by the malware (with three underscores, rather than two as in the Cloudflare
+cookie), presumably as a disguise of sorts.
+</p>
+
+<p>
+Stepping back a bit, the code is only executed if the Rails
+application is running in production mode; it <a
+href="https://en.wikipedia.org/wiki/Monkey_patch">monkey patches</a> the
+<tt>call</tt> method such that it does the cookie dance and then executes
+the original <tt>call</tt> method.  Effectively, it inserts code received
+from the client directly in the path of handling its request.  A <a
+href="https://github.com/twbs/bootstrap-sass/issues/1195#issuecomment-479756912">comment</a>
+on the bug report goes into some more detail of the backdoor code.
+</p>
+
+<p>
+The best guess is that one of the two maintainers of the gem somehow had their
+RubyGems credentials compromised so that the attacker could update the
+package there (and "yank" the previous version to try to force "upgrades").
+But, as Barnes <a
+href="http://dgb.github.io/2019/04/05/bootstrap-sass-backdoor.html">described
+in his account of the discovery</a>, the attacker could not update the
+GitHub repository to tag a version 3.2.0.3.  They also could not issue the
+usual announcements of version updates.  Apparently, and thankfully, the
+attacker only had credentials for RubyGems; the lack of credentials
+elsewhere kept them from covering their tracks better and, thus,
+alerted Barnes.
+</p>
+
+<p>
+Moving forward, the maintainers of bootstrap-sass, Gleb Mazovetskiy and
+Thomas McDonald, have some <a
+href="https://github.com/twbs/bootstrap-sass/issues/1195#issuecomment-479884504">suggestions</a> on
+ways to make things more secure.  For example, RubyGems does
+not keep a record of who pushed the malicious version, which means that
+there is no way to be sure which of the two maintainers lost control of
+their credentials.  The multi-factor authentication (MFA) support could be
+improved as well. 
+</p>
+
+<p>
+In the grand scheme of things, this backdoor likely has a fairly low
+impact. As noted, the backdoor was found and fixed quickly but, for a little while,
+it did have the potential to wreak havoc on affected sites.  It is a
+popular gem, but the version that was backdoored was not 
+from the current 3.4.x branch; 3.2.0.2, which was the last good version
+before the compromise, was released in September 2014.
+
+<p>
+According to the
+RubyGems statistics, <a
+href="https://rubygems.org/gems/bootstrap-sass/versions/3.2.0.2">3.2.0.2</a>
+has been downloaded 1.2 million times, while <a
+href="https://rubygems.org/gems/bootstrap-sass/versions/3.2.0.3">3.2.0.3</a>
+with the backdoor has only been downloaded 1477 times and the fixed
+version, <a
+href="https://rubygems.org/gems/bootstrap-sass/versions/3.2.0.4">3.2.0.4</a>
+(which is the same as 3.2.0.2), has been downloaded more than 1700 times.
+That version may have been popular a ways back, but it seems to have
+tapered down a fair ways.  The most recent bootstrap-sass, <a
+href="https://rubygems.org/gems/bootstrap-sass/versions/3.4.1">3.4.1</a>,
+has been downloaded more than 250,000 times since its release in February.
+</p>
+
+<p>
+Though this incident seems relatively minor, the next one may not be.  As a
+community, we need to figure out ways to reduce these kinds of attacks.  As
+long as there are wide swaths of the net that are pulling down lots of
+unvetted code and putting it into production without humans in the loop,
+those distribution mechanisms will continue to be attacked.  Securing 
+those mechanisms  will go a long way toward stopping the next
+web-application backdoor.  But we also need to ensure that the components
+we are using are still maintained, lest we replay the <a
+href="773121.html">event-stream incident</a>.  There is much to do
+even though it seems like we have been working on it for decades.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Backdoors</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Web frameworks</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/785386/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor785537"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 21:27 UTC (Wed)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785537/">Link</a>] (40 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785537" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+I'm glad that relatively few people downloaded the subverted gem.  That said, there's clearly room to improve.  Here are some thoughts:
+
+<ol>
+<li>It appears that an attacker got the RubyGems credentials of a maintainer.  Encouraging use of 2FA for updating packages would greatly reduce this risk in general and might have completely countered this attack.  I’ll note that the <a href="https://bestpractices.coreinfrastructure.org/">CII best practices badge project</a> (which I lead) requires this at the gold level, see: <a href="https://github.com/coreinfrastructure/best-practices-badge/blob/master/doc/other.md#require_2FA">require_2FA</a>
+<li>The attackers subverted the <i>distributed</i> package on RubyGems without first posting the corresponding source code in its official source code repository on GitHub.  That’s a big red flag.  I believe package repositories should verify that code distributed can be reproducibly regenerated from its putative source.  Such an approach would have prevented this attack, and also made the previous “event-stream” incident far more visible than it was.  They don't need to change their inputs; accept a build, and check that the regenerating the build will produce the same thing.  Package distribution systems could make it possible to enable this on a per-package basis, so this can be done incrementally. It will take a while to make this happen, but the first step is to agree to work towards it.  For more about reproducibility, see the <a href="https://reproducible-builds.org/">reproducible-builds.org website</a>.
+</ol>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785537/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785542"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More about countermeasures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 22:04 UTC (Wed)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785542/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785542" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I've extended my previous comment in <a href="https://dwheeler.com/essays/bootstrap-sass-subversion.html">Subversion of bootstrap-sass</a>.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785542/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785568"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 3:28 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/785568/">Link</a>] (37 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785568" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Re #2: I strongly agree that reproducible builds are, in general, a very good thing.
+
+<p>However, applying reproducible builds to a free-for-all package repository like RubyGems, in practice, seems like it would be challenging. At a minimum, you would have to impose these restrictions on projects using reproducible builds ("reproducible projects"):
+
+<ol>
+<li>RubyGems has to integrate with GitHub, and at least a half dozen smaller services-that-are-not-GitHub, or else force all reproducible projects onto GitHub. This may sound trivial, but it's a deal-breaker for the likes of the FSF.
+<li>A standardized build process that every reproducible project uses, with no exceptions allowed, and probably with some restrictions on extensions and modifications to the build process.
+<li>A standardized set of dependencies that reproducible projects' build processes are allowed to use, with no exceptions allowed.
+<li>A standardized sandboxed environment in which the builds may be run without endangering the service as a whole.
+<li>That sandbox is kept up-to-date (at least in terms of security vulnerabilities), but we must not alter the output of any builds. So the build's interaction with the sandbox, and with other software running in the sandbox if any, must be very carefully circumscribed to prevent it from behaving differently in response to updates.
+</ol>
+
+<p>Then, once you've finished specifying the above requirements (and #5 in particular is going to be an interesting circle to square), you have to persuade maintainers to put up with the above restrictions. This is despite the fact that they get rather nebulous benefits out of the whole thing, as do their end users. Barring some centralized organization mandating this work, I just don't see how it gets done.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785568/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785588"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 6:23 UTC (Thu)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/785588/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="eru" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785588" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>You are describing a "CI" setup for reproducible builds. That can actually also be a carrot for developers involved in large code bases like browsers or LibreOffice, where building on the developers desktop might take hours.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785588/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785590"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 6:36 UTC (Thu)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/785590/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nilsmeyer" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785590" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Though it can be said the compute capacity already exists and is paid for on the developers workstation while the funds to pay for it again on the other end have to be organized. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785590/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785599"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 7:18 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/785599/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785599" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Developer workstations are incredibly inefficient. For a big project like Firefox you need lots of cores to make the build latency tolerable, but then they're mostly idle.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785599/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor785604"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 8:24 UTC (Thu)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785604/">Link</a>] (27 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785604" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All the hype about reproducible builds is perfectly pointless without an upgrade and merge-back strategy.<br>
+<p>
+You end up with ”reproducible” systems that forbid you to apply any quick fix to third party code while upstream is busy somewhere else (because that would break the notary hash), forcing you to fork and rename everything.<br>
+<p>
+Fast forward a few years no one is using the same fork, not two forks have the same fixes, the only thing the reproducible setup can vouch for is that each build is a one of a kind, that does not share any component with anything else. But, each component has not been modified since its download from fork source (hurrah! the internet notary vouches your backdoored download matches the original badware commit). CVEs to original third party projects may apply (or not), who knows, it's a perfect mess.<br>
+<p>
+Code is not something that can be frozen, it needs to evolve (because no code is bug-free and the code environment and security state of the art *will* evolve), none of the reproducibility efforts I know of take this necessary evolution into account. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785604/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785607"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 8:26 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785607/">Link</a>] (21 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785607" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; You end up with ”reproducible” systems that forbid you to apply any quick fix to third party code while upstream is busy somewhere else (because that would break the notary hash), forcing you to fork and rename everything.</font><br>
+Uhh... What? You apply fixes just like everywhere else, by making a patch to a fixed version of the package.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785607/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785609"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 9:03 UTC (Thu)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785609/">Link</a>] (20 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785609" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You've visibly not encountered the latest advancements in reproducibility (lucky you).<br>
+<p>
+The latest iterations of the concept refuse, at the compiler level, to build anything that uses non reproducible third-party sources. Third-party is any code you reuse in your project, it can even be your own bleeding edge code, if it's published as another component, is not totally solid yet, and needs some small short-term adjustments to be reused.<br>
+<p>
+They define reproducible as "source code hash, patches included, match the hash computed by a notary robot that attempted to download the code at some unknown point of time".<br>
+<p>
+So basically the only way to patch anything is to create a new project, with a new name, at a new URL, upload all your changes here, so the notary robot can vouch you are indeed using the patched code published there. And the notary will happily vouch any code hash is good, as long as it matches its download (so if it downloads at a time the code repository was holed, it will vouch all the holed versions are good).<br>
+<p>
+Of course once you've gone to the effort to produce a full-fledged fork, you have zero interest left in merging back anything.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785609/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785637"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 14:03 UTC (Thu)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785637/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785637" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <i>So basically the only way to patch anything is to create a new project, with a new name, at a new URL, ...</i>
+<p>
+<a href="https://xkcd.com/285/">[citation needed]</a>.  I think you're misunderstanding things.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785637/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 17:15 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785693/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785693" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  You've visibly not encountered the latest advancements in reproducibility (lucky you).</font><br>
+I have. <br>
+<p>
+<font class="QuotedText">&gt;  They define reproducible as "source code hash, patches included, match the hash computed by a notary robot that attempted to download the code at some unknown point of time".</font><br>
+Uh, this is incorrect. Debian uses regular packages for reproducible builds. A system I worked on used internal repositories.<br>
+<p>
+You simply need a way to recreate the build environment exactly. No notary robots need or anything.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785805"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 12:59 UTC (Fri)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785805/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785805" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Debian is not the only entity working on reproducible builds and it does not own the concept.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785805/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785864"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 18:41 UTC (Fri)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785864/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785864" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Debian certainly doesn't own the concept, that's true.  But Debian also doesn't require that you create a new project for every patch, even with reproducible builds.  It's simply not true that reproducible builds require the creation of a new project for every patch.  Reproducible builds simply give you a way to verify that the binary and source correspond given a build toolsuite.  That's a big improvement over "trust us" - you can now "trust but verify".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785864/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor785734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 21:11 UTC (Thu)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/785734/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hmh" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785734" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Where did you find this?  Who are "them"?<br>
+<p>
+Because that sort of definition really reeks of enterprise-grade supply chain hardening, gone subtly wrong. Or not so subtly.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785807"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 13:14 UTC (Fri)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785807/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785807" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Close but no hit<br>
+<p>
+<a href="https://go.googlesource.com/proposal/+/master/design/25530-notary.md">https://go.googlesource.com/proposal/+/master/design/2553...</a><br>
+<p>
+The consequence of this design is that any change to sources (ie patching to fix bugs or security issues) requires setting up a new project, since obviously you can not push your patches to the original project (if you could you would not need patching in the first place), and any patch will invalidate the notary attestation checked by the compiler.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785807/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785842"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 15:14 UTC (Fri)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/785842/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hmh" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785842" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, golang.<br>
+<p>
+Thanks for the link, I have to digest that proposal document before commenting any further.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785842/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 3:26 UTC (Sat)
+                               by <b>skybrian</b> (guest, #365)
+                              [<a href="/Articles/785904/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="skybrian" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785904" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This proposal looks like it's all about authenticating downloads using "go get". It doesn't say that the Go compiler will be checking anything or that you can't modify the code after it was downloaded? I didn't see any mention of the Go compiler.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785908"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 9:20 UTC (Sat)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785908/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785908" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+`go get` and `go build` are deeply imbricated, `go build` builds things from the local project and a cache populated by `go get` (and can trigger `go get` calls during the build process). If `go get` does not accept something, basically, you can not build against this something in go.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785908/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785911"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 9:40 UTC (Sat)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785911/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785911" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To be clearer: in module mode (which will become the default in Go in August) the compiler only knows about the current module it is working on. Every other module the current module needs is taken from a cache. The cache is populated by "go get". Doing a local fix of a module, to use in other modules, therefore, becomes a "publish it for go get" operation, notary checks included.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785911/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785912"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 9:46 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785912/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785912" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Go modules support replacing, allowing you to use local forks. go get is not at all required.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785912/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785924"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 13:41 UTC (Sat)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785924/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785924" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And that amounts to `forcing you to fork and rename everything`, as I wrote in my original message.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785924/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785925"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 13:43 UTC (Sat)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785925/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785925" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Besides, with replaces you can not even share your fixed fork within your builds, you need to add a replace directive to every single app, that uses the component requiring patching<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785925/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 14:21 UTC (Sat)
+                               by <b>Hattifnattar</b> (guest, #93737)
+                              [<a href="/Articles/785928/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Hattifnattar" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785928" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I never worked with Go, but my impression was that Go designers generally like to put the coder in a straitjacket. <br>
+(For a really funny review of Go, see <a href="https://www.evanmiller.org/four-days-of-go.html">https://www.evanmiller.org/four-days-of-go.html</a>).<br>
+<p>
+So this begs the question: are these problems and inconveniences just some "Go things", or this is a general requirement for anybody trying to implement stable builds?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785988"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Go notary proposal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 11:19 UTC (Mon)
+                               by <b>ms</b> (subscriber, #41272)
+                              [<a href="/Articles/785988/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ms" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785988" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, this is currently true because "replace" is only honoured in the main module. And you can't even have a go.mod file include another go.mod-style file so you can't do convenient hacks using eg symlinks. Which means your "build" system is going to have to include random set of "go mod edit" commands, or you start messing with stuff like gohack.<br>
+<p>
+They do seem to have admitted the design has a number of holes in it. I'm not aware of the rate of progress addressing said holes....<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785988/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 9:31 UTC (Mon)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/785983/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785983" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not a fan of Go (despite having been developing with it for the past ~6 years), but I would like to point out that this isn't a new problem with Go -- nor is it really related to reproducible builds (other than the fact that Go's builds are reproducible).<br>
+<p>
+The proposal you've linked is talking about effectively adding more checks to go.sum to make it so that go.sum hashes need to be signed by a notary. There are definitely some concerns I have about how this probably would break the Debian "Deserted Island" test for free software, and how it entrenches Google as being central to you being able to build Go code (though they say there will be other notaries managed by other people) -- rather than providing some way for the module author to control the signing of their module hashes.<br>
+<p>
+But this doesn't make patching any more difficult than it has been in the past. Outside of vendor/, Go has always made patching exceptionally painful (even pre-modules). And while you could patch vendor/, that's been considered a Very Bad Idea™ for quite a while. Obviously if you need to do it for a private build you can (and in the case of Go modules you could do it with "go mod vendor"), but publishing code that patches vendor/ in that way has been considered a bad practice for quite a long time.<br>
+<p>
+It's also not related to reproducible builds because the go.sum hashes are the hashes of the source code, not binaries (so the reproducibility of Go is not relevant to the system being proposed).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor785761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Who is &quot;them&quot;?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 23:13 UTC (Thu)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785761/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785761" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have no idea what you're talking about.<br>
+<p>
+I didn't find anything like that on Google.<br>
+<p>
+The front page of <a href="https://reproducible-builds.org/">https://reproducible-builds.org/</a> instead says: "Reproducible builds are a set of software development practices that create an independently-verifiable path from source to binary code."  No notaries, no requirements that require you to change the universe to release a new patch.<br>
+<p>
+Again: citation needed.  I think you have a misunderstanding of what the reproducible builds folks are trying to do.  That's no crime, but I suggest checking it out further.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785806"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Who is &quot;them&quot;?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 13:04 UTC (Fri)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785806/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785806" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And an independently-verifiable path can and has been implemented via notary robots, that perform the independant verification.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785806/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Who is &quot;them&quot;?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 18:16 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785859/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785859" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why do you need notaries at all?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Who is &quot;them&quot;?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 9:23 UTC (Sat)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/785910/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nim-nim" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785910" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The notaries automate the independant versification. And I need them, because the people writing the language spec felt they needed them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785628"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 13:31 UTC (Thu)
+                               by <b>robbe</b> (guest, #16131)
+                              [<a href="/Articles/785628/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="robbe" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785628" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I fail to grasp what reproducible builds will prevent you from doing.<br>
+<p>
+If I use dependency X in my project (be it libfoo, or gembar, or whatever), any deployment needs to get X from somewhere: either grab the source and build it yourself, or get a pre-built package (say from rubygems.org).<br>
+<p>
+If X has bugs that I want fixed, but X’s upstream is slow to incorporate these (or totally MIA), I can fork off X′. But I can neither force it into the source repository of X nor replace X on rubygems.org with my X′. I can of course upload X′ to rubygems as a different package.<br>
+<p>
+Reproducibe builds changes nothing on that front.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785628/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 20:11 UTC (Thu)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/785722/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NAR" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785722" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Reproducible builds enable checking that the released package (gem, etc.) was indeed generated from the tagged version in GitHub/GitLab/etc. As far as I understand, in this backdooring case only the released package was modified, not the source, so an automated check on the site hosting the packages could have caught this issue before anyone downloaded the backdoored package.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785762"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 23:27 UTC (Thu)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785762/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785762" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Reproducible builds enable checking that the released package (gem, etc.) was indeed generated from the tagged version in GitHub/GitLab/etc. As far as I understand, in this backdooring case only the released package was modified, not the source, so an automated check on the site hosting the packages could have caught this issue before anyone downloaded the backdoored package.</font><br>
+<p>
+Exactly right.  In this case, requiring a reproducible build would have completely prevented the problem, since the attacker appears to have not had rights to the corresponding GitHub account.<br>
+<p>
+But even if the attacker *had* control over the GitHub account, this check would have prevented *hidden* changes not visible in the official source repo.  Instead, the exact changes would have to be directly and publicly visible (if the repo is public).  While that doesn't *prevent* an attack, it does make the attack immediately visible.<br>
+<p>
+<font class="QuotedText">&gt; If I use dependency X in my project (be it libfoo, or gembar, or whatever), any deployment needs to get X from somewhere: either grab the source and build it yourself, or get a pre-built package (say from rubygems.org).</font><br>
+<p>
+<font class="QuotedText">&gt; If X has bugs that I want fixed, but X’s upstream is slow to incorporate these (or totally MIA), I can fork off X′. But I can neither force it into the source repository of X nor replace X on rubygems.org with my X′. I can of course upload X′ to rubygems as a different package.</font><br>
+<p>
+That's true, but not the point.<br>
+<p>
+The problem is that it's easy to put a package on distribution site (like RubyGems) that is *supposed* to correspond to some source code, but doesn't actually correspond.  Most people would assume that Rubygems gem xyzzy version 1.2.3.4 was generated from xyzzy's official source repo (wherever that is), but no mechanism today actually ensures that.  It's all honor system.  Which works until there's an attacker.<br>
+<p>
+Reproducible builds simply let you confirm that a given compiled package of some package P corresponds to its putative source code.  They don't guarantee there is no malicious code... but they do guarantee that if there's malicious code, it comes from either the source or the underlying system used to build it.  (If you're worried about the latter point, my Diverse Double-Compiling approach will counter that, but let's get reproducible builds first.)<br>
+<p>
+You can still use X' if you want.  If you have your own source, you can just build it yourself.  However, very few people rebuild *EVERY* package.  Most people use a lot of precompiled packages. Reproducible builds simply let you confirm that the precompiled packages you use correspond to their source code (if the build tools are not malicious).  And that's a significant improvement.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785762/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785797"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 10:05 UTC (Fri)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/785797/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NAR" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785797" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <I>However, very few people rebuild *EVERY* package. Most people use a lot of precompiled packages.</I>
+<P>
+I think it depends on the language and ecosystem. For Erlang the most common way to get dependencies to fetch the sources from GitHub. For Elixir it looks like source files are downloaded from hex.pm (and compiled once). I don't know about ruby though.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785797/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 18:43 UTC (Fri)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785865/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785865" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Fair enough.  If you're doing anything other than directly fetching from the source distribution (e.g., GitHub), then it makes sense to ensure it's a reproducible build.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785629"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 13:59 UTC (Thu)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785629/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785629" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; However, applying reproducible builds to a free-for-all package repository like RubyGems, in practice, seems like it would be challenging. At a minimum, you would have to impose these restrictions on projects using reproducible builds ("reproducible projects"):</font><br>
+<p>
+<font class="QuotedText">&gt; 1.    RubyGems has to integrate with GitHub, and at least a half dozen smaller services-that-are-not-GitHub, or else force all reproducible projects onto GitHub. This may sound trivial, but it's a deal-breaker for the likes of the FSF.</font><br>
+<p>
+It'd need to support multiple services, but that's easy. The "integration" for a distribution service is really just downloading from the repo (e.g., "git clone") when it receives a new module to distribute, rerunning the build instructions, and confirming that the results are identical.  You don't need to support hooks or anything.<br>
+<p>
+<font class="QuotedText">&gt;    A standardized build process that every reproducible project uses, with no exceptions allowed, and probably with some restrictions on extensions and modifications to the build process.</font><br>
+<p>
+No, you just need a standardized way to invoke whatever build process is provided by the project.  If the build process isn't part of the project, then you need to fix that anyway.<br>
+<p>
+<font class="QuotedText">&gt;   A standardized set of dependencies that reproducible projects' build processes are allowed to use, with no exceptions allowed.</font><br>
+<p>
+Not at all.  The project just needs to specify its dependencies, and then the build process uses those. The goal is to be able to reproduce a project's build result, not force all projects to use the same thing.<br>
+<p>
+<font class="QuotedText">&gt; A standardized sandboxed environment in which the builds may be run without endangering the service as a whole.</font><br>
+<p>
+You really only need to allow projects to *specify* the sandboxed environment (and check in that specification into the project).  Different projects don't need to use the same one.  There's no reason different projects need to use the exact same environment, and different versions of a project's results could use different environments too.  It's just that when you're reproducing a *particular* version you need to know which environment.<br>
+<p>
+<font class="QuotedText">&gt;  That sandbox is kept up-to-date (at least in terms of security vulnerabilities), but we must not alter the output of any builds. So the build's interaction with the sandbox, and with other software running in the sandbox if any, must be very carefully circumscribed to prevent it from behaving differently in response to updates.</font><br>
+<p>
+Um, no.  The sandbox is what it is.  It might be okay to make an exception for the OS kernel (Linux), but otherwise, any "keep up to date" may change the result, so you update the sandbox as part of updating the build process.  If the sandboxed build environment can inject vulnerabilities (malicious code) into the build result, then you need to release a new version.<br>
+<p>
+Make it easy, not hard, and make it easy to do in stages.  Otherwise no one will do it.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785629/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785689"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 17:02 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/785689/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785689" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If the sandboxed build environment can inject vulnerabilities (malicious code) into the build result, then you need to release a new version.</font><br>
+<p>
+No go. RubyGems has to protect itself against hostile projects. You cannot push this back onto those projects, because they are untrusted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785689/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785764"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sandboxing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 23:36 UTC (Thu)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785764/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785764" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; &gt; If the sandboxed build environment can inject vulnerabilities (malicious code) into the build result, then you need to release a new version.</font><br>
+<p>
+<font class="QuotedText">&gt; No go. RubyGems has to protect itself against hostile projects. You cannot push this back onto those projects, because they are untrusted.</font><br>
+<p>
+RubyGems currently completely and totally trusts all projects that send data to it.  If a project says, "here is my package xyz version 1.2.3" then if the login is correct RubyGems says "sure" and redistributes it to everyone.  That's obviously easy to implement, but it means there's no verification that the package actually *is* a compiled version as claimed.<br>
+<p>
+The alternative mooted here is that RubyGems tells some service "please rebuild package xyz version 1.2.3 and send me its cryptographic hash".  That external service would be something like CircleCI or TravisCI (something already designed to run externally-provided programs and produce results).  If the returned hash is the same as the hash of the file provided, all is well, otherwise there's a problem that needs to be fixed.  RubyGems could even provide the rebuilt file to help debug it.<br>
+<p>
+It could be third parties instead of RubyGems itself, but that might create a big window of time where the correspondence was not checked.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785764/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785777"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sandboxing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 4:20 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/785777/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785777" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If the returned hash is the same as the hash of the file provided, </font><br>
+<p>
+I was not aware that TravisCI and friends made that guarantee. It sounds like it would be a difficult promise to keep.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785777/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sandboxing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 18:38 UTC (Fri)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/785863/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785863" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Travis doesn't make the promise.  Travis simply runs the build and can return its results.  You can then compare the new build with the old build.  The build might include malicious steps... but now you can review the source (including any build instructions) instead of blindly trusting that a precompiled package is the same thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785726"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 20:28 UTC (Thu)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/785726/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785726" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The "integration" for a distribution service is really just downloading from the repo (e.g., "git clone") when it receives a new module to distribute</font><br>
+<p>
+An improvement would be to fetch it from one of the wonderful software archives we've had articles about here (Software Heritage among others). If it isn't in there, submit it and then build from that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785726/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor786342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2019 5:56 UTC (Sat)
+                               by <b>njs</b> (subscriber, #40338)
+                              [<a href="/Articles/786342/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="njs" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor786342" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Reproducible builds are a great thing, but they're not the first step I'd take.<br>
+<p>
+If RubyGems switched to a model where you gave it the VCS tag, and then it used that to build the distributed artifacts itself, then that would already get the main guarantee, without any reproducible builds infrastructure. This is strictly simpler than your proposal, since you also require that RubyGems build the artifacts itself.<br>
+<p>
+Once you have that, adding reproducible builds on top would add some value: it would let third-parties validate that the RubyGems build infrastructure hasn't been compromised. This would certainly be a nice capability to have, but it's not really the first priority. (Everyone who downloads from RubyGems already trusts the RubyGems infrastructure in lots of ways!)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor785939"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 19:12 UTC (Sat)
+                               by <b>robert_s</b> (subscriber, #42402)
+                              [<a href="/Articles/785939/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="robert_s" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor785939" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Newsflash: wild-west package repositories are not to be trusted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785939/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786037"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 15:54 UTC (Mon)
+                               by <b>k8to</b> (guest, #15413)
+                              [<a href="/Articles/786037/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k8to" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor786037" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the question I have about articles like this is what does a package repo that is not the wild west look like? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786037/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor786035"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A backdoor in a popular Ruby gem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 15:57 UTC (Mon)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/786035/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flussence" />
+                <input type="hidden" name="return" value="/Articles/785386/#CommAnchor786035" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's a sad state of affairs. One would think some lessons would be learned after the first 50 or so high profile incidents like this.<br>
+<p>
+So… which language ecosystems (if any) *have* bothered to learn? I've seen a few attempts at papering over the multiple-upstreams-single-package problem which could only generously be described as “advisory security”.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786035/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

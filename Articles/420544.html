@@ -1,0 +1,164 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>NoHZ tasks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="NoHZ tasks">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Operating system kernels, at their best, should not be noticed by user space at all; in particu [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/420065/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>NoHZ tasks</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 20, 2010</br>
+           </div>
+Operating system kernels, at their best, should not be noticed by user
+space at all; in particular, the resource cost of the kernel should be as
+small as possible.  The Linux kernel has been written with that idea in
+mind, but, for some people, anything is still too much.  High-performance
+computing users want all of the CPU time for themselves, while some
+latency-sensitive users want their code to never have to wait for the
+processor.  These users have been asking for a way to run processes on at
+least one CPU with no kernel interference at all - no timer ticks, no
+interrupts, etc.  Thus far, no satisfactory solution has been found; a new
+patch set by Frederic Weisbecker is not such a solution yet, but it shows
+another way of attacking the problem.
+<p>
+The idea behind Frederic's <a href="/Articles/420490/">patch set</a> is to
+enable a process to disable the timer interrupt while it is running.  If a
+set of conditions can be met, this will allow the process to run without
+regular interference from the timer tick.  If other sources of interrupts
+are directed away from the CPU as well, this process should be able to run
+uninterrupted for some time.  There are a few complications, though.
+<p>
+Actually going into the tickless mode is relatively easy; the process need
+only write a nonzero value to <tt>/proc/self/nohz</tt>.  The patch imposes
+a couple of conditions on these processes: (1)&nbsp;the process must be
+bound to the 
+CPU it is running on, and (2)&nbsp;no other process can be running in the
+tickless mode on that CPU.  If those conditions hold, the write to
+<tt>/proc/self/nohz</tt> will succeed and the kernel will try to disable
+the timer tick while that process runs.
+<p>
+The key word here is "try"; there are a number of things which can keep the
+disabling of the tick from happening.  The first of those is any sort of
+contention for the CPU.  If any other processes are trying to run on the
+same CPU, the scheduler tick must happen as usual so that decisions on
+preemption can be made.  Since a process can be made runnable from anywhere
+in the system, Frederic's patch performs a potentially expensive
+inter-processor interrupt whenever the second process is made runnable on
+any CPU, regardless of whether that CPU is currently running in the no-tick
+mode or not.
+<p>
+Another thing that can gum up the works is read-copy-update (RCU).  If
+there are any RCU callbacks which need to be processed on the CPU, that CPU
+will not go into the no-tick mode.  RCU also needs to be notified whenever
+the CPU goes into a "quiescent state," so that it can know when it is safe
+to invoke RCU callbacks on other CPUs.  If RCU has indicated an interest in
+knowing when the target CPU goes quiescent, once again, no-tick mode cannot
+be entered.  The CPU can also be forced out of the no-tick mode if RCU
+develops a curiosity about quiescent states anywhere in the system.
+<p>
+Given that RCU is heavily used in contemporary kernels, one would think
+that its needs would prevent no-tick mode most of the time.  Another part
+of the patch set tries to mitigate that problem with the realization that,
+if a process is running in user space with the timer tick disabled, the
+associated CPU is necessarily quiescent.  When a CPU is running in this
+mode, it will enter an "extended quiescent state" which eliminates the need
+for notification to the rest of the system.  The extended quiescent state
+will probably increase the amount of no-tick time on a processor
+considerably, but at a small cost: the architecture-level code must add
+hooks to notify the no-tick code on every kernel entry and exit.
+<p>
+Reviews of the code, so far, have focused on various details which need to
+be managed differently, but there has not been a lot of criticism of the
+concept.  It's early-stage code, so it doesn't take care of everything that
+normally happens during the timer tick, a fact which reviewers have pointed
+out.  The biggest gripe, perhaps, has to do with the conditions
+mentioned at the beginning of the article: the process must be bound to a
+single CPU, and there can only be one no-tick process running on that CPU.
+Peter Zijlstra <a href="/Articles/420548/">said</a>:
+<p>
+<div class="BigQuote">
+	Well yes, this interface of explicitly marking a task and cpu as
+	task_no_hz is kinda restrictive and useless.  When I run 4
+	cpu-bound tasks on a quad-core I shouldn't have to do anything to
+	benefit from this.
+</div>
+<p>
+Frederic has indicated that the code can be changed to lift those
+restrictions, but at the cost of some added complexity.  Once the
+restrictions are gone, it may make sense to just enable the no-tick mode
+whenever the workload is right for it, regardless of a request (or the lack
+thereof) 
+from any specific process.  That would make the no-tick mode more generally
+useful; it would also reduce the role of the timer tick just a little
+more.  The kernel would still be far from a fully tickless system, but
+every step in that direction helps.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Dynamic tick</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">HZ</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Read-copy-update</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/420544/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

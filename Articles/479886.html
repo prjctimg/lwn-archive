@@ -1,0 +1,169 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Memory power management, take 2 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Memory power management, take 2">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Last June, LWN looked at a set of memory power management patches intended to allow the system  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/479074/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Memory power management, take 2</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 8, 2012</br>
+           </div>
+Last June, LWN <a href="446493.html">looked at a set of memory power
+management patches</a> intended to allow the system to force unused banks
+of memory into partial-array self-refresh (PASR) mode.  
+PASR makes the memory unavailable to the CPU, but it does <strike>preserve
+those contents and</strike> reduce power consumption.
+Last year's patch added a
+new layer of zones to the page allocator with the idea that specific zones
+- which corresponded to the regions of memory with independent PASR control
+- could be vacated and powered down when memory use was light.  That patch
+set has not since returned, possibly because developers were worried about
+the (significant) overhead of adding another layer of zones to the system.
+<p>
+For a little 
+while since, things have been quiet on the memory power management front.
+Recently, though, a new and seemingly unrelated <a href="/Articles/478049/">PASR
+patch set</a> was posted to linux-kernel by Maxime Coquelin.  This version
+adds no new zones; 
+instead, it works at a lower level beneath the buddy allocator.
+<p>
+The first step is to boot the kernel with the new <tt>ddr_die=</tt>
+parameter, describing the physical layout of the system's memory.  Another
+parameter (<tt>interleaved</tt>) must be used if physically-interleaved
+memory is present on the system.  It would, of course, be nice to obtain
+this information directly from the hardware, but, in the embedded world
+where Maxime works, such mechanisms, if they are present at all, must be
+implemented on a per-subarchitecture or per-board basis.  The final patch in the series does
+add built-in support for the Ux500  system in a "board support" file, but
+that is the only system supported without boot-time parameters at this
+early stage. 
+<p>
+For each region defined at boot time, the PASR code sets up a
+<tt>pasr_section</tt> structure:
+<p>
+<pre>
+    struct pasr_section {
+	phys_addr_t start;
+	struct pasr_section *pair;
+	unsigned long free_size;
+	spinlock_t *lock;
+	struct pasr_die *die;
+    };
+</pre>
+<p>
+The key value here is <tt>free_size</tt>, which tracks how many free pages
+exist within this section.  When the kernel allocates a page for use, it
+must tell the PASR code about it with a call to:
+<p>
+<pre>
+    void pasr_kget(struct page *page, int order);
+</pre>
+<p>
+Pages that are freed should be marked with:
+<p>
+<pre>
+    void pasr_kput(struct page *page, int order);
+</pre>
+<p>
+To a first approximation, these functions just increment and decrement
+<tt>free_size</tt>.  If <tt>free_size</tt> reaches the size of the segment,
+there are no used pages within that segment and it can be powered down.  As
+soon as the first page is allocated from such a segment, it must be powered
+back up.
+<p>
+Adding this accounting to the memory management code is just a matter of
+adding a few <tt>pasr_kget()</tt> and <tt>pasr_kput()</tt> calls to the
+buddy allocator.  Most other allocations in the kernel have their ultimate
+source in the buddy allocator, so this approach will catch most of the
+memory allocation traffic in the system - though it could be somewhat
+fooled by unused pages held by the slab allocator.  There is no integration
+with "carveout-style" allocators like ION or CMA, but that could certainly
+be added at some point.
+
+<p>
+One piece that is missing, though, is the mechanism by which a memory
+section becomes entirely free and eligible for PASR.  The kernel tends to
+spread pages of data throughout memory, and it does not drop them without a
+specific reason to do so; a typical system shows almost no "free" pages at
+all even if it is not currently doing anything.  The <a
+href="/Articles/479889/">intent</a> is to use the feature in conjunction
+with a "page cache flush governor," but that code does not exist at this
+time.  There was also talk of setting up a large "movable" zone and using
+the compaction code to create large, free chunks within that zone.
+<p>
+The other thing that is missing at this point is any kind of measurement of
+how much power is actually saved using PASR.  That will certainly need to
+be provided before this code can be considered for inclusion.  Meanwhile,
+it has the appearance of a less-intrusive PASR capability that might just
+get past the roadblocks that stopped its predecessor.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Power management</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Partial array self refresh (PASR)</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Power management</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/479886/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1739 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Adding a &quot;duress&quot; password with PAM Duress [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Adding a 'duress' password with PAM Duress">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Users often store a lot of sensitive information on their computers—from credentials to banned  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/866757/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Adding a &quot;duress&quot; password with PAM Duress</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>August 24, 2021</br>
+           </div>
+<p>
+Users often store a lot of sensitive information on their computers—from
+credentials to banned texts to family photos—that they might 
+normally expect to be 
+protected by the login password of their account.  Under some
+circumstances, though, users can be required to log into their system so
+that some third party (e.g. government agent) can examine and potentially
+copy said data. A new project, <a
+href="https://github.com/nuvious/pam-duress">PAM Duress</a>, provides a way
+to add other passwords to an account, each with its own behavior, which
+might be a way to avoid granting full access to the system, though the
+legality is in question.
+</p>
+
+<p>
+As its name would imply, PAM Duress is a <a
+href="https://en.wikipedia.org/wiki/Pluggable_authentication_module">pluggable
+authentication module</a> (PAM), which is the mechanism used on Linux and
+other Unix operating systems to easily allow adding different kinds of
+authentication methods.  PAM is not exactly standardized, however, so
+there are multiple implementations of it, including <a
+href="https://github.com/linux-pam/linux-pam">Linux PAM</a> that is used by
+Linux distributions.  The Duress module allows administrators to configure
+the system to check for one or more extra passwords if the normal password
+associated with the user account does not match what is provided.
+</p>
+
+<p>
+The project page gives a few examples of the kind of actions that could be
+triggered by an alternate password:
+<blockquote class="bq">
+This functionality could be used to allow someone pressed to give a
+password under [coercion] to provide a password that grants access but in the
+background runs scripts to clean up sensitive data, close connections to
+other networks to limit lateral movement, and/or to send off a [notification]
+or alert (potentially one with detailed information like location, visible
+wifi hotspots, a picture from the camera, a link to a stream from the
+microphone, etc). You could even spawn a process to remove the pam_duress
+module so the threat actor won't be able to see if the duress module was
+available. 
+</blockquote>
+</p>
+
+<p>
+Scripts or binaries that are meant to be used when duress passwords are
+entered (i.e. duress programs) can be placed in either <tt>/etc/duress.d</tt>, for global duress
+actions, or <tt>~/.duress</tt> for those specific to a particular user.  In
+either case, the <tt>duress_sign</tt> script is used to process a file into
+something that PAM Duress can use.  The script will prompt for a password,
+which it hashes with SHA-256, using the SHA-256 hash of the file's contents
+as the salt; the resulting hash value is written to
+<tt><i>duress-script-name</i>.sha256</tt>.  That stored hash protects
+against changes to the script and securely "stores" the password within a
+single hash value.
+</p>
+
+<p>
+In order to use PAM Duress, the system's PAM authentication file
+(e.g. <tt>/etc/pam.d/common-auth</tt>) needs to be set up to try the user's
+password first (with the normal <tt>pam_unix.so</tt> module); if that
+fails, it should be configured to invoke <tt>pam_duress.so</tt> to check for any
+matching duress passwords.  As shown in the documentation, that might look
+like the following:
+<pre>
+    # Example /etc/pam.d/common-auth
+    auth    [success=2 default=ignore]      pam_unix.so
+    auth    [success=1 default=ignore]      pam_duress.so
+
+    auth    requisite                       pam_deny.so
+</pre>
+</p>
+
+<p>
+When invoked, 
+PAM Duress will look at each file in the two duress program
+directories, hashing the provided password
+using the hash of the file's contents as salt, then comparing it to the
+value in the corresponding <tt>.sha256</tt> file; if there is a match, the duress
+program gets invoked.  If any file matches, success will be returned to PAM, which will 
+result in access being granted and the user's login shell being invoked
+after the duress programs are run.
+</p>
+
+<p>
+A simple <a
+href="https://github.com/nuvious/pam-duress/blob/main/docs/examples/Pushover.md">example</a> to demonstrate the module is provided in the repository.  The
+<tt>pushover.sh</tt> script uses the API of the <a
+href="https://pushover.net/">Pushover</a> service to send a message
+reporting 
+that the duress password has been used.  The message includes the username
+of who logged in along with the local and external IP addresses of the system.
+</p>
+
+<p>
+On the page describing the example, 
+the script is signed with a password that is meant to
+be given to
+each person when it gets installed on their system.  The example points out
+that the password should be changed if someone who knows it leaves the
+organization, but other strategies could be used (e.g. individual
+passwords).  The integrity hash on the scripts seems to mostly be aimed at
+preventing inadvertent changes, since an attacker with access to the
+filesystem has lots of other ways to compromise the system. The
+demonstration script
+uses a configuration file for API keys that has no hash protection so
+it could be changed without detection—not that it really matters in the
+grand scheme of things.
+</p>
+
+<p>
+Sending a message when the duress password has been used seems relatively
+innocuous from a legal perspective, but some of the other possible uses may
+not be.
+In a <a href="https://news.ycombinator.com/item?id=28267975">lengthy Hacker
+News discussion</a> about PAM Duress, multiple commenters pointed out that
+deleting files in the background when requested to log in at a border
+crossing may well be an offense—if it is detected.  It is, as with
+everything regarding security, a question of the type of threats being
+protected against.  As "jeroenhd" <a
+href="https://news.ycombinator.com/item?id=28268903">put it</a>:
+<blockquote class="bq">
+If you're held under gunpoint, that script that wipes your entire hard
+drive will only make your day worse. 
+<p>
+AFAIK if you actually get detained and questioned at airports, your drive
+will already get imaged before any password is even tried. You may be able
+to get away with this on a mobile device where this feature isn't generally
+expected (because who uses Linux on a smartphone in the first place). 
+<p>
+I always wonder at what scenarios like these are supposed to be about. If
+saying no is not an option, pissing off your captors by giving them fake
+info probably isn't either. 
+<p>
+I don't know what law enforcement would be looking for on my work drive,
+but if saying no is no longer an option, my encryption password isn't worth
+getting shot over.  
+</blockquote>
+</p>
+
+<p>
+"Spooky23" <a href="https://news.ycombinator.com/item?id=28270119">said</a> 
+that the idea of handling the situation with a technical means like PAM
+Duress is "<q>silly nerd porn</q>".  Someone who has data that the
+authorities want access to should not be crossing a border with it on
+their device: "<q>The only way to win is not to play.</q>"  But
+others pointed out that the intent of a duress password is to "<q>give
+the appearance of compliance</q>" as "dredmorbius" <a
+href="https://news.ycombinator.com/item?id=28277474">said</a>, which may be
+enough to satisfy the investigator and head off further inquiry.
+</p>
+
+<p>
+No discussion of this sort ever happens without a reference to the <a
+href="https://xkcd.com/538/">xkcd pipe wrench scenario</a>.  Technical
+means to avert the often arbitrary and capricious nature of border searches
+and the like are certainly attractive to those of a technical bent.  But
+providing <a
+href="https://en.wikipedia.org/wiki/Plausible_deniability">plausible
+deniability</a> by way of <a
+href="https://blog.linuxbrujo.net/posts/plausible-deniability-with-luks/">hidden
+encrypted disk partitions</a>, <a
+href="https://en.wikipedia.org/wiki/Rubberhose_(file_system)">filesystems
+that look like gibberish</a>, or other schemes of that nature can all fall
+prey to the wrench scenario.  If the 
+authorities (or criminals, though it is sometimes hard to tell the
+difference these days) want to access the data badly enough, they are going to find
+a—quite possibly non-technical—means to do so.
+</p>
+
+<p>
+As might be guessed, there were suggestions of other ideas for technical measures,
+such as a
+<a
+href="https://www.kali.org/blog/emergency-self-destruction-luks-kali/">mechanism
+to "nuke" an encrypted disk</a> if a duress password is entered.  There was
+also a pointer to an earlier project, <a
+href="https://github.com/rafket/pam_duress">pam_duress</a>, which has much
+the same focus as its nearly identical name would imply.  In addition,
+there were suggestions of storing the sensitive data elsewhere (e.g. encrypted
+in the cloud) for restoration once the destination has been reached.
+</p>
+
+<p>
+In
+the final analysis, having no sensitive data when crossing a border or
+otherwise being in a situation where there is a potential for duress being
+applied is the safest solution. Storing said data "elsewhere" has its own
+set of risks, of course—the cloud is hardly beyond the reach of
+nation-state actors. Dangerous-to-possess data, which is often defined
+quite differently in various parts of the world, is difficult to handle; technical
+means can certainly help but they are no panacea. 
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Authentication</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Passwords</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/867158/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor867274"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2021 20:24 UTC (Tue)
+                               by <b>jebba</b> (guest, #4439)
+                              [<a href="/Articles/867274/">Link</a>] (17 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jebba" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867274" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I always wonder at what scenarios like these are supposed to be about.</font><br>
+<p>
+How about a hypothetical like: You&#x27;re fleeing a country after it&#x27;s government has fallen. To get to the airport you have to go through a hostile checkpoint. You have lists, documents, photos, records of your and your colleagues&#x27; work. You just need to reveal enough of your data on your phone to bullshit some fake cop and get thru the checkpoint. You need to make sure you don&#x27;t lose the rest of the data to the hands of the fake police.<br>
+<p>
+pam_duress should be made user friendly installed by default once it is ready.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867274/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867282"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2021 21:01 UTC (Tue)
+                               by <b>jafd</b> (subscriber, #129642)
+                              [<a href="/Articles/867282/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jafd" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867282" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Are you known to the checkpoint officers as a politically active affiliate to the fallen government? Then you have bigger problems, they will just keep you and seize everything data can be stored on. God forbid they have tech-savvy people in their ranks (or people that can follow instructions like &quot;power the device down immediately and give it to our geeks for imaging, then wrench the password out&quot;).<br>
+<p>
+Usually even in the countries governments are expected to maintain at least an appearance of abiding the law, border officers are given way more leeway than you would normally expect from other authorities. Sure you can sue them later, provided you come out of it alive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867282/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867297"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 0:50 UTC (Wed)
+                               by <b>frostsnow</b> (subscriber, #114957)
+                              [<a href="/Articles/867297/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="frostsnow" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867297" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;&quot;power the device down immediately and give it to our geeks for imaging, then wrench the password out&quot;</font><br>
+Seems to me that they&#x27;d ideally want an immediate image of the powered-on device in case disk encryption is in use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867297/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 29, 2021 3:58 UTC (Sun)
+                               by <b>patrakov</b> (subscriber, #97174)
+                              [<a href="/Articles/867712/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="patrakov" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867712" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correct, because keeping a LUKS key (or a key that needs to be combines with a password in order to unlock a LUKS volume) in a TPM would make imaging a disk of a powered-off laptop completely useless.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 31, 2021 23:57 UTC (Tue)
+                               by <b>frostsnow</b> (subscriber, #114957)
+                              [<a href="/Articles/867960/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="frostsnow" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867960" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+An additional idea for a duress function then might be to power off the device, or, more subtly, spawn a battery-draining process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor867299"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 2:31 UTC (Wed)
+                               by <b>sjj</b> (guest, #2020)
+                              [<a href="/Articles/867299/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sjj" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867299" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In this hypothetical, you never backed up the data online while the political situation was not this dire? And this data is more important to you than your own life, or freedom? I think we&#x27;re beyond distro defaults here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867299/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 16:11 UTC (Wed)
+                               by <b>jebba</b> (guest, #4439)
+                              [<a href="/Articles/867373/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jebba" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867373" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No backups were made. Internet has been down in many parts of Afghanistan. The power is intermittant. Data contains docs of other US citizens (employees), their locations, and others that worked with your western organizations in Afghanistan. Plus the data needs to be shown at Hamid Karzai International Airport, it doesn&#x27;t help having it on a cloud account.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867415"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 0:12 UTC (Thu)
+                               by <b>jafd</b> (subscriber, #129642)
+                              [<a href="/Articles/867415/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jafd" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867415" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Looks like a &quot;damned if you do, damned if you don&#x27;t&quot; scenario. Whatever you do, you&#x27;re hosed, so maybe better destroy the data so that the hostile neighborhood towelheads don&#x27;t get at least some of your friends.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867415/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867493"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 13:45 UTC (Thu)
+                               by <b>jake</b> (editor, #205)
+                              [<a href="/Articles/867493/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jake" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867493" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can we please refrain from using that kind of characterization here?  It is not at all welcome at LWN.<br>
+<p>
+thanks,<br>
+<p>
+jake<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867493/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 6:14 UTC (Thu)
+                               by <b>gfernandes</b> (subscriber, #119910)
+                              [<a href="/Articles/867436/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gfernandes" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867436" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Human problems often have practical human solutions.<br>
+<p>
+In this case, I would probably simply have the data encrypted on a portable drive, and the key, in a Password Manager on my laptop. I&#x27;d then go to the airport another day to &quot;drop a relative&quot;, drop the drive off. And then later arrive for departure myself with the laptop. <br>
+<p>
+Both are useless on their own. <br>
+<p>
+There are various permutations of this approach. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867506"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 14:23 UTC (Thu)
+                               by <b>jebba</b> (guest, #4439)
+                              [<a href="/Articles/867506/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jebba" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867506" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  I&#x27;d then go to the airport another day...</font><br>
+<p>
+Look at what is happening in Kabul. This is very unrealistic.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867506/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 30, 2021 22:32 UTC (Mon)
+                               by <b>ssmith32</b> (subscriber, #72404)
+                              [<a href="/Articles/867826/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ssmith32" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867826" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Actually, there have been interviews in.. wapo, I think it was, where folks (with valid papers), did exact that, and missed being hit by a bomb by a few hours.<br>
+<p>
+Also, they seemed more concerned that the huge crowds of people without papers made it impossible to get through with their papers, then the Taliban finding them with papers.<br>
+<p>
+The other report I read (in FT) was an American / Afgani citizen that kept putting off going until someone drove her to a spot where she was then helicoptered to the airport.<br>
+<p>
+In short, even with the limited information we have, it seems the situation is a lot more dynamic and complex then the simple hypothetical proposed.<br>
+<p>
+Some American reporters (LA Times) got beat up because they wore local dress and had enough melanin that they were mistaken for a local. Then another Taliban apologized for the mistake, offered them an energy drink and a ?friendly? ride, which they turned down.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor867304"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 7:12 UTC (Wed)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/867304/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vadim" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867304" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Smash the device, set it on fire for good measure, and spread the tiny bits of it around, then go through the checkpoint without it.<br>
+<p>
+If you fear for your life you can&#x27;t afford to play games with people who may want to kill you, and they also may have smart people on their side. The safest way is not to give them anything to work with, and hope that&#x27;s enough.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867304/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 16:08 UTC (Wed)
+                               by <b>jebba</b> (guest, #4439)
+                              [<a href="/Articles/867372/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jebba" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867372" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Without it, you can&#x27;t go through the checkpoint.<br>
+<p>
+My &quot;hypothetical&quot; is actually a real-world situation, I thought people would see that. What I&#x27;m referring to is the people trying to get thru the Taliban and military checkpoints at Hamid Karzai International Airport. US citizens, and others, have to show docs, often on their phones to the Taliban to get to the inner checkpoint. You suggest they just smash their phone? Then they won&#x27;t get through checkpoints and will have to remain in Kabul.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867409"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 22:33 UTC (Wed)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/867409/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vadim" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867409" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is discussion is about a PAM module, though.<br>
+<p>
+* It doesn&#x27;t apply to cell phones anyway.<br>
+<p>
+* Ideally, carry your documentation on paper. It doesn&#x27;t run out of battery, and it&#x27;s far easier to leave home without incriminating papers than without incriminating files on your disk. Computers store all kind of caches, logs and history data all over the place.<br>
+<p>
+* If you already know you&#x27;re going to go through a checkpoint, you can just wipe whatever you were going to in advance, without having to hope they&#x27;re not going to image your drive first, that it&#x27;ll work as intended, and that nobody will notice what happened before letting you through.<br>
+<p>
+* If you think you can be searched unpredictably, the best solution to that is not to have anything interesting on you. Keep your basic docs and cat pictures. Ditch all the incriminating info, or bury it somewhere it can&#x27;t be easily found if it must remain in existence.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867409/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867543"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 19:11 UTC (Thu)
+                               by <b>JanC_</b> (subscriber, #34940)
+                              [<a href="/Articles/867543/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JanC_" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867543" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>The problems many Afghan people have/had is that the documents they need to pass the military guards at the Kabul airport are the same documents that can get them killed if the Taliban find them.</p>
+
+<p>So you <b>have to</b> leave your home for the airport with incriminating documents, or there is no point in leaving it at all.</p>
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867543/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867827"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 30, 2021 22:35 UTC (Mon)
+                               by <b>ssmith32</b> (subscriber, #72404)
+                              [<a href="/Articles/867827/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ssmith32" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867827" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is it? The reporting I&#x27;ve read is more like chaos then the simple scenario presented. Seems like the main worry now is that it&#x27;s just impossible to get to the airport because of the crowds, papers or no. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867827/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor868117"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 2, 2021 9:20 UTC (Thu)
+                               by <b>eduperez</b> (guest, #11232)
+                              [<a href="/Articles/868117/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="eduperez" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor868117" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You do not have to imagine any hypothetical situation... in the USA, any border agent can perform an in-depth search of your phone or laptop; I could use a duress password just to protect my spouse&#x27;s nude pictures that I carry in my laptop, when I go on holidays over there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868117/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867276"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The real benefit of this is notification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2021 20:26 UTC (Tue)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/867276/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pizza" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867276" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+eg to notify the mothership that you / your device has been compromised and to take action on the remote side by disabling access from that device, while simultaneously granting full access to whatever data is stored locally.<br>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867276/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867305"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The real benefit of this is notification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 10:44 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/867305/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867305" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Combine that with removing all local temporary tokens (short expiry X.509 certificates for browser TLS and VPNs, Kerberos tickets etc), and you're in a position where you plausibly have to call the mothership to get your access restored. Not going to protect you from a suitably vicious regime (I wouldn't, for example, want to rely on this to protect me in North Korea), but enough to help if the local threat isn't operating with the full support of their government.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867305/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867442"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The real benefit of this is notification</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 6:34 UTC (Thu)
+                               by <b>nuvious</b> (guest, #153911)
+                              [<a href="/Articles/867442/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nuvious" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867442" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is the was the root case I was considering and more to say protect against corporate espionage or for use by journalists. Delete/remove access to the &quot;super sensitive&quot; data, leave the less sensitive data and phone home to let someone besides you know you&#x27;re in duress.  All while appearing to fully comply with the request for access to your device.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867442/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor867277"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2021 20:57 UTC (Tue)
+                               by <b>sub2LWN</b> (subscriber, #134200)
+                              [<a href="/Articles/867277/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sub2LWN" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867277" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; a way to avoid granting full access to the system, though the legality is in question.</font><br>
+<p>
+IMO the legality (or morality) of however it&#x27;s used is separate from the basic mechanism itself. Situations of duress could also occur in government, infrastructure, workplace, or home settings, and the aggressor needn&#x27;t have nation-state resources nor any particular authority behind their coercion.<br>
+<p>
+Without modifying your login daemon, you could also set any manner of innocuous canaries to initiate various processes throughout your dotfiles. AFAIK the legality of dotfiles has never yet been called into question, but who knows what wonders the future has in store. :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867277/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867314"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 12:18 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/867314/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867314" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed. This could also be used to e.g. delete your chat logs with your therapists if your abusive partner wants to have a look at your computer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867314/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867283"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2021 21:06 UTC (Tue)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/867283/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867283" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>One case where this might be useful is if you are worried about someone looking at your social media accounts.  In that case, the content is inherently not on your device in the first place, so getting rid of the dangerous content is as simple as logging out of an incriminating account and logging in to an innocuous one.  It's not going to survive really careful scrutiny, but it could be helpful against less thorough examination.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867283/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867288"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2021 22:57 UTC (Tue)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/867288/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gerdesj" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867288" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;m looking into using this in a rather different way to the intended use but still within the idea of &quot;duress&quot; - a honey pot or similar.  Wire this up to the ssh and co (system-auth perhaps) and you can take action on someone else&#x27;s password attempts.  If you seed &quot;leaked&quot; passwords effectively, you could get a really decent insight into who is doing what to whom.  Alternatively, extend the password into a list of them.<br>
+<p>
+For me, if you have to get data across a border then a 32 GB micro SD card can be hidden quite easily - they are 11x15mm.  I&#x27;m no expert at evasion but I&#x27;d stick it close to a lump of metal eg a belt buckle, luggage zip, back of a watch (inside it?) or whatever.  I might even drop one inside the laptop case.  I would not try to swallow one or try to hide it internally otherwise unless my naked body is all I have to work with, in which case I might question what on earth I&#x27;m up to!<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867288/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867298"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 2:23 UTC (Wed)
+                               by <b>sjj</b> (guest, #2020)
+                              [<a href="/Articles/867298/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sjj" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867298" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree with the comment about nerd porn. I mean it&#x27;s fun to think about and all, but that&#x27;s pretty much it.<br>
+<p>
+There are a limited number of people for whom this kind of threat model makes sense. The intersection with people who run Linux on their laptop and understand PAM is likely somewhat more limited. <br>
+<p>
+The people writing these tend to live in countries where they themselves will never be subjected to this level of government scrutiny. They are free to self-aggrandize and fantasize about how they would cheat The Man from peeking into their porn and anime collections and that copy of the anarchist cookbook.<br>
+<p>
+Banned texts? Information control in modern autocracies is more about burying inconvenient data under mountains of bullshit, than hunting after samizdata. And if they want my family pictures, they can just follow my sister on Facebook like everybody else.<br>
+<p>
+In today&#x27;s world, is your only file transfer method really to personally carry the data in your laptop across borders? There are hundreds of places online where you can upload your encrypted data. Download it back when you arrive in your destination.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867298/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867439"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 6:26 UTC (Thu)
+                               by <b>nuvious</b> (guest, #153911)
+                              [<a href="/Articles/867439/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nuvious" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867439" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don&#x27;t actually entirely disagree with the characterization of &quot;nerd porn&quot; myself (the author). I wrote this as a thought experiment &quot;what if a duress word protocol was written as a pluggable authentication module?&quot; The most realistic use case is probably just a &#x27;silent alarm&#x27; concept where IT and security is notified of an employee in duress and then a separate script cleans out the duress module itself for ass cover. There&#x27;s risks and benefits to a mitigation of this nature just like duress words aren&#x27;t exactly risk-free in the real world. This is definitely a project born of &quot;what if&quot; that may have some use cases to a select few but isn&#x27;t the best practice strategy when securing data from threat actors.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867439/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 10:58 UTC (Wed)
+                               by <b>wjb</b> (subscriber, #71810)
+                              [<a href="/Articles/867310/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wjb" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867310" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So, how does it go if &#x27;they&#x27; think you&#x27;ve set a duress password and, actually, you haven&#x27;t?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 13:16 UTC (Wed)
+                               by <b>kowallis</b> (subscriber, #140201)
+                              [<a href="/Articles/867317/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kowallis" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867317" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the best use of this is to make it part of the password upgrade process. Logging in with an old password could run an appropriate notification script and either log the user out or sandbox the incoming user for extensive monitoring. This seems especially useful for remotely accessible ssh machines. It would be a non-intrusive way to monitor use of old passwords without getting in the way of legitimate users.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867366"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 15:53 UTC (Wed)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/867366/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867366" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I'm not sure how useful a "warn on old password use" process would be.  My employer requires me to change my password every 90 days or so, and I regularly forget I changed and try logging in with the old one at least once before I drill the new password into my muscle memory.  Any system that looks for old password use is going to have to take that kind of false positive into account, and my guess is that it's going to be far more common than an actual attacker using an old password.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867366/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867375"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 16:49 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/867375/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867375" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If your employer cares, you can point to the latest NIST documents which clearly state that password rotation is not recommended for security due to the need to continually make (what end up being bad) passwords all the time. Specifically[1], this paragraph in NIST 800-63-3B §5.1.1.2:<br>
+<p>
+<font class="QuotedText">&gt; Verifiers SHOULD NOT impose other composition rules (e.g., requiring mixtures of different character types or prohibiting consecutively repeated characters) for memorized secrets. Verifiers SHOULD NOT require memorized secrets to be changed arbitrarily (e.g., periodically). However, verifiers SHALL force a change if there is evidence of compromise of the authenticator.</font><br>
+<p>
+[1] <a href="https://pages.nist.gov/800-63-3/sp800-63b.html#memsecretver">https://pages.nist.gov/800-63-3/sp800-63b.html#memsecretver</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867375/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 18:10 UTC (Wed)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/867382/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867382" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>If your employer cares</blockquote>
+
+<p>I think we've hit the root cause of my problems right here.  My employer, like so many others, seems to operate on a combination of hunches and out of date information when deciding this kind of security policy.  It's odd, because for remote connections- including accessing email remotely- they've adopted an app-based 2FA that seems like it's much more in step with modern security recommendations.  They could add a whole lot more security by going to 2FA for all logins than with all their security theater around passwords.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867433"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 5:55 UTC (Thu)
+                               by <b>tyler569</b> (subscriber, #137973)
+                              [<a href="/Articles/867433/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tyler569" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867433" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem with this is that companies don&#x27;t usually have to follow the NIST guidelines, but do have to follow other requirements that are not as sensible. The current PCI-DSS states[1] for example (§ 8.2.4)<br>
+<p>
+<font class="QuotedText">&gt; Change user passwords/passphrases at least once every 90 days.</font><br>
+<p>
+There isn&#x27;t a lot of room for negotiation there, and so I have to change my password every 90 days. My hope is that organizations like PCI pick up on the new NIST guidance before long.<br>
+<p>
+[1] <a href="https://www.pcisecuritystandards.org/documents/PCI_DSS_v3-2-1.pdf">https://www.pcisecuritystandards.org/documents/PCI_DSS_v3...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867433/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867556"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 20:14 UTC (Thu)
+                               by <b>amacater</b> (subscriber, #790)
+                              [<a href="/Articles/867556/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="amacater" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867556" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And the UK&#x27;s NCSC - <a href="https://www.ncsc.gov.uk/collection/passwords/updating-your-approach">https://www.ncsc.gov.uk/collection/passwords/updating-you...</a> [for system owners] and a simpler what three words approach for home users - <a href="https://www.ncsc.gov.uk/blog-post/three-random-words-or-thinkrandom-0">https://www.ncsc.gov.uk/blog-post/three-random-words-or-t...</a><br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867556/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867718"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 29, 2021 8:10 UTC (Sun)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/867718/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nilsmeyer" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867718" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This quickly puts you in a situation where you have to comply with rules that are mutually exclusive. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867718/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor869870"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Monitor use of old passwords</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 20, 2021 16:20 UTC (Mon)
+                               by <b>kowallis</b> (subscriber, #140201)
+                              [<a href="/Articles/869870/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kowallis" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor869870" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree that using the previous password will be a common error of legitimate users. I think however that use of passwords older than that would always indicate compromise. This could be so much more important to log on an ssh server, for instance, than simply having a message in a log that an incorrect password attempt was blocked. Regardless of how an attempted intruder obtained an old password, the attempted use of a password older than the current or previous one should be a red flag for the organization.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/869870/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor867363"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 15:25 UTC (Wed)
+                               by <b>MortenSickel</b> (subscriber, #3238)
+                              [<a href="/Articles/867363/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MortenSickel" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867363" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As other has said above, the duress idea may or may not be useful - or may even be counterproductive, but the idea of having one user account behaving differently depending on the password sounds as if it may have some uses. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867363/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867394"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 19:54 UTC (Wed)
+                               by <b>JanC_</b> (subscriber, #34940)
+                              [<a href="/Articles/867394/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JanC_" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867394" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And when you actually use it in duress it might be better if it were named something differently too…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867394/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 6:31 UTC (Thu)
+                               by <b>nuvious</b> (guest, #153911)
+                              [<a href="/Articles/867440/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nuvious" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867440" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One edge case idea I&#x27;m already considering doing is implementing this in a honeypot. Sign script with one of the passwords in rockyou.txt that preps a honeypot instance for an attacker and does pre-reporting on the access prior to the attacker getting a shell. The scripts could also remove the duress instance entirely so the hacker just sees whatever was in the instance before the duress module was installed.<br>
+<p>
+The scripts that were executed could signal some outside mechanism that could then turn its attention to the VM in question to monitor its activity to see what the intruder is up to.<br>
+<p>
+In the end though, it&#x27;s a very edge-case utility that I mainly wrote for fun. Humbled it&#x27;s getting this much attention.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867425"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 3:36 UTC (Thu)
+                               by <b>gdt</b> (guest, #6284)
+                              [<a href="/Articles/867425/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gdt" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867425" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Why this conflation of law and mechanism?</p>
+
+<p>As long as there are reasonable legal uses, then its the <i>use</i> of the device illegally which is illegal. Just as 'using' a laptop is illegal when using it to whack someone's head with intent to murder them. (And yes this is a generalisation, but in the absence of legislation outlawing duress devices themselves, it is their use which matters).</p>
+
+<p>Are there legal uses?  Yes. For example, a person can be under duress during a robbery to operate a banking application. As more transactions occur  electronically then it makes sense to start to add duress features to protect those transactions, such as zeroising stored passwords and application tokens.</p>
+
+<p>A duress password need not do anything dramatic or illegal -- a contemporaneous record that an act was done under duress is itself useful when seeking to have those acts reversed or to be evidence of your intent during those acts.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867425/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867704"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress - conflation of law and mechanism</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 28, 2021 21:45 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/867704/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867704" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I thought the discussion of whether it would legal to use this was in the context of deciding if it was worthwhile.  If people won't use it because they'll go to prison if they do, maybe it's not worth the cost of maintaining it.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867704/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 31, 2021 14:31 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/867856/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867856" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A duress password need not do anything dramatic or illegal -- a contemporaneous record that an act was done under duress is itself useful when seeking to have those acts reversed or to be evidence of your intent during those acts.</font><br>
+<p>
+Some burglar alarms have a code that shuts off the alarm system, but sends an alert to the police as if the alarm had been set off. Useful if burglars have kidnapped an employee to force them to disable the alarm.<br>
+<p>
+It also alerts police to the fact it&#x27;s a hostage burglary, not just a break-in ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor869952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2021 1:02 UTC (Wed)
+                               by <b>dfsmith</b> (guest, #20302)
+                              [<a href="/Articles/869952/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dfsmith" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor869952" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can also imagine some future automobile that, after a duress password/key is entered, behaves normally for the first mile.  Then locks the doors, drives itself to the nearest police station and sets off the alarm.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/869952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor867435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2021 6:12 UTC (Thu)
+                               by <b>nuvious</b> (guest, #153911)
+                              [<a href="/Articles/867435/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nuvious" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867435" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Author of the project here; humbled greatly that this brought so much attention. My intent for the project was mainly a thought-experiment; what if a duress word (like the ones I used in the military) could be a pluggable authentication module?<br>
+<p>
+As with any mitigation tool there&#x27;s risks and benefits and this module isn&#x27;t without its risks if not properly implemented. The ideal scenario I was considering was a &quot;silent alarm&quot;; a script runs to notify IT and Security, then another script runs to delete the notification script and the duress module itself so by the time the threat agent drops to a shell there&#x27;s no evidence anything happened.  All other scenarios present some risk but many often take such risks on a routine basis such as journalists that &quot;sneak&quot; video, pictures and images out of areas where journalists are treated with hostility.<br>
+<p>
+In the end though, it was just a thought experiment and excuse to do some PAM dev that I had a lot of fun programming. Again, humbled that it provoked such great discussions and it&#x27;s inspired me to continue development on the project.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adding a &quot;duress&quot; password with PAM Duress</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 31, 2021 6:00 UTC (Tue)
+                               by <b>angdraug</b> (subscriber, #7487)
+                              [<a href="/Articles/867835/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="angdraug" />
+                <input type="hidden" name="return" value="/Articles/867158/#CommAnchor867835" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>If you think this use case isn't immediately useful and urgently needed, you're not paying attention to what's going on in the world.<p>
+
+<p>Just within the last year, in just one small country of Belarus (Central Europe, 9m people, not as of yet a war zone), there were two high profile cases (<a href="https://en.wikipedia.org/wiki/Mikola_Dziadok">Mikola Dziadok</a>, <a href="https://en.wikipedia.org/wiki/Raman_Pratasevich">Raman Pratasevich</a>) where having a duress password configured on one person's computer could have saved livelihoods (and potentially lives) of many others. In both cases, access to their computers obtained using torture was then used to expose other activists and their relatives who were then either arrested or had to flee Belarus.</p>
+
+<p>This is more than a thought experiment. This is something that can save lives.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

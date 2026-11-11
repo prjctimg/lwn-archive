@@ -1,0 +1,442 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The end of __get_user() and __put_user() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The end of __get_user() and __put_user()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Linus Torvalds rarely writes significant amounts of kernel code these days, so the merging of a [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;The end of __get_user() and __put_user()&quot;" href="https://lwn.net/headlines/1102061/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1102137/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The end of __get_user() and __put_user()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 22, 2026</br>
+           </div>
+Linus Torvalds rarely writes significant amounts of kernel code these days, so
+the <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=22a78a25438d">merging</a>
+of a 48-part patch series from him is an unusual event.  This series,
+destined for the 7.4 kernel release, performs some long-delayed kernel
+cleanup by removing a couple of the primitives used to access user-space memory
+from the kernel.  What was once a best practice has long been superseded,
+but it can take time for such changes to work their way through a body of
+code this large.
+<p>
+Kernel code often must access data that lies in user space; these operations
+must, of course, be done carefully.  When the kernel is acting on behalf of
+a user-space process, it must not perform any accesses that the process
+itself cannot do.  For this reason, the primitives for user-space access
+have been carefully written with a number of rules about their use.
+<p>
+For accesses to individual variables, the kernel has long provided <a
+href="https://docs.kernel.org/core-api/mm-api.html#c.get_user"><tt>get_user()</tt></a>
+and <a
+href="https://docs.kernel.org/core-api/mm-api.html#c.put_user"><tt>put_user()</tt></a>.
+They are macros that vary their behavior based on the type of the pointer
+passed to them; a <tt>get_user()</tt> call that is given a <tt>char *</tt>
+pointer will perform a single-byte read, while use of an <tt>int *</tt> pointer
+will result in a wider operation.  These macros check that the provided
+address lies in the user-space portion of the address space; the
+kernel also handles any hardware-generated faults indicating that the given
+address is not accessible.  Like many kernel functions,
+<tt>get_user()</tt> and <tt>put_user()</tt> will return zero if the access
+succeeds, and an error code otherwise.  Callers are expected to check that
+return value and, beyond doubt, all kernel code diligently does so.
+<p>
+These functions perform the above-described checking for every call; if a
+kernel function must, say, access three fields from a structure, there will
+be three sets of access checks performed.  Only the first of those three
+checks is actually necessary; if it passes, the other two will as well.  To
+optimize those patterns, the kernel provides two variants of the user-space
+access functions — <a
+href="https://docs.kernel.org/7.3/core-api/mm-api.html#c.__get_user"><tt>__get_user()</tt></a>
+and <a
+href="https://docs.kernel.org/7.3/core-api/mm-api.html#c.__put_user"><tt>__put_user()</tt></a>
+— that perform less checking.  Kernel code can check the base pointer of
+the structure with a call to <a
+href="https://elixir.bootlin.com/linux/v7.3/source/arch/arm64/include/asm/uaccess.h#L31"><tt>access_ok()</tt></a>,
+then safely use the non-checking access functions thereafter.
+<p>
+As Torvalds points out in the merge log, though, this pattern has long been
+less than optimal.  When it was first established, the checking performed
+by <tt>get_user()</tt> and <tt>put_user()</tt> was a significant part of
+the cost of the operation.  Since then, the checking has been made cheaper,
+and the access itself has become more expensive.  Specifically, most CPUs
+of interest have long since incorporated some form of <a
+href="/Articles/517475/">supervisor-mode access prevention (SMAP)</a>,
+which prevents the kernel from accessing user-space memory at all.  SMAP
+can defend the system against a variety of kernel bugs and exploits, but it
+also has a minor downside, in that it prevents the kernel from doing vital
+work as well.  One must make some sacrifices for security.
+<p>
+
+Users, being stubborn, tend to find that sacrifice to be more than they are
+willing to make.  Instead, the kernel must disable SMAP prior to each
+user-space access, and re-enable it afterward; that turns out to be an
+expensive pair of operations.  Since <tt>__get_user()</tt> and
+<tt>__put_user()</tt> must manipulate SMAP in this way, they are not
+actually cheaper than the fully checked variants.  The way to accelerate
+multiple accesses in the modern world is to disable SMAP once at the
+beginning, then re-enable it after all of the operations have been
+executed.  So, for example, read access to user space can be enabled with
+<tt>user_read_access_begin()</tt>, and disabled again with
+<tt>user_read_access_end()</tt>.  Naturally, code must take extra care to
+call <tt>user_read_access_end()</tt> when it is done accessing user-space
+memory, even if it exits via an error path, or the system will be left in
+an insecure state.  Just as naturally, that sort of failure has happened
+more than once.
+<p>
+More recently, the <a href="934679.html">scoped resource-management
+primitives</a> were added to ensure that the necessary cleanup happens in
+this type of situation.  Thomas Gleixner <a
+href="https://git.kernel.org/linus/e497310b4ffb">added</a> a set of scope
+guards for user-space access to the 6.18 kernel in 2025.  So the way a
+multiple-access situation should be coded now looks like:
+<p>
+<pre>
+    scoped_user_read_access(ptr, label) {
+    	unsafe_get_user(dest1, ptr-&gt;field1, label);
+	/* ... */
+	unsafe_get_user(destN, ptr-&gt;fieldN, label);
+    }
+</pre>
+<p>
+Here, <tt>ptr</tt> is the base pointer for the user-space accesses, which
+will be checked at the beginning; <tt>label</tt> is a label within the
+function that will be jumped to should any of the accesses fail.  The
+compiler ensures that the kernel's read access to user space will be
+disabled when control exits this block of code, no matter how that exit
+comes about, so it is no longer possible to leave user-space access enabled
+by mistake.  <tt>unsafe_get_user()</tt> (which is, of course, undocumented)
+performs the actual access, again jumping to <tt>label</tt> if something
+goes wrong.
+<p>
+In the end, there is no reason to keep <tt>__get_user()</tt> and
+<tt>__put_user()</tt> around — except for the inconvenient fact that they
+are still used in a number of places in the kernel.  The purpose of
+Torvalds's series is to change all of those call sites.  In some cases,
+such as <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=edc483b61126">this
+one</a>, the calls are changed to plain <tt>get_user()</tt> and
+<tt>put_user()</tt>; in others, such as <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=5c8590157b85">in
+the signal code</a>, the scoped pattern is used instead.  That gets rid of
+most of the call sites.
+<p>
+As described in the merge log, though, there are some places where these
+functions are used in more subtle ways.  For example, some code used them
+to access <i>kernel</i>-space addresses because the fault handling they
+provide was needed.  There is a function, <a
+href="https://elixir.bootlin.com/linux/v7.3/source/include/linux/uaccess.h#L640"><tt>get_kernel_nofault()</tt></a>,
+that does this job properly, so patches like <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=8eb93b8a6718">this
+one</a> convert the code to use it.  In other cases, the code should really
+have been disabling faults rather than relying on these functions to handle
+them; patches like <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=05fb07c40e00">this
+one</a> clean those up.  Finally, there are a number of places in the kernel that
+need to dereference a pointer that might be in either user or kernel space.
+Cleaning those up is a bit more complicated; see <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=5d64749b7df2">this
+patch</a> for an example.
+<p>
+The end result of all this work is that no code that is built for x86
+kernels uses <tt>__get_user()</tt> or <tt>__put_user()</tt> anymore, so <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f748af39e335">this
+patch</a> removes them entirely for that architecture.  Those functions
+remain for some other architectures though; in the case of 64-bit Arm, they
+never provided different behavior in the first place, so there is no rush
+to get rid of them.  Out-of-tree modules that use those functions will have
+to be adjusted, of course.
+<p>
+Perhaps needless to say, Torvalds
+did not do this work just because he was struck with a desire to get his
+hands dirty with low-level code again.  He is, of course, using an LLM
+"<q>as a glorified coccinelle script</q>" to get this work done in all of
+the necessary spots.  For better or worse, these tools are increasingly
+being used by kernel developers at all skill levels as they work to make
+the kernel better.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.4</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1102061/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1102315"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chasing desires</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 16:36 UTC (Thu)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/1102315/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahulsundaram" />
+                <input type="hidden" name="return" value="/Articles/1102061/#CommAnchor1102315" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Perhaps needless to say, Torvalds did not do this work just because he was struck with a desire to get his hands dirty with low-level code again</span><br>
+<p>
+Perhaps that's exactly why he did it and these new tools are just making it more practical to chase those desires.  How do we know one way or the other?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102315/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103474"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chasing desires</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 10:39 UTC (Thu)
+                               by <b>alex</b> (subscriber, #1355)
+                              [<a href="/Articles/1103474/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alex" />
+                <input type="hidden" name="return" value="/Articles/1102061/#CommAnchor1103474" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it's exactly that. If you know what needs to be done and tell the agent what to do it can do the laborious work of making the changes, running the build, fixing the compile failures and verifying the test while you get on with something else. Your not asking the LLM to "think" for you but using it as a diligent worker who won't get bored doing the clean-up.<br>
+<p>
+One of the projects I work on has long had a problem with partial API conversions where the updates were made for the common core use cases but the old API lingers because no one got round to cleaning up the dustier areas of code. hopefully suitably constrained agents can help finish those clean-ups.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103474/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102318"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Only first?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 16:53 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1102318/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1102061/#CommAnchor1102318" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Only the first of those three checks is actually necessary; if it passes, the other two will as well</p>
+</blockquote>
+<p>Only if the struct/accesses don't span multiple pages, right?
+<code>access_ok</code> has a size argument in addition to the base pointer.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102318/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102336"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Only first?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 18:11 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1102336/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1102061/#CommAnchor1102336" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <tt>access_ok()</tt> really only needs to check that the address falls within the user-space part of the address space.  It would take a large structure indeed for a part of it to extend into kernel space when the base is not. 
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102336/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102346"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Only first?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 19:40 UTC (Thu)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/1102346/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="BenHutchings" />
+                <input type="hidden" name="return" value="/Articles/1102061/#CommAnchor1102346" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That is true for x86_64 and maybe other 64-bit architectures, but on 32-bit there is generally no gap between user and kernel addresses.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102346/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102356"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Only first?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 21:01 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1102356/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1102061/#CommAnchor1102356" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; + * The masked variant does not check the size of the access and relies on a</span><br>
+<span class="QuotedText">&gt; + * mapping hole (e.g. guard page) to catch an out of range pointer, the</span><br>
+<span class="QuotedText">&gt; + * first access to user memory inside the scope has to be within</span><br>
+<span class="QuotedText">&gt; + * @uptr ... @uptr + PAGE_SIZE - 1</span><br>
+<p>
+Sounds like this might be a bug waiting to happen, if there's ever kernel code that manages to skip over more than a page, and then userspace that maps the memory right below kernel space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102356/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1102332"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Glorified coccinelle script</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 18:07 UTC (Thu)
+                               by <b>jgg</b> (subscriber, #55211)
+                              [<a href="/Articles/1102332/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jgg" />
+                <input type="hidden" name="return" value="/Articles/1102061/#CommAnchor1102332" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's the first major thing I tried to use AI for as well! In fact I went so far as to have it even write coccinelle scripts and execute it as part of the achieving the transformation I was looking for.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102332/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,255 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>An operations structure for swap devices [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="An operations structure for swap devices">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="One of the ideas raised at the 2026 Linux Storage, Filesystem, Memory Management, and BPF Summi [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1084316/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>An operations structure for swap devices</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 23, 2026</br>
+           </div>
+One of the ideas raised at the <a href="/Articles/lsfmmbpf2026/">2026 Linux
+Storage, Filesystem, Memory Management, and BPF Summit</a> (LSFMM+BPF) was
+the creation of <a
+href="1072657.html">an
+operations structure</a> for the swap subsystem.  Like many parts of the
+kernel, the swap layer evolved over time, with pieces being added as
+needed; the end result of this evolution is rarely what one would expect
+had the subsystem been designed today.  The interface between the swap
+layer and the devices it uses is just one example.  It appears that one
+result of the swap subsystem's evolution — the lack of an abstraction layer
+to interface with underlying storage — will soon be addressed, but in a
+different way than was initially envisioned.
+<!-- middle-ad -->
+<p>
+In the early days, the kernel was only able to swap to a dedicated
+partition on a local disk drive.  If that partition turned out to be too
+small — and it always turned out that way in the end — the only way to fix
+it was, normally, to repartition the entire disk.  The eventual addition of
+the ability to use a file within a filesystem as swap space made life
+easier for system administrators; later still, the kernel gained the
+ability to swap to networked filesystems.  Within the swap layer, each of
+these possible swap backends is coded as a set of special cases where their
+behavior differs.  This lack of abstraction at that level makes the swap
+subsystem harder to maintain and improve.
+<p>
+A <a href="/ml/all/20260515015737.890994-1-baoquan.he@linux.dev">a patch
+series</a> meant to improve this situation, created by Baoquan He, had been
+in the works for some time.  The interface between the swap layer and the
+backend would be defined by this structure:
+<p>
+<pre>
+    struct swap_ops {
+	void (*read_folio)(struct swap_info_struct *sis, struct folio *folio,
+			   struct swap_iocb **plug);
+	void (*write_folio)(struct swap_info_struct *sis, struct folio *folio,
+			    struct swap_iocb **plug);
+	void (*unplug)(struct swap_iocb *sio);
+    };
+</pre>
+<p>
+The purpose of the <tt>read_folio()</tt> and <tt>write_folio()</tt>
+functions is fairly obvious: they are called to move one or more pages
+between memory and the underlying swap device.  The <tt>unplug()</tt>
+function existed to start a batch of accumulated I/O operations.  Together,
+this set of operations was able to hide the differences between swap
+backends from the rest of the swap subsystem.
+<p>
+In He's series, there were three <tt>swap_ops</tt> structures defined, for
+three different backend cases:
+<p>
+<ul class="spacylist">
+<li> <tt>bdev_async_swap_ops</tt> is for the normal case of swapping to a
+     block device.  Operations happen asynchronously, since block devices
+     can take some time to carry them out.  It is worth noting that the
+     case of swapping to a file within a local filesystem is also normally
+     handled by these operations.  When a swap file is added, the kernel
+     asks the filesystem to specify where the file's blocks have been
+     placed, then bypasses the filesystem for I/O thereafter.
+<li> <tt>bdev_sync_swap_ops</tt> is also for a local block device, but the
+     operations are synchronous; the functions will not return until the
+     requested operations are complete.  This is the "swap bypass" case,
+     which was described in <a href="1057102.html">this article</a>;
+     in short, for fast, memory-based devices, the operations come down to
+     memory copies, so there is no point in performing them asynchronously.
+<li> <tt>bdev_fs_swap_ops</tt> is a set of operations that call into a
+     filesystem to perform the actual I/O.  As noted above, this case is
+     not for local filesystems.  It <i>is</i> needed, though, for swapping
+     to files on network filesystems.
+</ul>
+<p>
+This series had been through seven revisions and appeared to be on track
+for merging into the mainline.  After LSFMM+BPF, though, Christoph Hellwig
+showed up with <a href="/ml/all/20260713093350.2154226-1-hch@lst.de">a
+somewhat different approach</a> to the problem.  His series is focused on
+increasing the batching of swap-I/O operations for better performance.  As
+part of that effort, it adds an operations structure that is inspired by
+He's work, but which takes a different approach:
+<p>
+<pre>
+    struct swap_ops {
+	unsigned int flags;
+	bool (*can_merge)(struct folio *folio, struct folio *prev_folio,
+			size_t prev_folio_size, int rw);
+	void (*submit_write)(struct swap_io_ctx *ctx);
+	void (*submit_read)(struct swap_io_ctx *ctx);
+    };
+</pre>
+<p>
+The <tt>can_merge()</tt> function determines whether the I/O operations for
+two folios can be merged into a single, larger operation.  It has to
+determine whether the storage for the two folios is logically adjacent on
+the backing store, so the calculation must be different for different
+backing devices.  <tt>submit_write()</tt> and <tt>submit_read()</tt> are
+for initiating I/O, with the details of the operation gathered together
+into the <tt>ctx</tt> argument.  There is only one possible <tt>flags</tt>
+value, <tt>SWAP_OPS_F_REQUIRE_NOFS</tt>, which indicates that any reclaim
+operations must not call into the filesystem, since that could generate a
+recursive call into the filesystem hosting the swap file.
+<p>
+In Hellwig's patch set, there are only two operations structures defined:
+<tt>swap_bdev_ops</tt> for block-device backends, and <tt>swap_fs_ops</tt>
+for filesystem-backed backends.  The synchronous swap-bypass case is
+handled with tests in the block-device implementation, as with current
+kernels.  
+<p>
+This series is on its fifth revision, and seems to be mostly ready, though
+it may not come together in time for the 7.3 merge window.  This work, it
+seems, has run into a problem that is showing up with increasing frequency
+in the kernel community: the Sashiko review tool has few complaints about
+the patches themselves, but <a
+href="https://sashiko.dev/#/patchset/20260713093350.2154226-1-hch@lst.de">finds
+a couple of pre-existing problems</a> in the code that the patches change.
+There is a natural desire to see those problems fixed, but delaying new
+work to fix them is not always a popular decision.  Whether that will
+happen in this case is yet to be determined.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Swapping</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.3</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1083094/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1085472"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Pre-existing problems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2026 12:11 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1085472/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1083094/#CommAnchor1085472" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can you send an empty pull request to Sashiko, saying "I plan to change code in the following area, please review for existing problems"?  It might save some time to get that report before you start work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085472/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1085477"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Pre-existing problems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2026 12:50 UTC (Mon)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1085477/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1083094/#CommAnchor1085477" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The Sashiko developers have repeatedly claimed that the tool can run locally. I say "claimed" because I haven't actually had the chance to try it out myself, yet, so I'm just reporting what I've heard, but I have no reason to doubt them. Therefore, even if the publicly available interface doesn't permit that for some reason, it should be reasonably straightforward to trigger a review of an area manually.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1085477/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

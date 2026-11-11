@@ -1,0 +1,335 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Device resource management [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Device resource management">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Writing device drivers can be a tricky task.  Simply getting a piece of hardware to operate as  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/215235/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Device resource management</h1>
+<div class="Byline">[Posted January 2, 2007 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Writing device drivers can be a tricky task.  Simply getting a piece of
+hardware to operate as desired - perhaps working from erroneous or
+nonexistent documentation - can be a frustrating process.  Beyond that,
+however, the driver must allocate several different types of resources for
+the device; these resources can include I/O memory mappings, interrupt
+lines, blocks of memory, DMA buffers, registrations with multiple
+subsystems, etc.  All of these allocations must be returned to the system
+when the device (or its driver) goes away.  It is not uncommon for driver
+writers to forget to deallocate something, leading to resource leaks.
+<p>
+
+The problem can get worse, however, in the face of initialization errors.
+If the driver is unable to properly set up its device, it must undo any
+registrations which had been done up to the point of failure.  Attempts to
+handle initialization failures usually take the form of several
+<tt>goto</tt> labels within the initialization function or some sort of
+global "initialization state" variable describing where cleanup should
+begin.  Either way, these paths tend not to be well tested, so the chances
+of an initialization failure leading to some sort of resource leak are
+quite good.
+<p>
+
+Tejun Heo, who has done much to improve the Linux serial ATA subsystem over
+the last year, has had enough of these sorts of initialization problems.
+So he has put together <a href="http://lwn.net/Articles/215861/">a device
+resource management patch</a> which, if accepted, has the potential to make
+driver code simpler and more robust.  The core idea is simple: every time
+a driver allocates a resource, the management code remembers the allocation
+and any information needed to free that allocation.  When the driver
+disconnects from the device, all of the remembered allocations are returned
+to the system.
+<p>
+
+This sort of allocation tracking cannot be added to the current API in any
+sort of coherent way.  Tejun's patch, instead, creates new "managed"
+versions of various allocation functions.  The new functions look like the
+old ones with (1)&nbsp;the addition of "<tt>m</tt>" (or "<tt>devm</tt>") to
+the name, and (2)&nbsp;a <tt>struct device</tt> argument if the function
+did not already have one.  So, for example, the managed versions of the
+interrupt allocation functions are:
+<p>
+<pre>
+    int devm_request_irq(struct device *dev, unsigned int irq,
+		         irq_handler_t handler, unsigned long irqflags,
+		    	 const char *devname, void *dev_id);
+    void devm_free_irq(struct device *dev, unsigned int irq, 
+                       void *dev_id);
+</pre>
+<p>
+The patch also includes managed functions for dealing with DMA buffers, I/O
+memory regions, plain memory allocations, and PCI device setup.  They allow
+the driver author to replace a whole set of deallocation calls with a
+simple call to <tt>devres_release_all()</tt>, simplifying the code
+significantly.  In fact, even that call is unnecessary; the driver core
+will call it when the driver detaches from the device.
+<p>
+For more complicated situations, there is also a "group" concept.  Groups
+can be thought of as markers in the stream of allocations associated with a
+given device.  The allocations performed within a specific group can be
+rolled back without affecting any others.  In brief, the group API is:
+<p>
+<pre>
+    void *devres_open_group(struct device *dev, void *id, gfp_t gfp);
+    void devres_close_group(struct device *dev, void *id);
+    void devres_remove_group(struct device *dev, void *id);
+    int devres_release_group(struct device *dev, void *id);
+</pre>
+<p>
+A call to <tt>devres_open_group()</tt> will create a new group for the
+given device, identified by the <tt>id</tt> value.  Any allocations
+performed thereafter will be considered to be a part of that group until
+<tt>devres_close_group()</tt> is called.  If initialization works as
+desired, however, <tt>devres_remove_group()</tt> can be used to get rid of
+the group overhead while leaving the allocations (and their tracking
+information) untouched.  In the failure path,
+<tt>devres_release_group()</tt> will return all allocations belonging to
+the given group.
+<p>
+There has been very little discussion of this patch set, as of this
+writing.  Driver writers, perhaps, are still recovering from the holiday
+festivities.   It is not too hard to imagine that there could be some
+discomfort about the extra overhead involved in tracking all of those
+allocations - especially since things do function normally almost all of
+the time.  In the end, however, the promise of correct operation in a wider
+range of situations may be enough to motivate the inclusion of the new
+interface.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">I/O memory</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Resources</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/215996/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor216300"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Device resource management</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2007 15:43 UTC (Thu)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/216300/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NAR" />
+                <input type="hidden" name="return" value="/Articles/215996/#CommAnchor216300" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      It's a kind of garbage collection, isn't it?
+<P>
+<CENTER>Bye,NAR</CENTER>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/216300/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor216476"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Device resource management</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2007 17:22 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/216476/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/215996/#CommAnchor216476" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      More like a sort of obstacky thing, really. It's only garbage collection if you consider `chuck it all away' to be GC.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/216476/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor216546"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The true meaning of GC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2007 1:45 UTC (Sun)
+                               by <b>Max.Hyre</b> (subscriber, #1054)
+                              [<a href="/Articles/216546/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Max.Hyre" />
+                <input type="hidden" name="return" value="/Articles/215996/#CommAnchor216546" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>
+  <i>It's only garbage collection if you consider `chuck it all away' to be GC.</i>
+  </blockquote>
+
+   Isn't that what GC is all about?  This one just doesn't
+   have to be so
+   picky about what it chucks.  :-)
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/216546/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor216881"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The true meaning of GC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2007 16:50 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/216881/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/215996/#CommAnchor216881" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Well, yeah, but it's at best very *simple-minded* GC. :)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/216881/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor217327"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Device resource management</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2007 11:51 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/217327/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/215996/#CommAnchor217327" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Looks reminiscent of <a rel="nofollow" href="http://talloc.samba.org/">talloc</a>, sans hierarchy.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/217327/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor217332"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">talloc()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2007 13:48 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/217332/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/215996/#CommAnchor217332" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Yes, kind of like talloc(), but with the hierarchy - that's what the groups are - and with the ability to track allocation of resources other than memory.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/217332/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

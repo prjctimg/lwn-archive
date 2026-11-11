@@ -1,0 +1,209 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The reverting of revocable [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The reverting of revocable">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Transient devices pose a special challenge for an operating-system kernel. They can disappear a [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1058475/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The reverting of revocable</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 12, 2026</br>
+           </div>
+Transient devices pose a special challenge for an operating-system kernel.
+They can disappear at any time, leaving behind kernel data structures that
+no longer refer to an existing device, but which may still be in use by
+unknown kernel code.  Managing the resulting lifecycle issues has
+frustrated kernel developers for years.  In September 2025, the <a
+href="1038523.html">revocable resource-management patch series</a>
+from Tzung-Bi Shih appeared to offer a partial solution to this problem.
+Since then, though, other problems have arisen, and the planned merging of
+this series into the 7.0 release has been called off.
+<p>
+The core idea behind this series is the careful management of references to
+data structures associated with transient devices.  Kernel code needing
+access to one of those structures would attempt to obtain a short-lived
+reference; the attempt will succeed if the device is still present and
+functioning normally.  That reference is protected by <a
+href="/Articles/202847/">sleepable read-copy-update (SRCU)</a>, ensuring
+that the data structure in question will not disappear until after the next
+SRCU grace period.
+<p>
+If a device disappears from the system, the relevant driver will mark it as
+"gone" and deny any subsequent requests for references to its data
+structures.  After an SRCU grace period has passed, the owner of the data
+structure, secure in the knowledge that no references to it can still
+exist, can safely free that structure.  The uncertainty around the data's
+lifecycle has been replaced with a clear indication of when it is no longer
+in use.
+
+<!-- middle-ad -->
+<p>
+Greg Kroah-Hartman <a
+href="/ml/all/2025091224-blaming-untapped-6883@gregkh/">welcomed</a> this
+series when it was posted; he took it into the driver-core repository with
+the intent of pushing it upstream during the 7.0 merge window.  On
+January&nbsp;24, though, Johan Hovold <a
+href="/ml/all/20260124170535.11756-1-johan@kernel.org">requested a
+revert</a>, complaining that the series should never have been applied.
+Normally this sort of infrastructure is not accepted without code that
+actually uses it, but that practice was not followed in this case; there
+was no in-tree user of the revocable-access functionality.  Hovold
+criticized that move, saying that the proposed use cases for this feature
+do not actually need it, and that the code itself had some serious
+race-condition bugs.  The revocable code, he said, should be taken back out
+"<q>until a redesign has been proposed and evaluated properly</q>".
+<p>
+For his part, Kroah-Hartman <a
+href="/ml/all/2026020316-regain-posing-df8e@gregkh">resisted</a> the idea
+of reverting this change:
+<p>
+<blockquote class="bq">
+	Ah, but I do think this is the way forward, given that the
+	pattern/idea works in the rust side of the kernel, and it's exactly
+	what I've been asking for for years now :)
+<p>
+	But yes, without a real user, it's hard for me to justify it.  But,
+	I want it present in the tree now so that lots of others can play
+	with it easily.  If it turns out it is not correct, and does not
+	work properly, then great, we will delete the files entirely.  But
+	I'm not so sure that we are there yet.
+</blockquote>
+<p>
+He was referring to the <a
+href="https://rust.docs.kernel.org/kernel/revocable/struct.Revocable.html"><tt>Revocable</tt>
+trait</a> used by Rust code in the kernel.  It provides an abstraction to
+provide access (at no run-time cost) to a data structure that is guaranteed
+by its owner to not abruptly disappear.  For cases where that guarantee
+cannot be made, there is a <tt>try_access()</tt> function that works in a
+manner similar to the proposed C functionality.  For the curious, Danilo
+Krummrich <a href="/ml/all/DFXV1QMQMTRK.2W8SWGVHS2K69@kernel.org">described
+the Rust implementation</a> in some detail.  He pointed out that a C
+implementation cannot work in the same way "<q>due to language
+limitations</q>", but thought that the revocable series was a worthwhile
+exercise in figuring out how best to adapt the Rust pattern to the C side.
+<p>
+Jason Gunthorpe, though, <a
+href="/ml/all/20260126000730.GI1134360@nvidia.com">described</a> that
+mechanism — and any interface that allows access to a device after it has
+been unregistered — as "<q>*dangerous*</q>", and said that use of the
+<tt>try_access()</tt> functions should be treated as "<q>a code smell that
+says something is questionable in the driver or subsystem</q>".  The real
+value in the Rust abstraction, he said, is how it forces documentation of
+which contexts can safely access a device structure, and which are
+uncertain.  The C version, instead, forces all accesses to be treated as
+uncertain, losing the documentation value, hurting performance, and
+possibly encouraging other types of bugs.
+<p>
+Hovold <a
+href="/ml/all/aXdxDBXdyqLFfKKI@hovoldconsulting.com">described</a>
+<tt>Revocable</tt> as "<q>a design pattern that's perhaps needed for rust,
+but not necessarily elsewhere</q>".  Gunthorpe <a
+href="/ml/all/20260127235232.GS1134360@nvidia.com">said more strongly</a>
+that adding something like the Rust abstraction is "<q>not something we
+want to do</q>".  Instead, he said, changes should be made so that driver
+operations (often called "fops" since they are gathered together in the <a
+href="https://elixir.bootlin.com/linux/v6.18.6/source/include/linux/fs.h#L2268"><tt>file_operations</tt>
+structure</a>) should simply be run in a safe context where resources
+cannot disappear from underneath them.  Laurent Pinchart <a
+href="/ml/all/20260129010822.GA3310904@killaraus">agreed</a>, and outlined
+a possible solution around safer <tt>file_operations</tt> invocations.
+<p>
+Meanwhile, Shih, who was unsurprisingly against reverting the series, <a
+href="/ml/all/aXjgeNY-jf9rIw09@google.com">said</a> that keeping it in
+linux-next, at least, would be helpful.  He posted <a
+href="/ml/all/20260129143733.45618-1-tzungbi@kernel.org">a separate
+series</a> fixing the race conditions reported by Hovold.  Kroah-Hartman
+quickly picked up the fixes, leading to <a
+href="/ml/all/aYHm9pr0e7myeqS3@hovoldconsulting.com">another complaint</a>
+from Hovold, who asked again for the series to be reverted.  In response,
+Kroah-Hartman <a
+href="/ml/all/2026020315-twins-probe-d988@gregkh">defended</a> his
+acceptance of the fixes, but agreed to disable the revocable feature from
+the build for the 7.0 release cycle.  That did not stop the disagreement,
+though; Hovold <a
+href="/ml/all/aYNZYqpV62wVtxDI@hovoldconsulting.com">responded</a> that
+"<q>API design should not be done incrementally in-tree</q>".
+<p>
+It took a few more days but, on February&nbsp;6, Kroah-Hartman <a
+href="/ml/all/2026020624-buddhism-clavicle-7a90@gregkh">threw in the
+towel</a> and applied Hovold's revert patches.  "<q>Kernel developers /
+maintainers are only 'allowed' one major argument / fight a year, and I
+really don't want to burn my 2026 usage so early in the year :)</q>"  He
+asked Shih to go through the feedback and prepare a new series to be
+reviewed and, with luck, merged for a future kernel release.
+<p>
+This, of course, is not the sort of outcome anybody is hoping for when they
+put together an improvement for the kernel (or any other free-software
+project).  But it certainly happens at times.  If all goes well from here,
+this setback will lead, in the long term, to a better and more maintainable
+solution that will, finally, address a problem that kernel developers have
+struggled with for years.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Device drivers/Support APIs</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Race conditions</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1058041/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,430 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The seqcount latch lock type [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The seqcount latch lock type">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel contains a wide variety of locking primitives; it can be hard to stay on top of all  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/831742/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The seqcount latch lock type</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 17, 2020</br>
+           </div>
+The kernel contains a wide variety of locking primitives; it can be hard to
+stay on top of all of them.  So even veteran kernel developers might be
+forgiven for being unaware of the "seqcount latch" lock type or its use.
+While this lock type has existed in the kernel for several years, it is
+only being formalized with a proper type declaration in 5.10.  So this
+seems like a good time to look at what these locks are and how
+they work.
+<p>
+<h4>Seqcounts and seqlocks</h4>
+<p>
+Seqcounts (and seqlocks, which are built on top of seqcounts) are among the
+many primitives used to reduce locking 
+overhead in specific situations; their use is most indicated when reads to
+protected data far outnumber writes, and updates to the data are quick when
+they do happen.  Rather than preventing concurrent access to data, seqcounts
+and seqlocks
+work by detecting when a reader and a writer collide and forcing readers to
+retry in such situations.  They were first <a
+href="22818.html">introduced for the 2.5.60 development kernel</a> in
+2003, and have grown considerably in complexity since then.
+<p>
+Seqcounts are the lowest-level piece of this mechanism; at their core, they
+are a simple counter that is incremented whenever the protected data is
+modified.  Indeed, the counter is incremented twice, once before the
+process of modifying the data begins with a call to:
+<p>
+<pre>
+    static inline void raw_write_seqcount_t_begin(seqcount_t *s)
+    {
+	s-&gt;sequence++;
+	smp_wmb();
+    }
+</pre>
+<p>
+and once after modification is complete by calling:
+<p>
+<pre>
+    static inline void raw_write_seqcount_t_end(seqcount_t *s)
+    {
+	smp_wmb();
+	s-&gt;sequence++;
+    }
+</pre>
+<p>
+(Some debugging instrumentation has been removed from the above).  As can
+be seen, write-side seqcount operations come down to incrementing the
+counter, plus some carefully placed write barriers (the calls to
+<tt>smp_wmb()</tt>) to ensure the correct 
+ordering between changes to the counter and to the protected data.  One key
+point to note here is that the counter, which starts at zero, will be odd
+while modification is taking place, and even otherwise.
+<p>
+Before a reader can access the protected data, it must enter the critical
+section with a call to:
+<p>
+<pre>
+    static inline unsigned __read_seqcount_t_begin(const seqcount_t *s)
+    {
+	unsigned ret;
+
+    repeat:
+	ret = READ_ONCE(s-&gt;sequence);
+	if (unlikely(ret &amp; 1)) {
+		cpu_relax();
+		goto repeat;
+	}
+	return ret;
+    }
+</pre>
+<P>
+
+(Again, debugging code has been removed; note also that real users will
+call higher-level functions built on the above).  This function starts by
+checking whether modification is currently taking place (as indicated by
+the sequence counter having an odd value); if so, it will
+spin until the sequence count is incremented again (the
+<tt>cpu_relax()</tt> call serves a few functions, including inserting a
+compiler barrier and potentially letting an SMT sibling run).  Then the current
+counter value is returned and the caller can provisionally read the protected data.
+Once that has been done, the section is exited with a call to:
+<p>
+<pre>
+    static inline int __read_seqcount_t_retry(const seqcount_t *s, unsigned start)
+    {
+	return unlikely(READ_ONCE(s-&gt;sequence) != start);
+    }
+</pre>
+<p>
+The return value from this function tells the caller whether modification
+of the data has occurred while it was being read; if
+<tt>__read_seqcount_t_retry()</tt> returns 
+<tt>true</tt>, the caller must go back to the beginning and try again.  For
+this reason, accesses to seqcount-protected data is normally coded as a
+<tt>do</tt>..<tt>while</tt> loop that repeats until the data has been
+successfully read.
+<p>
+Upon this simple foundation has been built a whole array of variants for
+specific use cases.  Many callers in the kernel use the higher-level
+<tt>seqlock_t</tt> type, which handles details like concurrency among
+writers among other things.  See <a
+href="https://elixir.bootlin.com/linux/v5.9-rc4/source/include/linux/seqlock.h"><tt>include/linux/seqlock.h</tt></a>
+for lots of details.
+<p>
+<h4>The seqcount latch type</h4>
+<p>
+While the above interface works in most situations, there is one important
+case where things fall apart: if a reader ever preempts a writer on the
+same CPU.  For example, if a writer is preempted by an interrupt handler,
+and that handler attempts to enter a read section for the same data, the
+CPU will deadlock while the reader spins waiting for an update that will
+never complete.  This situation is normally avoided by disabling preemption
+and interrupts while the write is taking place; that is one of the many
+things handled by the higher-level seqlock interfaces.
+<p>
+There are times, though, when it is not possible to completely block
+interrupts; in particular, code that might be called within a non-maskable
+interrupt is, as the name suggests, not maskable.  Blocking preemption and
+interrupts also tends to be unwelcome in realtime kernels;
+another solution must
+be found for those cases.  One such solution, <a
+href="https://git.kernel.org/linus/9b0fd802e8c0">introduced</a> by Mathieu
+Desnoyers in 2014, is the seqcount latch.  It avoids the possibility of an
+infinite spin at the cost of maintaining two copies of the protected data.
+<p>
+In particular, if a structure of type <tt>struct mydata</tt> is to be
+protected with a seqcount latch, that structure will need to be declared
+as:
+<p>
+<pre>
+    struct mydata data[2];
+</pre>
+<p>
+At any given time, one entry in that array will be considered live and
+available, while the other is reserved for modifications by a writer.  The
+least-significant bit in the sequence counter indicates which element
+should be read at any given time.  Code for the read side now looks
+something like this:
+<p>
+<pre>
+    do {
+        seq = raw_read_seqcount_latch(&amp;seqcount);
+	index = seq &amp; 0x01;
+	do_something_with(data[index]);
+    } while (read_seqcount_retry(&amp;seqcount, seq));
+</pre>
+<p>
+There is still a loop here, which detects concurrent modification of the
+data.  But if a writer has been interrupted by a reader, the count will not
+change and there will be no need to retry the access.
+<p>
+To update the protected data, the writer simply makes any modifications to the entry
+in the <tt>data</tt> array that is not currently being used by the
+readers.  Nobody should be looking at that entry, so there should be no
+need for any particular protection (unless concurrent
+writers are a possibility, of course).  When the new data is ready, the writer calls:
+<p>
+<pre>
+    static inline void raw_write_seqcount_t_latch(seqcount_t *s)
+    {
+       smp_wmb();      /* prior stores before incrementing "sequence" */
+       s-&gt;sequence++;
+       smp_wmb();      /* increment "sequence" before following stores */
+    }
+</pre>
+<p>
+After this call, readers will be directed to the new version of the data.
+For an example of how seqcount latches are used, see the handling of
+timekeeping data (<a
+href="https://elixir.bootlin.com/linux/v5.9-rc5/source/kernel/time/sched_clock.c#L71">read
+side</a> and <a
+href="https://elixir.bootlin.com/linux/v5.9-rc5/source/kernel/time/sched_clock.c#L99">write
+side</a>) in <tt>kernel/time/sched_clock.c</tt>.
+
+<p>
+The 5.10 kernel will see the merging of <a
+href="/ml/linux-kernel/20200827114044.11173-1-a.darwish@linutronix.de/">a
+patch series</a> from Ahmed Darwish that formalizes the seqcount latch
+API.  Since it was first introduced, the seqcount latch has been
+implemented as a sort of "off-label" use of the seqcount type, changing its
+semantics in ways that, one hopes, all users understand.  Darwish, instead,
+has concluded that the seqcount latch is a separate type of lock that
+should be handled independently of seqcounts.
+<p>
+Thus, his patch set introduces a new <tt>seqcount_latch_t</tt> type and
+changes the prototypes of the relevant functions to expect parameters of
+that type.  That helps to nail down the actual semantics of the seqcount
+latch and ensures that callers won't mix locks of that type up with
+ordinary seqcounts.  The interface still lives in
+<tt>&lt;linux/seqlock.h&gt;</tt>, but it could logically be moved elsewhere
+at this point.
+<p>
+None of this is likely to make the use of seqcount latch locks more
+popular; the situations where they are needed are rare indeed.  There are
+only four users in the 5.9 kernel, and one of those is removed in Darwish's
+patch set as an "abuse" of the type (though, if one counts users of the <a
+href="https://elixir.bootlin.com/linux/v5.9-rc4/source/include/linux/rbtree_latch.h">latch
+tree type</a>, the number goes up slightly).  If a kernel developer is
+wondering if a seqcount latch is needed in a given situation, the answer is
+almost certainly "no".  But it is illustrative of the lengths to which
+kernel developers must go in order to provide safe-but-fast access to
+critical system data in all situations.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Locking mechanisms/seqlocks</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/831540/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor831749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The seqcount latch lock type</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2020 15:31 UTC (Thu)
+                               by <b>darwi</b> (subscriber, #131202)
+                              [<a href="/Articles/831749/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="darwi" />
+                <input type="hidden" name="return" value="/Articles/831540/#CommAnchor831749" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks a lot Jon for the perfect summary :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor831771"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The seqcount latch lock type</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2020 19:25 UTC (Thu)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/831771/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/831540/#CommAnchor831771" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>This design reminds me a little bit of <a href="https://github.com/jonhoo/rust-evmap">the "evmap" Rust library</a> which implements a lock-free HashMap -- it also works by storing two copies (one for writers and the other for readers) and swapping between the two after all the existing readers are no longer in the middle of a read. It's a pretty cute idea.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831771/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor833164"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The seqcount latch lock type</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2020 1:49 UTC (Thu)
+                               by <b>xi0n</b> (guest, #138144)
+                              [<a href="/Articles/833164/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="xi0n" />
+                <input type="hidden" name="return" value="/Articles/831540/#CommAnchor833164" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It’s very much reminiscent of double buffering in graphics programming.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833164/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor831797"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The seqcount latch lock type</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2020 22:23 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/831797/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nix" />
+                <input type="hidden" name="return" value="/Articles/831540/#CommAnchor831797" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FYI: I&#x27;ve used this technique in userspace to avoid locking. I didn&#x27;t invent it, of course, I saw it in the core timekeeping code and was taken with it.<br>
+<p>
+It doesn&#x27;t gain you anything in the uncontended case, but one particularly nice thing from the userspace perspective is that you are guaranteed not to have any trips into the kernel at all, even when contended, so if there are enough colliding writes and concurrent reads that loads of slow-path trips into the kernel on lock contention are killing you, you can try moving from a (futex-backed) pthread mutex to one of these. It&#x27;s rare, but if you know that reads and writes are often going to be colliding for a brief period (one or two retry loops) this can give a significant performance gain and latency reduction and can even reduce CPU load as well, even though it&#x27;s a busywait! (A quick run round the retry loop is a *lot* faster than a transition into the kernel on a blocking futex and back out.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831797/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor832090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The seqcount latch lock type</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2020 16:07 UTC (Mon)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/832090/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="compudj" />
+                <input type="hidden" name="return" value="/Articles/831540/#CommAnchor832090" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;m glad to see this little trick being useful areas beyond timekeeping. It has some of the benefits of RCU-style synchronization (namely low-latency reads, and reads allowed from NMI context), but unlike RCU, it does not allow read-side to delay updates indefinitely. It&#x27;s therefore useful in situations where the updater is the kernel, and (at least some) readers are in user-space.<br>
+<p>
+Having its own type is a nice improvement over the original implementation I did for timekeeping.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/832090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

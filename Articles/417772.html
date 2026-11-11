@@ -1,0 +1,335 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Conditional tracepoints [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Conditional tracepoints">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Tracepoints are small hooks placed into kernel code; when they are enabled, they can generate e [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/417485/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Conditional tracepoints</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 30, 2010</br>
+           </div>
+Tracepoints are small hooks placed into kernel code; when they are enabled,
+they can generate event information which can be consumed through the
+ftrace or perf interfaces.  These tracepoints are defined via the decidedly
+gnarly <tt>TRACE_EVENT()</tt> macro which Steven Rostedt nicely <a
+href="379903.html">described in detail</a> for LWN earlier this
+year.  As kernel developers add more tracepoints to the kernel, they are
+occasionally finding things which can be improved.  One of those seems
+relatively simple: what if a tracepoint should only fire some of the time?
+<p>
+Arjan van de Ven recently posted <a href="/Articles/417774/">a patch adding
+a tracepoint</a> to <tt>__mark_inode_dirty()</tt>, a function called deep
+within the virtual filesystem layer to, surprisingly, mark an inode as
+being dirty.  Arjan's purpose is to figure out which processes are causing
+files to have dirty contents; that will allow tools like PowerTop to tell
+laptop users which process is causing their disk to spin up.  The only
+problem is that some calls to <tt>__mark_inode_dirty()</tt> are essentially
+noise from this point of view; they happen, for example, when an inode is
+first created or is being freed.  Tracing those calls could create a stream
+of useless events which would have to be filtered out by PowerTop, causing
+PowerTop itself to require more power.  So it is preferable to avoid
+creating those events in the first place if possible.
+<p>
+For that reason, Arjan made the call to the tracepoint be
+conditional:
+<p>
+<pre>
+    if (flags &amp; (I_DIRTY_SYNC | I_DIRTY_DATASYNC | I_DIRTY_PAGES))
+	trace_writeback_inode_dirty(inode, flags);
+</pre>
+<p>
+This code works in that it causes the tracepoint to be "hit" only when an
+application has actually done something to dirty an inode.
+<p>
+The VFS developers seem to have no objection to this tracepoint being
+added; the resulting information can be useful.  But they didn't like the
+conditional nature of it.  Part of the problem is that tracepoints are
+supposed to keep a low profile; developers want to be able to ignore them
+most of the time.  Expanding a tracepoint to two lines and an <tt>if</tt>
+statement rather defeats that goal.  But tracepoints are also supposed to
+not affect execution time.  They have been carefully coded to impose almost
+no overhead when they are not enabled (which is most of the time); with
+techniques like <a href="/Articles/412072/">jump label</a>, that overhead
+can be reduced even further.  But that <tt>if</tt> statement, being outside
+of the tracepoint altogether, will always be executed regardless of whether
+the tracepoint is currently enabled or not.  Multiply that test-and-jump
+across millions of calls to <tt>__mark_inode_dirty()</tt> on each of
+millions of machines, and the extra CPU cycles start to add up.
+<p>
+So it was asked: could this test be moved into the tracepoint
+itself?  One approach might be to put the test into the
+<tt>TP_fast_assign()</tt> portion of the tracepoint, which copies the
+tracepoint data into the tracing ring buffer.  The problem with that idea
+is that, by that time, the tracepoint has already fired, space has been
+allocated in the ring buffer, etc.  There is currently no mechanism to
+cancel a tracepoint hit partway through.  There has, in the past, been
+talk of adding some sort of "never mind" operation which could be invoked
+within <tt>TP_fast_assign()</tt>, but that idea seems less than entirely
+elegant. 
+<p>
+What might happen, instead, is the creation of a variant of
+<tt>TRACE_EVENT()</tt> with a name like <tt>TRACE_EVENT_CONDITION()</tt>.
+It would take an extra parameter which would be, of course, another tricky
+macro.  For Arjan's tracepoint, the condition would look something like:
+<p>
+<pre>
+    TP_CONDITION(
+	    if (flags &amp; (I_DIRTY_SYNC | I_DIRTY_DATASYNC | I_DIRTY_PAGES))
+	    	return 1;
+	    else
+	    	return 0;
+    ),
+</pre>
+<p>
+The tracepoint code would then test the condition before doing any other
+work associated with the tracepoint - but only if the tracepoint itself has
+been enabled.  
+<p>
+This solution should help to keep the impact of tracepoints to a minimum
+once again, especially when those tracepoints are not enabled.  There is
+one potential problem in that the condition is now hidden deeply within the
+definition of the tracepoint; that definition is usually found in a special
+header file far from the code where the tracepoint is actually inserted.
+At the tracepoint itself, the condition which might cause it not to fire is
+not visible in any way.  So, if somebody other than the initial developer
+wants to use the tracepoint, they could misinterpret a lack of output as a
+sign that the surrounding code is not being executed at all.  That little
+problem could presumably be worked around with clever tracepoint naming,
+better documentation, or simply expecting users to understand what
+tracepoints are actually telling them.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/Kernel tracing</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Tracing</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/417772/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor418186"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Conditional tracepoints</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2010 3:58 UTC (Thu)
+                               by <b>thedevil</b> (guest, #32913)
+                              [<a href="/Articles/418186/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="thedevil" />
+                <input type="hidden" name="return" value="/Articles/417772/#CommAnchor418186" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Tracing those calls could create a stream of useless events which would have to be filtered out by PowerTop, causing PowerTop itself to require more power."<br>
+<p>
+LOL! Thanks for this bit of typical LWN humor.  Sometimes I think the Editor has been born on other shores where this gift is more common :)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/418186/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor418257"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Conditional tracepoints</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2010 10:16 UTC (Thu)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/418257/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mjthayer" />
+                <input type="hidden" name="return" value="/Articles/417772/#CommAnchor418257" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; "Tracing those calls could create a stream of useless events which would have to be filtered out by PowerTop, causing PowerTop itself to require more power."</font><br>
+<p>
+It does make me wonder why the filtering logic couldn't just be in PowerTop, as having the tracepoint on is clearly not the normal case.  I assume that it would have generated enough extra work and really changed the systems power usage enough to make PowerTop's analysis harder.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/418257/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor418373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Conditional tracepoints</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2010 16:56 UTC (Thu)
+                               by <b>intgr</b> (subscriber, #39733)
+                              [<a href="/Articles/418373/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intgr" />
+                <input type="hidden" name="return" value="/Articles/417772/#CommAnchor418373" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There is one potential problem in that the condition is now hidden deeply</font><br>
+<font class="QuotedText">&gt; within the definition of the tracepoint; that definition is usually found</font><br>
+<font class="QuotedText">&gt; in a special header file far from the code where the tracepoint is</font><br>
+<font class="QuotedText">&gt; actually inserted. At the tracepoint itself, the condition which might</font><br>
+<font class="QuotedText">&gt; cause it not to fire is not visible in any way.</font><br>
+<p>
+Why not use code comments? their purpose after all is to inform other coders of things that might not be obvious at first.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/418373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor418559"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Conditional tracepoints</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2010 10:16 UTC (Fri)
+                               by <b>dag-</b> (guest, #30207)
+                              [<a href="/Articles/418559/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dag-" />
+                <input type="hidden" name="return" value="/Articles/417772/#CommAnchor418559" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You removed the next sentence which gives a clue.<br>
+<p>
+<font class="QuotedText">&gt; So, if somebody other than the initial developer wants to use the tracepoint, they could misinterpret a lack of output as a sign that the surrounding code is not being executed at all.</font><br>
+<p>
+The people using the tracepoints are not necessarily kernel developers, and in most cases will not be tracing while at the same time looking at the source-code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/418559/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor419136"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Conditional tracepoints</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2010 11:02 UTC (Wed)
+                               by <b>Auders</b> (guest, #53318)
+                              [<a href="/Articles/419136/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Auders" />
+                <input type="hidden" name="return" value="/Articles/417772/#CommAnchor419136" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The condition should be reflected in the format then, so that the tool used to read the tracepoint can know about it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/419136/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

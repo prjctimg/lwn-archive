@@ -1,0 +1,164 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>fallocate() and the block layer [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="fallocate() and the block layer">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" In a session he dubbed 'block device fallocate() bikeshedding', Darrick Wong led a discussion  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/684573/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>fallocate() and the block layer</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>April 27, 2016</br>
+           <hr>
+<a href="/Articles/lsfmm2016/">LSFMM 2016</a>
+</div>
+<p>
+In a session he dubbed "block device <tt>fallocate()</tt> bikeshedding",
+Darrick Wong led a discussion on some recent ideas on <a
+href="680708.html">moving some functionality</a> from
+<tt>ioctl()</tt> commands to a higher level in the stack.  The session was
+in a 
+combined filesystem and storage track session at the 2016 Linux Storage,
+Filesystem, 
+and Memory-Management Summit.
+</p>
+
+<p>
+There are some block-layer <tt>ioctl()</tt> commands that could be
+considered as candidates for changing to <tt>fallocate()</tt> flags.
+For example, he had <a 
+href="http://thread.gmane.org/20160302040932.16685.62789.stgit@birch.djwong.org">proposed</a> 
+a <tt>BLKZEROOUT2</tt> <tt>ioctl()</tt> command to provide a way for user
+space to access the zeroing facility in the block layer.  In the
+discussion on the mailing list, others,
+including Linus Torvalds, thought that it made more sense to use the
+<tt>FALLOC_FL_PUNCH_HOLE</tt> and <tt>FALLOC_FL_ZERO_RANGE</tt> flags to
+<tt>fallocate()</tt> to do that.
+</p>
+
+<p>
+Wong has <a
+href="http://thread.gmane.org/20160305005556.29738.66782.stgit@birch.djwong.org">implemented</a>
+those changes, but wondered about the alignment requirements.  His patches
+currently 
+require that the ranges specified are aligned with the 512-byte logical
+block.  That avoids the complexity of manually zeroing out both ends, while
+punching out multi-block holes in the middle.  Ted Ts'o suggested that, for
+simplicity, non-aligned ranges should simply get <tt>EINVAL</tt>.
+</p>
+
+<p>
+The conversation then turned to thin provisioning (dm-thinp) in the context
+of the <a 
+href="http://thread.gmane.org/20160303223952.GE24012@thunk.org">out-of-tree
+<tt>FALLOC_FL_NO_HIDE_STALE</tt> functionality</a>.  That flag will
+cause space to be allocated, but that space will not be zeroed before being
+made available to user space.  So it may return stale data in those blocks,
+which is 
+generally considered to be a security problem.  Dm-thinp needs to
+allocate space from its pool, but those blocks could still have stale
+data. By default, dm-thinp will zero out any reads from
+those regions until they have been written and will zero out the rest of
+the block if a write is smaller than a block.
+</p>
+
+<p>
+But, more often than not, that zeroing is disabled in dm-thinp by users
+because it is not 
+needed, since some filesystems (e.g. XFS) already handle getting stale data from
+the block layer. Wong asked if that "no hide stale" functionality would be
+useful 
+to in-kernel callers, so that no extra zeroing was done for them.  Chris
+Mason said that many filesystems already expect garbage from the drives, so
+it would  
+be a surprise to get zeroes.  It would make sense to have a way to get
+zeroes, but Btrfs and others don't really need it.
+</p>
+
+<p>
+A problem with <tt>fallocate()</tt> is that it might take a long
+time to complete for certain kinds of operations, Wong said.  Since using
+it is supposed to ensure that 
+user space 
+will never receive an <tt>ENOSPC</tt> error when operating on the file,
+copy-on-write (or <tt>reflink()</tt>-supporting) filesystems need to
+"unshare" the blocks of a file.  For a 
+1TB file, that effectively means a 1TB copy operation, but not doing so
+would mean that "the thing that is not supposed to happen, happens". 
+</p>
+
+<p>
+So, Wong asked,
+should there be an <tt>fallocate()</tt> flag for "do expensive operations"
+to avoid violating users' expectations?  But David Howells asked in
+return: is <tt>fallocate()</tt> supposed to be fast or is it intended to
+ensure that <tt>ENOSPC</tt> doesn't happen?  Christoph Hellwig said that
+there are already instances where <tt>fallocate()</tt> is not fast.  The
+questions remained unresolved and the session wound down.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">fallocate()</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2016</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/684830/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

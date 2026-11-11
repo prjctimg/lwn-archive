@@ -1,0 +1,410 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improved load balancing with machine learning [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Improved load balancing with machine learning">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The extensible scheduler class ('sched_ext') allows the loading of a custom CPU scheduler into  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1026983/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improved load balancing with machine learning</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 1, 2025</br>
+           <hr>
+<a href="../Archives/ConferenceIndex/index.html">OSSNA</a>
+</div>
+The <a href="922405.html">extensible scheduler class</a>
+("sched_ext") allows the loading of a custom CPU scheduler into the kernel
+as a set of BPF functions; it was merged for the 6.12 kernel release.
+Since then, sched_ext has enabled a wide range of experimentation with
+scheduling algorithms.  At the 2025 <a
+href="https://events.linuxfoundation.org/open-source-summit-north-america/">Open
+Source Summit North America</a>, Ching-Chun ("Jim") Huang presented work
+that has been done to apply (local) machine learning to the problem of
+scheduling processes on complex systems.
+<p>
+Huang started with a timeline of Linux scheduler development, beginning
+with the adoption of the completely fair scheduler (CFS) in 2007.  Various
+efforts were made to write alternatives to CFS for specific use cases,
+notably the 2009 <a href="351499.html">submission of BFS</a>, and the
+2016 <a href="720227.html">MuQSS submission</a>, both from Con
+Kolivas.  In 2023, the <a href="925371.html">EEVDF scheduler</a>
+showed up as an enhancement to, and eventual replacement for, CFS.  The
+following year, finally, saw the merging of sched_ext, after some extensive
+discussion.
+<p>
+<!-- middle-ad -->
+In other words, he said, it took 17 years from the beginning of the CFS era
+to get to the point where an extensible scheduler was added to Linux.  That
+period reflects a long-held opinion that one scheduler could be optimal for
+all situations.  This position was <a
+href="https://lore.kernel.org/all/alpine.LFD.0.999.0710021410470.3579@woody.linux-foundation.org/">clearly
+expressed by Linus Torvalds</a> in 2007:
+<p>
+<blockquote class="bq">
+	The arguments that "servers" have a different profile than
+	"desktop" is pure and utter garbage, and is perpetuated by people
+	who don't know what they are talking about. The whole notion of
+	"server" and "desktop" scheduling being different is nothing but
+	crap.
+</blockquote>
+<p>
+The reality of the situation, Huang said, has changed since then.  In 2007,
+machines typically had a maximum of four CPUs, those CPUs were all
+equivalent to each other, and the workloads were relatively simple.  In
+2025, instead, systems can have over 48&nbsp;cores with heterogeneous CPUs
+and complex requirements for throughput, latency, and energy consumption.
+The heuristics used by CFS (and EEVDF) were designed for the simpler times,
+and are no longer optimal.
+<p>
+The complexity of modern systems comes in numerous forms.  NUMA systems can
+perform badly if workloads are scheduled far from their memory.  The CFS
+scheduler often makes bad placement choices; as a result, administrators
+are being forced to pin processes to specific CPUs or to partition their
+systems to regain performance.  Heterogeneous systems have multiple CPU
+types with different performance and energy-use characteristics, and even
+different instruction sets.  Putting a task on the wrong type of CPU can
+affect performance, waste energy, or, in some cases, even cause a crash due
+to an instruction-set mismatch.
+<p>
+The types of workloads being seen now add complications of their own.  A
+gaming workload, for example, often features a combination of rendering and
+streaming tasks.  The rendering is latency-sensitive and should run on
+high-performance cores, while the streaming can run on the more efficient
+cores.  A scheduler that treats both task types equally will end up causing
+dropped frames.  The sort of network processing involved with 5G networking
+involves a combination of tight latency constraints and CPU-intensive work.
+Even a modern development environment involves challenges, with a
+combination of CPU-intensive tasks (compilation, for example) and
+interactive tasks.  Bad scheduler decisions can lead to lots of context
+switches and an unresponsive user interface.
+<p>
+The end result of all this, Huang said, is that any scheduler using a
+single, fixed algorithm is fundamentally broken.  All of the traditional
+schedulers do exactly that.  They have brought a simple system view into a
+world where a typical computer has billions of possible states, and their
+limitations are showing.
+<p>
+The sched_ext framework offers a potential solution, an environment where
+schedulers can evolve to meet contemporary challenges.  Huang took as a
+case study the <a href="https://free5gc.org">Free5GC project</a>, which is
+creating an open-source solution for 5G network processing.  Its data-plane
+processing, in particular, is subject to a number of difficult constraints.
+It has a number of CPU-bound tasks, but also has some strict latency
+constraints.  The CPU scheduler must be able to balance these constraints;
+CFS often fails to do so optimally.
+<p>
+The project <a
+href="https://free5gc.org/blog/20250509/20250509/">experimented</a>
+with a sched_ext scheduler called "scx_packet".  It used a relatively
+simple algorithm: half the CPUs in the system were reserved for
+latency-sensitive network-processing tasks, while the other half were given
+over to CPU-bound general processing.  But this scheduler treated all
+network traffic equally — voice calls, web browsing, and streaming all went
+to the same CPUs.  That could cause voice data to be blocked behind
+download traffic, and emergency calls had the same priority as social-media
+activity.  This approach also led to some CPUs being overloaded, while
+others were idle, as the workload shifted.  Finally, some packets require
+much more processing than others; the processing of the more CPU-intensive
+packets should be scheduled separately.
+<p>
+This experience led the Free5GC developers to look into machine learning.
+Scheduling on such systems has many dimensions of input to consider; it is,
+he said, "<q>the perfect problem domain</q>" for machine learning.  Among
+other things, the scheduler must consider the priority of each task, its
+CPU requirements, its virtual run time so far, and its recent CPU-usage
+patterns.  The load on each CPU must be taken into account, as must NUMA
+distance, cache sharing, and operating frequency.  Then, of course, there
+are the workload-specific factors.
+<p>
+A new sched_ext scheduler (based on <a
+href="https://sched-ext.com/docs/scheds/rust/scx_rusty">scx_rusty</a>) was
+developed to try to take all of these parameters into account and decide
+when a task should be moved from one CPU to another.  It initially runs in
+a data-collection mode, looking at migration decisions and the results from
+them; these decisions are then used to train a model (in user space) that
+is subsequently stored in a BPF map.  The scheduler can then use this model
+inside the kernel to make load-balancing decisions.  The outcome of these
+decisions is continually measured and reported back to user space, which
+updates the model over time.
+<p>
+Implementing this scheduler required overcoming an obstacle unique to the
+kernel environment.  Neural-network processing involves a fair amount of
+floating-point arithmetic, but use of floating-point instructions is not
+allowed in kernel code (saving the floating-point-unit state on entry to
+the kernel would have a heavy performance cost, so the kernel does not do
+that).  A form of fixed-point arithmetic was adopted for the
+neural-network processing instead.
+<p>
+In a test using the all-important kernel-compilation benchmark, this
+scheduler produced a 10%&nbsp;improvement in compilation time over the
+EEVDF scheduler.  The number of task migrations was reduced by&nbsp;77%.
+<p>
+Huang concluded with a summary of why machine learning works in this
+context.  Scheduling in this complex environment is, he said, a
+pattern-recognition problem, and neural networks are good at that task.
+The scheduler is able to balance competing goals and automatically
+re-trains itself for new architectures and workloads.  The scheduler is
+able to take 15&nbsp;separate parameters into account for each migration
+decision, and to adjust its model based on the results.
+<p>
+The <a
+href="https://static.sched.com/hosted_files/ossna2025/d2/Improve-Load-Balancing-With-Machine-Learning-Techniques-based-on-sched_ext.pdf">slides
+from Huang's talk</a> are available for interested readers.  The source for
+the machine-learning-based sched_ext scheduler can be <a
+href="https://github.com/vax-r/scx/tree/scx_rusty_MLLB">found on
+GitHub</a>.
+<P>
+[Thanks to the Linux Foundation for supporting my travel to this event.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Extensible scheduler class</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1027096/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1028007"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Confused</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2025 14:04 UTC (Tue)
+                               by <b>shironeko</b> (subscriber, #159952)
+                              [<a href="/Articles/1028007/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="shironeko" />
+                <input type="hidden" name="return" value="/Articles/1027096/#CommAnchor1028007" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wait so can a single algorithm work for scheduling of different workload pattern or not?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028007/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1028008"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Confused</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2025 14:08 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1028008/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1027096/#CommAnchor1028008" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      That depends on what you call the "algorithm".  As I understood the presentation, the way the load-balancing decisions are made will change, depending on what is learned about the workload.  So it is not always the same algorithm.  If, though, you consider the learning itself as part of "the algorithm", then perhaps one algorithm can indeed be optimal for various types of workloads.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028008/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1028041"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Linus was wrong </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2025 18:02 UTC (Tue)
+                               by <b>sionescu</b> (subscriber, #59410)
+                              [<a href="/Articles/1028041/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sionescu" />
+                <input type="hidden" name="return" value="/Articles/1027096/#CommAnchor1028041" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The whole notion of "server" and "desktop" scheduling being different is nothing but crap.</span><br>
+<p>
+It's such a bizarre thing to say because servers don't have anywhere near the soft-realtime requirements of a graphical user interface. This was wrong then and still wrong now, and Linus held the kernel back for two decades. <br>
+I remember installing Kon Colivas's kernel on Gentoo and that instantly made X11 and all graphical applications much snappier, but you had to compile your own kernel and it became untenable once I switched to another distro.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028041/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1030030"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Linus was wrong </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 16, 2025 7:54 UTC (Wed)
+                               by <b>siim@p6drad-teel.net</b> (subscriber, #72030)
+                              [<a href="/Articles/1030030/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="siim@p6drad-teel.net" />
+                <input type="hidden" name="return" value="/Articles/1027096/#CommAnchor1030030" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are all kinds of servers, many of which are latency sensitive. Perhaps there is a difference between an average desktop system and an average web server, but in reality a "server" is not a useful label for giving much insight for what the latency/performance expectations of the workload are.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1030030/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1030139"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Linus was wrong </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 16, 2025 14:40 UTC (Wed)
+                               by <b>sionescu</b> (subscriber, #59410)
+                              [<a href="/Articles/1030139/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sionescu" />
+                <input type="hidden" name="return" value="/Articles/1027096/#CommAnchor1030139" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's pretty well established that human beings can perceive milisecond-level stuttering in an animation, whereas I very much doubt that the vast majority of servers are subjected to that kind of requirements. Perhaps in high frequency trading, but still very few.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1030139/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1028067"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Machine Learning Everywhere</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 2, 2025 2:53 UTC (Wed)
+                               by <b>PengZheng</b> (subscriber, #108006)
+                              [<a href="/Articles/1028067/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="PengZheng" />
+                <input type="hidden" name="return" value="/Articles/1027096/#CommAnchor1028067" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Huang concluded with a summary of why machine learning works in this context. Scheduling in this complex environment is, he said, a pattern-recognition problem, and neural networks are good at that task. </span><br>
+<p>
+If so, machine learning should be perfect for network congestion control. <br>
+I heard that Google had experimented with machine learning based congestion control in their WebRTC stack, but have not looked at it since then. How was it going?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028067/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,158 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>High-granularity mappings for huge pages [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="High-granularity mappings for huge pages">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The use of huge pages can make memory management more efficient in a number of ways, but it can [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/931576/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>High-granularity mappings for huge pages</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 17, 2023</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2023">LSFMM+BPF</a>
+</div>
+The use of huge pages can make memory management more efficient in a number
+of ways, but it can also impose costs in the form of internal fragmentation and
+I/O amplification.  At the <a href="/Articles/lsfmmbpf2023">2023 Linux
+Storage, Filesystem, Memory-Management and BPF Summit</a>, James Houghton
+ran a session on a scheme to get the best of both worlds: using huge pages
+while maintaining base-page mappings within them.
+<p>
+The problem to be solved, Houghton began, is that performance requirements
+argue for the use of huge pages to back virtual machines.  So far, so good;
+the hugetlbfs system can be used to implement such a policy.  But providers
+also want to be able to migrate virtual machines using <a
+href="https://man7.org/linux/man-pages/man2/userfaultfd.2.html"><tt>userfaultfd()</tt></a>.
+Typical migration schemes will pre-copy the machine to be moved, then use
+<tt>userfaultfd()</tt> to catch any post-copy writes and re-copy the
+changed pages before committing the moved machine to the new host.  But, if
+huge pages are in use, the only information available is that an entire (huge)
+page has been touched.  It would be nice to just copy the 4KB base page
+that the process changed, but there is no way to know where within a 1GB
+huge page that change was made.
+<p>
+
+<a href="/Articles/931776/"><img
+src="../_static/images/conf/2023/lsfmm/JamesHoughton-sm.png" alt="[James Houghton]"
+title="James Houghton" class="lthumb"></a>
+
+To address this problem, he posted <a
+href="/ml/linux-mm/20230218002819.1486479-1-jthoughton@google.com/">a patch
+set</a> in February implementing high-granularity mapping for 1GB hugetlbfs
+pages.  This series allows huge pages to be mapped at the PTE (base-page)
+level without splitting them.  For now, this work only supports x86
+systems, but there is an arm64 version written that has not yet been posted
+to the lists.
+<p>
+There are some challenges in implementing a mechanism like this, he said,
+starting with the user-space ABI to control it.  The approach taken was to
+<a
+href="/ml/linux-mm/20230218002819.1486479-10-jthoughton@google.com/">implement
+an <tt>MADV_SPLIT</tt> operation</a> for <a
+href="https://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>
+— an approach that David Hildenbrand described as "confusing".  This ABI
+seems likely to change in the future if this work proceeds.  There are some
+implementation challenges as well, Houghton said; keeping track of the
+page-table entries for high-granularity-mapped pages requires access to the
+page middle directory (PMD) level of the page-table hierarchy, but the
+internal APIs do not always pass that in.  A number of other internal
+changes are needed to implement this feature as well, making the
+implementation of high-granularity mappings into a 46-part patch set.
+<p>
+Michal Hocko suggested that, perhaps, the real problem is that this use
+case should not be using hugetlbfs as its backing store.  Instead, a
+different way of accessing huge pages that does not bring hugetlbfs's
+baggage should be found, he said.  If the desire is to keep the huge pages
+from being reclaimed, <a
+href="https://man7.org/linux/man-pages/man2/mlock.2.html"><tt>mlock()</tt></a>
+can be used.  Houghton answered that hugetlbfs can guarantee that huge
+pages will be available, which is a necessary feature; trying to solve the
+problem without hugetlbfs would also require copying many of its quirks
+into the core memory-management code.  Hocko said that, perhaps, the right
+approach would be to create a driver to obtain huge pages from the <a
+href="486301.html">CMA</a> pool; Houghton thought that might work.
+<p>
+Another audience member asked whether the transparent hugepage mechanism,
+which already supports high-granularity mappings, could be enhanced to
+provide guaranteed allocations for this use case.  Another attendee said
+that the memory-management subsystem should, eventually at least, be
+prepared to handle folios of any size, so the need for special-purpose code
+for huge pages should go away.  If this work could get the kernel closer to
+that point, that would be a good thing.
+<p>
+Houghton felt, though, that implementing the needed functionality in the
+core memory-management code would be a lot of work, while containing it in a
+separate implementation simplifies the task considerably.  That
+implementation shows the core changes that would eventually be needed, and
+is thus a step in the right direction.  It is not clear that the rest of
+the room was in agreement with this position, though; this feature may not
+be headed for the mainline in the near future.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Huge pages</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2023</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/931773/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

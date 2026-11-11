@@ -1,0 +1,694 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Supporting NFS v4.2 WRITE_SAME [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Supporting NFS v4.2 WRITE_SAME">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="At the 2025 Linux Storage, Filesystem, Memory Management, and BPF Summit (LSFMM+BPF), Anna Schu [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1025077/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Supporting NFS v4.2 WRITE_SAME</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>June 16, 2025</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+At the 2025 Linux Storage, Filesystem, Memory Management, and BPF Summit
+(LSFMM+BPF), Anna Schumaker led a discussion about implementing the NFS
+v4.2 <a
+href="https://datatracker.ietf.org/doc/html/rfc7862#section-15.12"><tt>WRITE_SAME</tt>
+command</a> in both the NFS client and server.  <tt>WRITE_SAME</tt> is
+meant to write large amounts of identical data (e.g. zeroes) to the server
+without actually needing to transfer all of it over the wire.  In her <a
+href="/ml/all/f9ade3f0-6bfc-45da-a796-c22ceaeb4722%40oracle.com/">topic
+proposal</a>, Schumaker wondered whether other filesystems needed the
+functionality, so that it should be implemented at the virtual filesystem
+(VFS) layer, or whether it should simply be handled as an NFS-specific <a
+href="https://www.man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+The NFS <tt>WRITE_SAME</tt> operation was partly inspired by the <a
+href="https://linux.die.net/man/8/sg_write_same">SCSI <tt>WRITE
+SAME</tt> command</a>, she began; it is "<q>intended for databases to be
+able to initialize a bulk of records all at once</q>".  It offloads much of
+the work to the server side.  So far, Schumaker has been implementing
+<tt>WRITE_SAME</tt> with an <tt>ioctl()</tt> using a structure that looks
+similar to the <a
+href="https://www.rfc-editor.org/rfc/rfc7862#section-8.1.1">application
+data block structure</a> defined in the <a
+href="https://www.rfc-editor.org/rfc/rfc7862">NFS v4.2 RFC</a> for use by
+<tt>WRITE_SAME</tt>.
+</p>
+
+<a href="/Articles/1025410/">
+<img src="../_static/images/2025/lsfmb-schumaker-sm.png" border=0 hspace=5
+align="left" alt="[Anna Schumaker]" title="Anna Schumaker" width=221
+height=270> 
+</a>
+
+<p>
+On the server side, it would make sense to have a function that gets called
+to process the <tt>WRITE_SAME</tt> command, but it would be nice if that
+same function was available to clients; they could use it as a fallback
+when the server does not implement <tt>WRITE_SAME</tt>.  Other filesystems
+could potentially also use the functionality, either with the SCSI
+<tt>WRITE SAME</tt> or for some other filesystem-specific use case.
+</p>
+
+<p>
+The application data block allows for <tt>WRITE_SAME</tt> commands that
+write various patterns to the storage, but Christoph Hellwig suggested that
+all of that complexity should be avoided.  He was responsible
+for writing the
+<tt>WRITE_SAME</tt> definition for NFS and for killing off the Linux block-layer
+support for the SCSI <tt>WRITE SAME</tt> patterns; "<q>don't do it</q>", he
+said with laugh. <tt>WRITE_SAME</tt> for zeroing is "<q>perfectly
+fine</q>", SCSI supports that, but "<q>exposing all the detailed, crazy
+patterns</q>" is "<q>not sane</q>".  Getting the semantics right for all of
+the different cases is extremely difficult.  Schumaker said that sounded
+reasonable. 
+</p>
+
+<p>
+There is already an API available for clients to use, Amir Goldstein said:
+<a
+href="https://www.man7.org/linux/man-pages/man2/fallocate.2.html"><tt>fallocate()</tt></a>
+with the <tt>FALLOC_FL_ZERO_RANGE</tt> flag.  Schumaker said that NFS did
+not have support for that flag, but Goldstein said that support could be
+added as the way to provide access to <tt>WRITE_SAME</tt>.  Hellwig said
+that there was a <a
+href="/ml/all/20250318073545.3518707-1-yi.zhang@huaweicloud.com/">patch
+set</a> that he had not yet looked at closely to add an
+<tt>FALLOC_FL_WRITE_ZEROES</tt> flag that would force the zeroes to be
+written; it might be a better API for <tt>WRITE_SAME</tt>.  That <a
+href="/ml/all/20250604020850.1304633-1-yi.zhang@huaweicloud.com/">series is
+now on v5</a> and seems to be progressing toward inclusion.
+</p>
+
+<p>
+Matthew Wilcox wondered whether only being able to write zeroes would make
+the <tt>WRITE_SAME</tt> feature less than entirely useful; he remembered a
+"<q>a certain amount of pushback because databases need a specific
+pattern</q>".  There was a fair amount of joking about which of the two
+Oracle databases (the other being MySQL) he meant; Wilcox works for Oracle,
+as does Schumaker, who seemed to indicate that she had talked to the MySQL
+group.  In the end, someone seemed to sum up that only supporting zeroing
+is reasonable: "<q>zeroes are good</q>".
+</p>
+
+<p>
+Chuck Lever, who also works for Oracle, said that he had spoken to the
+Oracle database group.  That database does not use the Linux NFS client, so
+the group did not care about support for <tt>WRITE_SAME</tt> in the client.
+The group's concern was mostly about support for <tt>WRITE_SAME</tt> in
+proprietary NFS servers, he said.  Wilcox asked: "<q>and Linux NFS
+servers?</q>" Lever said that Oracle databases do not deploy on systems
+that use those.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/NFS</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1025257/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1025621"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2025 15:50 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1025621/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025621" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote><code>WRITE_SAME</code> is meant to write large amounts of identical data (e.g. zeroes) to the server without actually needing to transfer all of it over the wire.</blockquote>
+If that's really the concern, then shouldn't NFS support optional compression with deflate (gzip) or some equally boring compression method?  Not all requests would have to be compressed but if you have one of these "write gigabytes of the same pattern" ones you could choose to compress it.  (The client could even use some cunning method to generate the compressed request more efficiently, with knowledge of the deflate file format.)
+<p>
+If the NFS server wants to pass that down to a lower level (such as the SCSI <code>WRITE_SAME</code>) then a general purpose compression scheme would not make that particularly easy.  But if it really is just about reducing the wire traffic...
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025621/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2025 20:34 UTC (Mon)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/1025632/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025632" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I strongly agree that deflate (gzip) should be supported.  Zeroes-only is lame, and also does not meet the requirements for NIST 800-88 Standard For Drive Erasure.  Seven passes are required: zeroes, ones, bitwise alternating zeroes and ones, bitwise alternating ones and zeroes, zeroes, ones, zeroes.  Zeroes-only misses 4 of those passes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025636"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2025 20:37 UTC (Mon)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1025636/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025636" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why would anybody want to run *drive* erasure patterns on a network file system?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025636/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025751"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 15:03 UTC (Tue)
+                               by <b>dsfch</b> (subscriber, #176007)
+                              [<a href="/Articles/1025751/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dsfch" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025751" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+People "layer" things.<br>
+If your usecase is to e.g. build virtual machine "disk" images on NFS, you might like the idea of fast-clearing (to "whatever standard pattern", not just to-zeroes). And one could then well say it'd be nice if an ioctl to do so done on the loopback device that maps to a file on NFS would "passthrough" to as fast operation on NFS.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025751/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025756"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 15:55 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1025756/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025756" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That doesn't even work on normal disk filesystems.<br>
+If you overwrite a file with patterns on COW filesystems, it won't actually overwrite the data on disk.<br>
+If pattern overwriting makes sense, then only on raw devices. And even for raw devices there's no guarantee it will actually overwrite everything with the pattern. On SSD it's pretty much guaranteed it won't do it in the order you requested due to wear leveling.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025756/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025771"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 17:43 UTC (Tue)
+                               by <b>adobriyan</b> (guest, #30858)
+                              [<a href="/Articles/1025771/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="adobriyan" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025771" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; On SSD it's pretty much guaranteed it won't do it in the order you requested due to wear leveling.</span><br>
+<p>
+Wear leveling can be defeated. Also, pattern is irrelevant and better not be used -- SSDs scramble data before writing to NAND.<br>
+<p>
+I'd claim that in practice, 2 full capacities random(!) writes of host-generated random data 1 LBA at a time is the best regular folks could do.<br>
+<p>
+After first full capacity run SSD have no choice but to keep the data. Second run most certainly overwrites overcapacity.<br>
+No sane manufacturer does 100% overcapacity, so 2 runs should be fine.<br>
+<p>
+Random writes ensure maximum GC pressure.<br>
+<p>
+Of course, there are many assumptions like SSD is not chopped into namespaces and you see only one of many.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025771/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025789"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 18, 2025 9:17 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1025789/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025789" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The trouble with overwriting as a way to destroy the data is that you're dependent on the SSD firmware not being malicious; if it's programmed to detect "interesting" data and ensure it's kept across GC runs, then no amount of rewriting the SSD will help - at best, you'll trigger it entering "failure" state as it runs out of usable NAND blocks, and then being able to go back into read-only mode when the attacker tells it to.
+<p>Additionally, there are advanced attacks on flash (if you have to care about state-level actors) which depend on the fact that the NAND cell itself isn't perfectly quantized; the exact level set when you write is a function both of the write request, and of previous values, and a sufficiently determined attacker can reconstruct old values to a degree that lets the ECC kick in and restore the data. This is a seriously advanced threat model, that most of us don't even have to consider; if it applies to you, your contacts at your national security agencies will be able to help you further (and if you don't have routine contact with your national security agency, this is not a threat that applies to you).
+<p>Thus, you've got four good ways (depending on threat model) to handle preventing a discarded SSD from having its data extracted (from least secure to most):
+<ol>
+<li>Use <tt>WRITE_SAME</tt> or other discard mechanisms to remove the data from normal visibility. This protects you against accidental data recovery, but does not protect you from an attacker willing to disassemble the SSD and extract the raw flash data, nor does it protect you from rollback bugs in the SSD, and is probably good enough for most people.
+<li>Overwrite the entire device as you've described. This protects you from non-malicious SSD firmware, but runs the risk of malicious SSD firmware saving the data for an attacker willing to disassemble the SSD and extract the raw flash data.
+<li><a href="https://lwn.net/Articles/1025678/">Follow paulj's suggestion and encrypt the contents with a key stored off-SSD (e.g. a long passphrase, or key in a TPM2)</a>, and arrange to destroy the key beyond recovery when you want to lose the data. As long as you choose a cryptosystem that's strong enough, this protects you against any plausible attacker - they can recover the ciphertext, but without the key, they can't get the plaintext.
+<li>Physically destroy the SSD - run it through an industrial shredder, so that it's just an "ore" to extract raw materials from, and not complete devices any more. If you can't get to the individual devices, it's impossible to read them out.
+</ol>
+<p>Given how simple it is to encrypt storage on Linux, with the key stored elsewhere (or generated from a passphrase via a strong key derivation process like argon2id), I'd strongly suggest that option 3 is the right answer for almost everyone, except those whose national security agencies recommend option 4 to them.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025789/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1025638"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2025 20:40 UTC (Mon)
+                               by <b>butlerm</b> (guest, #13312)
+                              [<a href="/Articles/1025638/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="butlerm" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025638" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+They should perhaps make a SHRED or OBLITERATE command for that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025638/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025648"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2025 22:03 UTC (Mon)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/1025648/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ejr" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025648" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That depends on the threat model. A single, well-known command can be intercepted.<br>
+<p>
+But, yeah, I feel that all non-end-to-end is lost at that point anyways.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025648/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025675"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 8:20 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1025675/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025675" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      It's not that much more of a challenge to intercept a set of <tt>WRITE SAME</tt> commands as compared to intercepting a <tt>SHRED</tt> command; if command interception is a concern, you need to handle that at a different layer (e.g. TLS).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025675/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1025678"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 9:41 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1025678/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025678" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The best way to securely erase a drive is to have the data on it encrypted from day 1. Then you only need to securely 'lose' 128 to 256 bits of the key.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025678/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1025782"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 23:39 UTC (Tue)
+                               by <b>smooth1x</b> (subscriber, #25322)
+                              [<a href="/Articles/1025782/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smooth1x" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025782" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<p>
+Why could we not use fstrim for that already?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025782/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025786"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 18, 2025 6:23 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1025786/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025786" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I understand it, fstrim merely tells the layer below "this is no longer wanted". It doesn't wipe it, it just says "feel free to wipe it if you want to". <br>
+<p>
+The idea being, if the disk has been completely written to, but is only say 1/3 full with real data, the disk will grab a block that's been 100% trimmed and just do a "wipe and write". If it hadn't been trimmed, it wouldn't know that the "data" is garbage, and would have had to do a "salvage what I'm not overwriting, wipe, and rewrite". Which drives wear through the roof and rewrite times through the floor.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025786/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1025788"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reducing data over the wire</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 18, 2025 9:20 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1025788/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025788" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <tt>WRITE_SAME</tt> is the NFS command used to implement fstrim. The problem with it is that it doesn't oblige the underlying device to destroy the data, just to read back as the given pattern (usually all-zeroes); on SSDs, this is usually done by leaving the data alone, and updating the mapping table to say that the given LBAs should now read back as the supplied pattern.
+<p>As a result, fstrim doesn't do what a hypothetical <tt>SHRED</tt> command would; that said, the best way to implement such a command would be to encrypt the data with a secure cryptosystem, and simply lose the key when it's time to destroy the data, which (for NFS) you can do with an overlay filesystem like ecryptfs or similar (noting that many of these have bugs that you'd have to fix first).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025788/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1025680"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SCSI command</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 9:59 UTC (Tue)
+                               by <b>claudex</b> (subscriber, #92510)
+                              [<a href="/Articles/1025680/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="claudex" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025680" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is the SCSI WRITE SAME command supported by some hardware or it is only implemented on virtual disk and iSCSI target ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025680/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025689"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SCSI command</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 13:26 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1025689/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1025257/#CommAnchor1025689" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      There are SAS SSDs, like the Samsung PM1643 and PM1653 families, which support WRITE SAME.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025689/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

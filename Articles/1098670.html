@@ -1,0 +1,457 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Adding kernel control-flow-integrity checking to GCC [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Adding kernel control-flow-integrity checking to GCC">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="While many developers are struggling to keep up with the flood of vulnerability reports, others [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Adding kernel control-flow-integrity checking to GCC&quot;" href="https://lwn.net/headlines/1098670/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1099248/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Adding kernel control-flow-integrity checking to GCC</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 9, 2026</br>
+           <hr>
+<a href="../Archives/ConferenceByYear/index.html">Cauldron</a>
+</div>
+While many developers are struggling to keep up with the flood of
+vulnerability reports, others are still focused on preventing those reports
+from happening in the first place.  Control-flow integrity (CFI) is the
+term for preventing (or at least detecting) exploits that divert the flow
+of control from its intended paths.  At the 2026 <a
+href="https://gnu-tools-cauldron.org/">GNU Tools Cauldron</a>, Kees Cook
+presented his changes to the GCC compiler suite to support forward-edge CFI
+for the kernel.
+<p>
+<a href="/Articles/1098671/"><img
+src="../_static/images/conf/2026/lpc/KeesCook-sm.png" alt="[Kees Cook]"
+title="Kees Cook" class="rthumb"></a>
+
+The underlying objective of this work, he began, is to prevent a bug
+allowing an arbitrary write to memory from being escalated into a full
+code-execution vulnerability.  Once upon a time, all of memory was writable
+by the kernel, so an attacker could easily rewrite the kernel's code
+directly.  Over time, executable memory has been write-protected and walled
+off, to the point that it is all safe from such attacks now.  So, instead,
+attackers are focused on reusing existing code in unexpected ways — calling
+functions with crafted arguments or, especially, hijacking indirect
+function calls and function returns in order to force them to jump to an
+unexpected location.
+<p>
+An indirect function call is essentially a jump to an address stored in a
+(writable) memory location or register; if that address can be changed, the
+kernel's control flow can be redirected to a location of an attacker's
+choosing.  Preventing the hijacking of these calls is termed "forward-edge"
+CFI; that was the subject of Cook's work.  Preventing the redirection of
+returns is "backward-edge" CFI, which is a task best handled by hardware,
+he said, and was beyond the scope of this talk.
+<p>
+The key to forward-edge CFI is to provide (and check) information about
+where an indirect call is expected to go.  That allows function pointers to
+be validated at the time the call is made.  Specifically, the objective is
+to ensure that any indirect call ends up at a function that was defined
+with the prototype that the caller expects.  That differs from most
+hardware-assisted forward-edge CFI, which simply marks the entry points of
+functions.  The hardware solution can prevent calling into the middle of a
+function, but cannot detect redirection to an entirely different function.
+<p>
+Checking for a matching prototype cannot prevent all misdirected function
+calls; a function may have a compatible prototype, but still not be
+intended to be called from a particular setting.  Even so, checking of
+prototypes can drastically narrow the range of possible targets for an
+indirect call.  Of the indirect calls in the kernel, Cook said, 55% have
+fewer than five possible targets.  Only 7% have more than 100 possible
+targets.  A few have many more.
+<p>
+Forward-edge CFI works by calculating a type ID for each function; it is a
+hash generated from the function prototype.  Each reachable function
+includes that hash in its preamble, and each indirect call checks that hash
+before allowing the call to proceed.  This sort of CFI was <a
+href="898040.html">implemented in Clang</a> in 2022; the kernel
+gained the ability to use this feature in 6.1 release.  Cook said that he
+had been asking for an equivalent implementation in GCC for some time, but
+found nobody willing to implement it, so he decided to do it himself.  In
+the process, he added, he found out <i>why</i> nobody wanted to take on
+that project.
+<p>
+The implementation adds the type-ID hash to each function's code,
+immediately before the entry point.  The two's-complement inverse of that
+hash is stored at each call site.  The code generated by the compiler for
+the indirect call fetches the hash from the target function and adds it to
+the hash stored locally; if the result is zero, then the call is allowed to
+proceed.  Otherwise a trap is generated.  There is a permissive mode that
+emits a warning but allows the call to proceed, and a less permissive one
+that panics the system.
+<p>
+Cook did not know the GCC code base well when he started, but he learned it
+over time; mapping this feature into the GCC internals required working at
+many levels of the compiler.  The C frontend knows about attributes and
+types, the middle layers have to turn those types into hashes and wrap
+indirect calls with the checking code, and the target-specific backends
+have to turn those wrapped calls into the specific instructions needed.
+The backends also inject the type IDs into the function preambles.
+<p>
+At the frontend, the new <tt>-fsanitize=kcfi</tt> command-line option
+enables this feature.  There are a couple of new attributes added to
+disable CFI checking for specific function calls.  If, for example, a call
+goes into the BIOS, it will lack the necessary type ID, so the checking
+cannot be performed.  There is also some logic to deal with inlined
+functions.
+<p>
+Type mangling is used to generate the type ID; he ended up using Clang's
+Itanium C++ mangler to match what Clang is doing.  He found out that the
+Clang implementation uses a hash implementation that the compiler
+developers would like to get rid of, so he sent a patch to change it.  The
+actual algorithm used does not matter and need not be cryptographically
+secure, he said.  Now, the <a
+href="https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function">FNV-1a
+hash</a> is used.
+<p>
+The middle layers needed a new <a
+href="https://gcc.gnu.org/onlinedocs/gccint/RTL.html">RTL</a> wrapper for
+function calls that includes the type ID of the target function.  There was
+also some complexity, he said, to ensure that tail calls are handled
+correctly.  He has added back-end support for four architectures: 32-bit
+and 64-bit x86, 64-bit Arm, and RISC-V.
+<p>
+About half of <a href="/ml/all/20261005154028.out.839-kees@kernel.org">the
+resulting patch series</a> is regression tests; he "<q>broke things all
+kinds of ways</q>" while developing this feature, and wrote a test for each
+of those ways.  He has been having a hard time finding reviewers for the
+result; most GCC patches do not span the entire stack, so there are not
+many people who can look at the whole thing.  Andrea Pinski, one of the GCC
+project's global reviewers, said that a full review was in the works, and
+should happen in the near future.
+<p>
+Cook closed with a discussion of large-language-model (LLM) use in the
+development of this code.  The <a
+href="https://gcc.gnu.org/ai-policy.html">GCC AI policy</a> generally
+disallows LLM-generated code; this restriction was making him nervous until
+he noticed that tests are explicitly excluded.  Only the tests in his
+series were generated with LLM assistance, he said.  The <a
+href="https://sashiko.dev">Sashiko</a> review system turned out to be
+helpful for reviewing the work.
+<p>
+<a href="https://outflux.net/slides/2026/cauldron/gcc-kcfi.pdf">Cook's
+slides</a> for this talk are available.
+<p>
+[Thanks to the Linux Foundation, LWN's travel sponsor, for supporting my
+travel to this event.]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Control-flow integrity</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">GNU Tools Cauldron/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1098670/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1099632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">nicely done</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2026 2:28 UTC (Sat)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1099632/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1099632" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+that sounds like a tremendous amount of difficult work, on a code base (at least once) known for its age and unfriendliness, probably with very little support or even cheering along the way. what a champ.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099639"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">nicely done</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2026 9:15 UTC (Sat)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1099639/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1099639" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IME this kind of code base is exactly where LLM assistance shines. GCC does a lot and if you're not familiar with the codebase the amount if things you need to keep track of can exceed your internal buffer, so it's helpful having an LLM check your work that you didn't miss anything.<br>
+<p>
+It's doubtful if anyone other than a core GCC developer could have written this without LLM assistance.<br>
+<p>
+<span class="QuotedText">&gt; I used LLMs to help me research the GCC codebase, debug crashes, minimize PoCs, generate test cases, construct and run my multiple architecture build and test orchestration, and perform code reviews.</span><br>
+<p>
+Especially for test cases which often contain huge amounts of boilerplate code. They're about half the patch if I'm counting correctly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099639/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1099751"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fantastic! I love to see systemic security improvements!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2026 8:27 UTC (Sun)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/1099751/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="david.a.wheeler" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1099751" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A *huge* congrats. While we do need to find and fix specific vulnerabilities, in the long run this kind of *systemic* improvement eliminates or renders far less effective entire classes of vulnerabilities. I love to see these kinds of broad improvements. Thank you thank you Kees Cook!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099751/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1099757"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Useful, however...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2026 9:32 UTC (Sun)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/1099757/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lionel_Debroux" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1099757" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's a step in the right direction, in that users of future toolchains which will contain such capabilities, including future distros, will eventually be able to use said capabilities to make their systems a bit harder to exploit.<br>
+<p>
+Meanwhile, another software implementation of forward-edge + backward-edge CFI for GCC, applied to the Linux kernel, has been available for a decade or so, and the way it is implemented makes it available to past toolchains as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099757/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099812"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Useful, however...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2026 5:45 UTC (Mon)
+                               by <b>richard_weinberger</b> (subscriber, #38938)
+                              [<a href="/Articles/1099812/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="richard_weinberger" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1099812" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why is the implementation you're talking about not mainline?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099812/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1100056"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restricted to the kernel?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2026 13:08 UTC (Tue)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1100056/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1100056" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Is this restricted to the kernel or could I also use <code>-fsanitize=kcfi</code> on userland C/C++ code once that's merged into GCC? A lot of code could probably benefit from that type of hardening.</p>
+<p>(Of course that'd probably require some kind of ABI break, because you'd want to obviously compile e.g. glibc with that, since that contains a huge amount of possible gadgets for control flow shenanigans. Still seems interesting to me, especially if this could be some kind of opt-in hardening option like the stack protector.)</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1100056/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1100248"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restricted to the kernel?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2026 16:13 UTC (Tue)
+                               by <b>richard_weinberger</b> (subscriber, #38938)
+                              [<a href="/Articles/1100248/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="richard_weinberger" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1100248" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAIU the approach works only for self-hosting code. Calling into libraries needs more work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1100248/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1100580"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kCFI is cool, but arb write -&gt; CFH is a strange assumption.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2026 7:01 UTC (Thu)
+                               by <b>ShallowFrank</b> (subscriber, #168434)
+                              [<a href="/Articles/1100580/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ShallowFrank" />
+                <input type="hidden" name="return" value="/Articles/1098670/#CommAnchor1100580" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Generally speaking, hijacking the control flow is only considered in read-world kernel exploits when the vulnerability primitive itself inherently facilitates such a hijack. Assuming that one can transition from an arbitrary write to control-flow hijacking is not a realistic premise... at least, not in the context of many mainstream distributions, Android, and similar environments.<br>
+<p>
+As an exploit developer who has earned hundreds of thousands in bounties for kernel exploits, I believe that in the vast majority of cases, a (weak) kernel write primitive is powerful enough to allow an attacker to easily manipulate page tables or other mm related structures. By employing techniques such as USMA / DirtyPageTable(-Flags) attacks, an attacker can still easilly achieve shellcode execution. <br>
+In fact, once an attacker gains control over a page through such methods, they can typically secure unrestricted, stable r/w access to kernel memory.<br>
+<p>
+Therefore, I would argue that a more realistic scenario is one where kCFI effectively mitigates many vulnerabilities that provide only control-flow hijacking primitives. <br>
+Though, even then, (c)BPF JIT can still be used to spray shellcode at predictable addresses.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1100580/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

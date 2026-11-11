@@ -1,0 +1,1031 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The [vx]swap showdown [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The [vx]swap showdown">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's swap layer has undergone some significant changes over the course of the last year [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;The [vx]swap showdown&quot;" href="https://lwn.net/headlines/1098399/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1099248/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The [vx]swap showdown</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 8, 2026</br>
+           </div>
+The kernel's swap layer has undergone <a href="1057102.html">some
+significant changes</a> over the course of the last year and a number of
+longstanding problems have been addressed.  One problem that has <i>not</i>
+yet been solved in the mainline is the direct tie between slots in the swap
+cache and space in persistent swap files, which can cause highly
+inefficient resource use.  There are two competing solutions for this
+problem, neither of which has, as yet, reached readiness for merging; a
+lengthy discussion on possible paths forward shows ongoing disagreement
+over the best path forward.
+<p>
+The kernel's <a
+href="https://docs.kernel.org/admin-guide/mm/zswap.html">zswap</a> layer
+highlights the difficulties with the current design of the swap subsystem.
+Zswap intercepts folios that are to be pushed out to a swap file and,
+instead of writing them to that file, compresses their contents and stores
+the result in RAM.  It is, essentially, a way of trading some CPU time for
+more free memory while keeping data close to hand and minimizing disk I/O.
+Use of zswap has become increasingly popular with current workloads.
+<p>
+The problem is that every folio stored in zswap must still have a slot
+assigned in a persistent swap device.  If the zswap area overflows, folios
+may be flushed out into their assigned (persistent) slots, but normally the
+intent is for that to not happen.  So, most of the time, that storage space
+is entirely wasted.  It must, however, be present for zswap to be used.
+This problem is, it seems, especially vexing in large data centers, where
+massive amounts of flash storage must be dedicated to storing nothing.
+<p>
+One proposed solution to this problem, vswap by Nhat Pham, was described in
+<a href="1059201.html">this article</a>.  Vswap adds a new
+virtualization layer on top of the existing swap devices; when a folio is
+added to the swap cache, it is assigned a slot in this virtual layer.  That
+slot can then be mapped to a number of different locations, including a
+slot in any physical swap file, a slot in zswap, or, for pages containing
+only zeroes, no slot at all.  Folios can move between backing devices
+while retaining their virtual slot, making it easy to flush folios out of
+zswap or to evacuate a swap file prior to its removal.  An <a
+href="https://docs.kernel.org/core-api/xarray.html">xarray</a> data
+structure is used to track the slots.  This work has been through numerous
+revisions as the swap layer has changed underneath it; vswap was <a
+href="/ml/all/20260918180241.3424851-1-nphamcs@gmail.com">last posted</a>
+in mid-September.
+<p>
+The alternative is xswap, by Baoquan He and Chris Li.  In <a
+href="/ml/all/20260916101929.149106-1-hebaoquan@kylinos.cn">its
+mid-September form</a> (it has since been updated), xswap can be thought of
+as a virtual swap device that does not actually have any backing store.
+Attempts to write folios to an xswap device do not succeed, so the device
+cannot actually store any data.  What it <i>can</i> do is to provide a
+"physical" swap slot for folios stored in zswap.  On a system where xswap
+is the only configured swap device, folios can be stored in zswap with no
+physical storage needed.  Xswap uses a sparsely mapped address range for
+its housekeeping data, minimizing its memory use when swap usage is light.
+<p>
+Toward the beginning of September, Pham, who has been working on vswap for
+over a year, posted <a
+href="/ml/all/CAKEwX=MP=zuTnLT=coS_EpXe2KwXq=79yBnsEGXwcZZsW3S=Yw@mail.gmail.com">a
+lengthy query</a>, asking how work on a virtualized swap layer could move
+forward.  He summarized both the vswap and xswap work, noting that both
+projects had their advantages.  For example, he said, the sparsely mapped
+housekeeping used by xswap was perhaps more attractive than the xarray he
+used for vswap.
+<p>
+Pham suggested that parts of both projects could eventually be merged,
+leading to the question of which should go first.  Perhaps unsurprisingly,
+he suggested that vswap should be applied ahead of xswap; the latter, he
+suggested, can be seen mostly as an optimization that could be adopted once
+the major design elements of vswap were in place.
+<p>
+Equally unsurprisingly, the xswap developers <a
+href="/ml/all/aqJXx2vtbKaRLt3x@fedora">argued</a> that it would make more
+sense to merge xswap first.  "<q>The VM_SPARSE array is not an optimization
+to bolt on later; it is a structural choice, and the code reflects it</q>".
+If vswap were to be applied first, He said, its xarray-based data
+structures would eventually have to be replaced with the xswap
+implementation.  Better to add the relatively simple "<q>foundation</q>"
+that is xswap than to add the extra complexity of vswap only to remove it
+shortly thereafter.  Kairui Song, who has done much of the
+swap-modernization work to date, <a
+href="/ml/all/CAMgjq7AHRzBsbmGOx0s=TQFBwcn=DEU1naR443sO6x+pJd6hAg@mail.gmail.com">echoed</a>
+some of these arguments.
+
+<p>
+While no decisions were made in the extensive ensuing discussion, it
+quickly became clear that there was not a groundswell of support for xswap.
+The fact that xswap lacked a way to write back folios from zswap to a
+physical swap device was seen as a severe shortcoming that did not exist in
+vswap.  The most contentious issue, though, stemmed from the sparsely
+mapped housekeeping area that is the core "<q>structural choice</q>"
+underlying xswap.
+
+<p>
+Specifically, that area requires that its full address space be reserved at
+the outset; that, in turn, sets a maximum size for the xswap device and,
+consequently, the maximum number of folios that can be stored in zswap.  The
+size of the swap area presented by vswap, instead, can grow or shrink
+dynamically as needed by the workload.  Johannes Weiner <a
+href="/ml/all/aqLi6cIjD2wJwk0B@cmpxchg.org">argued</a> that requiring
+administrators to set the size of the swap area is inherently mistaken; how
+much memory can be stored in zswap depends heavily on how effective its
+compression is, which will be dependent on the workload.  There is no way
+for an administrator to know what the proper size is, and no reason for the
+kernel to apply limits beyond those that already control memory use, he
+said. 
+<p>
+This part of the discussion went on for a while, and it became clear that
+the limits applied to swap space (both in device sizing and with control
+groups) were being used in different and somewhat contradictory ways.  Some
+sites use the limits to regulate the maximum virtual size of processes,
+while others are interested specifically in controlling the use of physical
+swap space.  In the former case, charging zswap pages against the limits
+makes sense; in the latter case, it does not.  Once zswap is separated from
+physical swap slots, developers will have to decide which use case to
+support, and somebody seems sure to go away unhappy.  <a
+href="/ml/all/araKDOz5bce52oyg@gourry-fedora-PF4VCD3F">This message</a>
+from Gregory Price describes the disconnect (and a possible resolution) in
+some detail.
+<p>
+The conversation eventually slowed down without any clear conclusions.  An
+<a href="/ml/all/5c8a2b7b-b76d-4bba-92e1-ec3d66794273@kernel.org">ongoing
+effort</a> to set up a conference call to discuss the issue has not yet
+found success.  In the meantime, He has posted a new xswap implementation
+in three parts.  <a
+href="/ml/all/20261003003136.750633-1-hebaoquan@kylinos.cn">Part&nbsp;1</a>
+is the core swap-device implementation as described above, <a
+href="/ml/all/20261003005900.909710-1-hebaoquan@kylinos.cn">part&nbsp;2</a>
+implements the physical writeback that was missing from previous revisions,
+and <a
+href="/ml/all/20261003011111.1003090-1-hebaoquan@kylinos.cn">part&nbsp;3</a>
+implements the accounting for use of physical swap space.  So far, the only
+commentary is <a
+href="/ml/all/CAKEwX=ObA6NQg-24jE+BT4QksamwM+hYWWxfYBYa=4mXvC3oUA@mail.gmail.com">this
+message</a> from Pham, who was unhappy about the perceived use of his ideas
+without attribution.
+<p>
+The evolution of the kernel's swap subsystem has been rapid over the last
+year, after many years of relative stasis.  The virtualization of the swap
+space is a logical next step that will resolve a number of longstanding
+problems.  But the memory-management developers will want to be sure that
+they are getting it right; they will have to live with the consequences of
+their decisions for years to come.  Changes in this part of the kernel
+often take a long time to land even in the absence of disagreement over
+fundamental details; this one may take longer than usual.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Swapping</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1098399/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1099475"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 10:42 UTC (Fri)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1099475/">Link</a>] (17 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099475" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The VM_SPARSE array is not an optimization to bolt on later; it is a structural choice, and the code reflects it</span><br>
+<p>
+We're just going to ignore the fact the whole message that quote comes from reeks of LLM-ese slop style? The content may well be true, but is that really the kind of communication approach the LKML community is happy with these days, along with the lack of respect it shows for fellow developers being asked to read said communication when the author couldn't be bothered to write it themselves (which likely be more succinct and less grating)?<br>
+<p>
+Some more extracts from that same email to illustrate the point, if the above quote isn't enough to convince you:<br>
+<p>
+<span class="QuotedText">&gt; Thanks for laying this out, and for the honest push to converge</span><br>
+<p>
+<span class="QuotedText">&gt; no branch, no RCU discipline, no tear-down state machine, and no NULL return</span><br>
+<p>
+<span class="QuotedText">&gt; I'm not going to claim xswap wins on throughput. I measured it:</span><br>
+<p>
+<span class="QuotedText">&gt; But it is a consumer of the foundation, not a reason to pick a different one</span><br>
+<p>
+<span class="QuotedText">&gt; The base should be the one that doesn't need to be redone; by both our measurements, that is the flat-cluster substrate.</span><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099475/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 10:54 UTC (Fri)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1099478/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099478" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>We're just going to ignore the fact the whole message that quote comes from reeks of LLM-ese slop style? The content may well be true</p>
+</blockquote>
+<p>Yeeah... there's no excuse to let an LLM generate the prose <em>in addition</em> to the code. If you are in a position to vouch for the LLM output (or something that contains LLM output), as you should, there'd be no issue for you to write the accompanying prose, and it'd be a far more productive use of everyone's inbox space.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099480"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 11:41 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1099480/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099480" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I am a person who is strongly opposed to machine-generated text, but I do still think we need to give a little slack to people whose native language is far removed from English. Carrying on a technical conversation in a language one is not strong in is challenging at best. 
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099480/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099481"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 11:48 UTC (Fri)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1099481/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099481" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is precisely than LLM transform technical conversation to marketing speech. It is difficult to believe this an actual translation from Chinese.<br>
+<p>
+It would much better the author would first write the answer in Chinese, and then ask the LLM for a translation and then send _both versions_ in a single post.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099481/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099487"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 12:59 UTC (Fri)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1099487/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099487" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don’t know that I necessarily agree with the requirement of providing both, though can see the value in it and so surely it’s better to provide the original in case of any ambiguity or odd parts of the translation. But yes, I feel very differently about using LLMs for translation. I still have personal opinions about the industry’s ethics etc that make me hesitant to say I *like* the idea, but I don’t have a problem with it if someone chooses to do so. I’ve not had experience with using such tools, as I’m fortunate enough to have English as my native language, but my understanding from talking to others that have is that they’re pretty effective at giving natural yet faithful translations, and don’t slop-ify the output, and you know that what was translated was the author’s own words from their own understanding.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099487/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099617"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 20:01 UTC (Fri)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1099617/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099617" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At this stage, there are dozen of kernel developers who can read Chinese, so if English is a language barrier, there is obvious value to send the Chinese version.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099617/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102363"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 22:11 UTC (Thu)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/1102363/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mrugiero" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102363" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or better yet, don't use LLMs as translators when there already are very good translation models. Either DeepL or Google Translate can do a decent job without turning your ideas into corpospeak.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102363/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 23:36 UTC (Thu)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1102367/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102367" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>How long until Google Translate becomes &quot;Gemini with a splash of paint&quot; though?</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 2:00 UTC (Fri)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/1102372/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mrugiero" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102372" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We can only hope they don't enshitify DeepL too, then. Or that at least whatever prompt is given is better tuned towards faithful reproduction rather than making every word into a grandiose claim that takes a paragraph.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1102389"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2026 8:24 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1102389/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102389" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Note that your &quot;translation models&quot; of choice there <em>are</em> LLM-based - they're not generative models, but they are LLMs.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102389/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1105451"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2026 8:45 UTC (Thu)
+                               by <b>sammythesnake</b> (guest, #17693)
+                              [<a href="/Articles/1105451/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sammythesnake" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1105451" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In terms of the underlying technology, LLMs really are a relatively incremental evolution of the same technology that Google Translate etc. have been using for quite some time. The main reason the effect is strikingly different ("better" for certain meanings of the word) is the sheer scale of the systems (- billions of weights, oodles of compute power...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1105451/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1099484"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 12:12 UTC (Fri)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1099484/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099484" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>I am a person who is strongly opposed to machine-generated text, but I do still think we need to give a little slack to people whose native language is far removed from English.</p>
+</blockquote>
+<p>Yes, you're right, I neglected to consider this case in my reply, but I agree. It is obvious that if a translation must take place, it is far better and more productive for it to happen at the sender, than at (multiple) receivers. I even argued for this on lobsters, <a href="https://lobste.rs/c/e3pdqz">here</a>.</p>
+<p>This situation doesn't even fit the same pattern of negative effects — when a language model is tasked with a translation, it will (IME) follow the original tone and pacing fairly truthfully.</p>
+<p>The communities which introduce blanket bans on LLM usage without carving out an exclusion for natural language translation (especially introducing nonsensical rules such as &quot;every reader must translate for themselves, if they wish&quot;), in my opinion, open themselves to chaos and mayhem as soon as these rules get exercised to any significant degree.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099484/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1099482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 12:18 UTC (Fri)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/1099482/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tux3" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099482" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't want to pile on, but I'd make a distinction between machine-generated and machine-translated.<br>
+This particular LLM style is not typical when they're used as a translation tool.<br>
+<p>
+When the LLM composed the answer in its own style, it's hard not to wonder how much of the thinking was also done by the LLM. Humans who coordinate the delicate process of pressing ^C and ^V are being "affectionately" called "meat proxy".<br>
+<p>
+I am not saying it's the case here, as you can probably get the same result by thinking on your own and giving the LLM some high-level idea of the answer you want it to compose... but it's going to trigger antibodies in the reader just the same.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1099619"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2026 21:24 UTC (Fri)
+                               by <b>goffrie</b> (subscriber, #91599)
+                              [<a href="/Articles/1099619/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="goffrie" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099619" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>that quote comes from reeks of LLM-ese slop style</p>
+</blockquote>
+<p>I immediately felt that too. Gross.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099619/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102639"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 14:52 UTC (Sat)
+                               by <b>Hi-Angel</b> (guest, #110915)
+                              [<a href="/Articles/1102639/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Hi-Angel" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102639" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What's the problem with that text?<br>
+<p>
+FWIW, I am not a native english speaker, but I know english well enough not to use machine translation and I could've written text like this. 🤷 I see nothing unusual in it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102639/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102645"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 16:56 UTC (Sat)
+                               by <b>zdzichu</b> (subscriber, #17118)
+                              [<a href="/Articles/1102645/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zdzichu" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102645" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some people are just allergic to anything coming from LLMs, no matter of actual value of it. Meritocracy is dying because people are self-righteous.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102645/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102646"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2026 17:48 UTC (Sat)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/1102646/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pizza" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102646" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Meritocracy is dying because people are self-righteous.</span><br>
+<p>
+No, meritocracy is dying because "merit" has been massively (and quite intentionally) devalued.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102646/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102662"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Human communication</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 0:54 UTC (Sun)
+                               by <b>Hi-Angel</b> (guest, #110915)
+                              [<a href="/Articles/1102662/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Hi-Angel" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102662" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, I mean, how do you tell it's LLM-generated, it looks like a typical human engineering talk to me.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102662/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1099736"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2026 23:12 UTC (Sat)
+                               by <b>fraetor</b> (subscriber, #161147)
+                              [<a href="/Articles/1099736/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fraetor" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099736" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is zram not the solution if you want compressed memory without needing a backing device? Or does zswap offer some needed features that zram does not?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099736/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099738"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2026 23:43 UTC (Sat)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/1099738/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tux3" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099738" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some good background on zram vs zswap: <a href="https://chrisdown.name/2026/03/24/zswap-vs-zram-when-to-use-what.html">https://chrisdown.name/2026/03/24/zswap-vs-zram-when-to-u...</a><br>
+So there's still a narrow use case for zram, but there's issues with the design, and things aren't looking up as far as I understand..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099738/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099750"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2026 7:58 UTC (Sun)
+                               by <b>fraetor</b> (subscriber, #161147)
+                              [<a href="/Articles/1099750/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fraetor" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099750" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So the xswap approach described in the article is for getting the diskless behaviour of zram out of zswap, without all the associated baggage of treating it as a block device?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099750/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2026 12:19 UTC (Sun)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1099761/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099761" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>So the xswap approach described in the article is for getting the diskless behaviour of zram out of zswap, without all the associated baggage of treating it as a block device?</p>
+</blockquote>
+<p>Yes, that’s about it. Using zram for swap is really in many ways an unacceptable abuse of mm, but people insist on doing it because they do not want, for whatever reasons, to allocate real disk space to back zswap.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1099803"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2026 0:05 UTC (Mon)
+                               by <b>gmprice</b> (subscriber, #167884)
+                              [<a href="/Articles/1099803/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gmprice" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1099803" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's not they don't want to allocate disk to back zswap - it's that they don't want to have *dead* space allocated to support zswap.<br>
+<p>
+If there's a page actively compressed in zswap, it allocated a writeback slot in disk - even though it's unused.  It's not really feasible to know ahead of time how much disk you'll need to support zswapped entries (you might have highly compressible memory, and not have provisioned enough disk).<br>
+<p>
+It makes fully utilizing the system very difficult, and wastes exabytes of storage space for scaled deployments.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1099803/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1102365"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2026 22:15 UTC (Thu)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/1102365/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mrugiero" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102365" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are environments where allocating disk space is simply not an option, for example diskless embedded devices. If all you have is a ROM and RAM, zswap is currently unusable. Which is also why it is actually being handled. If it were just a whim, I believe the maintainers would just kill zram without a viable replacement.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102365/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102675"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 25, 2026 15:37 UTC (Sun)
+                               by <b>JanC_</b> (subscriber, #34940)
+                              [<a href="/Articles/1102675/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JanC_" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102675" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Killing <code>zram</code> would also kill <code>zram</code> use cases that are not related to swapping, so I don’t think the plan is to remove it entirely, just to replace one current use case for it.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102675/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1102947"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zram?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2026 13:28 UTC (Mon)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/1102947/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mrugiero" />
+                <input type="hidden" name="return" value="/Articles/1098399/#CommAnchor1102947" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What are those non-swap use cases for zram?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1102947/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

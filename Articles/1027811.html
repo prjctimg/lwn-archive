@@ -1,0 +1,795 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Kernel API specification and validation [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Kernel API specification and validation">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel project makes a strong promise to its users: the kernel ABI will not be changed in w [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1028369/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Kernel API specification and validation</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 3, 2025</br>
+           </div>
+The kernel project makes a strong promise to its users: the kernel ABI will
+not be changed in ways that break user-space code.  The occasional failure
+notwithstanding, kernel developers do try to live up to that promise.  They
+are handicapped by one little problem, though: there is no description of
+what the kernel ABI is, and no comprehensive way to test whether a given
+change breaks it.  The <a
+href="/ml/all/20250624180742.5795-1-sashal@kernel.org">kernel API
+specification framework</a> proposed (in its second revision) by Sasha
+Levin addresses some of those concerns, but the solution is incomplete and
+does not come for free.
+<p>
+(Note that Levin uses the term "API" rather than "ABI" throughout this
+work; that term will be used from here on as well.)
+<p>
+The kernel interface is complex.  It includes hundreds of system calls, many of
+which have complex parameters and behavior; all of that must be completely
+described if a specification is to be complete.  There are other aspects to
+the API as well, though, including files in <tt>/proc</tt> or
+<tt>/sys</tt>, memory-mapped regions created by the perf-events subsystem
+or io_uring, and the set of operations available for any given type of file
+descriptor.  Even more complexity comes with the interfaces available to
+BPF programs or loadable kernel modules, though those are not covered by
+the kernel's API guarantee.  Levin's patch set does not cover all of those
+areas, but it makes a good start.
+<!-- middle-ad -->
+<p>
+<h4>Specifying system calls</h4>
+<p>
+Much of the framework, as posted, is focused on defining system calls.  The
+actual specification for any given system call is formatted as a long set
+of macro calls within the source file for the system call itself.
+Consider, for example, <a
+href="/ml/all/20250624180742.5795-13-sashal@kernel.org">the
+specification</a> for the (relatively simple) <a
+href="https://man7.org/linux/man-pages/man2/mlock.2.html"><tt>mlockall()</tt></a>
+system call; it contains a large amount of text in a block like this:
+<p>
+<pre>
+    DEFINE_KERNEL_API_SPEC(sys_mlockall)
+	KAPI_DESCRIPTION("Lock all process pages in memory")
+	KAPI_LONG_DESC("Locks all pages mapped into the process address space. "
+		       "MCL_CURRENT locks current pages, MCL_FUTURE locks future mappings, "
+		       "MCL_ONFAULT defers locking until page fault.")
+	/* ... lots more ... */
+    KAPI_END_SPEC;
+</pre>
+<p>
+The <tt>DEFINE_KERNEL_API_SPEC()</tt> call begins the definition of a
+structure of type <tt>kernel_api_spec</tt>; <tt>KAPI_END_SPEC</tt>, defined
+simply as "<tt>};</tt>", ends that structure.  The macro calls in between
+fill in the fields of that structure in various ways.
+<tt>KAPI_DESCRIPTION()</tt> for example, is defined simply as:
+<p>
+<pre>
+    #define KAPI_DESCRIPTION(desc) \
+	.description = desc,
+</pre>
+<p>
+There is only one parameter to <tt>mlockall()</tt> — a flags value.  It is
+specified as:
+<p>
+<pre>
+    KAPI_PARAM(0, "flags", "int", "Flags controlling which pages to lock")
+		KAPI_PARAM_FLAGS(KAPI_PARAM_IN)
+		KAPI_PARAM_TYPE(KAPI_TYPE_INT)
+		KAPI_PARAM_CONSTRAINT_TYPE(KAPI_CONSTRAINT_MASK)
+		.valid_mask = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT,
+		KAPI_PARAM_CONSTRAINT("Must specify MCL_CURRENT and/or" \
+				MCL_FUTURE; MCL_ONFAULT can be OR'd")
+    KAPI_PARAM_END
+</pre>
+<p>
+<tt>KAPI_PARAM()</tt> begins the initialization of a
+<tt>kapi_param_spec</tt> structure nested within the
+<tt>kernel_api_spec</tt> structure.  Here, that declaration says that the
+first parameter (number&nbsp;0) is an <tt>int</tt> value called
+<tt>flags</tt>; it is an input parameter to the system call.  There are
+three valid flag bits, which are stored directly in <tt>valid_mask</tt>
+without a special macro call.  An extra constraint on those values (at
+least one of <tt>MCL_CURRENT</tt> and <tt>MCL_FUTURE</tt> must be set) is
+just provided as text; there is not a way to specify that sort of
+constraint in the current system.
+<p>
+That is a fair amount of upper-case text, but this specification is just
+beginning.  It also contains declarations describing the return value and
+the error codes that the system call can return.  Other declarations
+describe how the system call responds to various signals.  There are six
+blocks of declarations describing the system call's side effects, and five
+for "state transitions".  The internal kernel locks used by the system call
+are described.  There is a declaration block for the capabilities required
+by <tt>mlockall()</tt>, one for examples, and three additional constraints.
+All told, the specification for <tt>mlockall()</tt> is just over
+180&nbsp;lines.
+<p>
+The <a
+href="/ml/all/20250624180742.5795-22-sashal@kernel.org">specification for
+<tt>socket()</tt></a> is, as one might expect, rather longer.
+<p>
+<h4>Sysfs and more</h4>
+<p>
+The second version of the patch set added the ability to specify the
+behavior of sysfs attributes as well.  A simple example from the block
+layer looks like this:
+<p>
+<pre>
+    DEFINE_SYSFS_API_SPEC(partscan)
+	KAPI_DESCRIPTION("Partition scanning status")
+	KAPI_LONG_DESC("Reports if partition scanning is enabled for the disk. "
+		       "Returns '1' if partition scanning is enabled, or '0' if not.")
+	KAPI_PARAM_COUNT(1)
+	KAPI_PARAM(0, "partscan", "bool", "Partition scanning enabled flag")
+		KAPI_PARAM_TYPE(KAPI_TYPE_BOOL)
+		KAPI_PERMISSIONS(0444)
+		KAPI_PATH("/sys/block/&lt;disk&gt;/partscan")
+		KAPI_PARAM_FLAGS(KAPI_PARAM_SYSFS_READONLY)
+	KAPI_PARAM_END
+	KAPI_SUBSYSTEM("block")
+	KAPI_EXAMPLES("cat /sys/block/sda/partscan")
+	KAPI_NOTES("The value type is a 32-bit unsigned integer, "\
+		   "but only '0' and '1' are valid values")
+    KAPI_END_SPEC;
+</pre>
+<p>
+There is less that can be specified with regard to a sysfs value, so these
+descriptions tend to be somewhat shorter.
+<p>
+As is almost always the case, <a
+href="https://man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>
+is special, since every <tt>ioctl()</tt> call is different.  There
+is a set of macros for the specification of these calls; see <a
+href="/ml/all/20250624180742.5795-18-sashal@kernel.org">the specification
+for the fwctl subsystem</a> for an example.  There is also a format for the
+specification of internal kernel functions.
+<p>
+<h4>Then what?</h4>
+<p>
+The ability to precisely describe a kernel interface has value in its own
+right; it forms a sort of documentation (there is no integration with the
+kernel's existing documentation system, though that is evidently on the
+list for future work).  But documentation alone seems unlikely to be enough
+to inspire kernel developers to write and maintain that much additional text,
+or even to accept it into their code if somebody else does it.  The real
+value comes from what can be done with all of this specification data once
+it has been created.
+<p>
+If the kernel is configured for it, all of the specification data will be
+built into the kernel image.  That adds up to 4KB of memory for each API
+specification, with the result that a fully specified kernel may contain
+several megabytes of added data.  So this is probably not an option to
+enable in production kernels, but all of that data can be useful in
+development and testing scenarios.
+<p>
+The specification data is made available under debugfs; a simple
+<tt>cat</tt> command can thus be used to extract a human-readable rendering
+of any given specification; JSON and XML renderings are available as well.
+There are special <tt>all.json</tt> and <tt>all.xml</tt> debugfs files that
+can be used to extract the entire set of specification data in JSON or XML
+format.
+<p>
+Kernels with this data built in can be set up to validate system calls (and
+internal functions) against their specifications.  Most of this validation,
+at the moment, consists of ensuring that the parameters passed into the
+function comply with the specification; they are thus, in a sense,
+validating the caller, not the function itself.  There is also checking of
+a function's return value, with the ability to fail a system call entirely
+if it returns something unexpected.  There are functions to validate the
+lock specification and signal handling, but they are stubs in the current
+implementation.  Developers can also supply custom validation functions for
+a specific function.
+<p>
+Finally, there is a new tool called <tt>kapi</tt>, written (<a
+href="/ml/all/aGP2rMDoJGd9fB4s@lappy">mostly automatically</a>) in Rust,
+that can be used to obtain specification data.  It is able to read that
+data from the source directly, from a built kernel image, or from debugfs.
+The output is available as plain text, JSON, or ReStructuredText.  Among
+other things, <tt>kapi</tt> can be used to check for API differences
+between two different kernels.
+<p>
+One of the key goals of this series is to enable the automatic detection of
+API-breaking changes.  In its current state, though, it appears that it
+will mostly detect changes where the developer was diligent enough to
+update the specification to reflect a change elsewhere, in which case the
+break is already known to that developer.  The validation can catch some
+changes, but will surely miss many others.
+<p>
+It is necessary to start somewhere, though.  In time, if this framework
+shows enough potential, it could perhaps grow into something that can cover
+much of the kernel API and ensure its consistency.  Future plans include
+integration with static analysis to verify the API specification,
+integration with fuzzing tools for smarter testing, and low-overhead
+run-time validation that can be enabled in production kernels.  But, to get
+there, Levin will have to convince the development community that the
+existing framework provides enough value to justify the addition and
+maintenance of thousands of lines of specification data.  That conversation
+is just beginning.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/ABI-related</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1027811/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1028570"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Have a peek at ADL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2025 18:58 UTC (Thu)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1028570/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028570" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Sun, X/Open and MITI developed "Assertion Definition Language"[https://en.wikipedia.org/wiki/Assertion_definition_language] and my team used it it to define the expected behaviour  of library calls, notably libc calls that wrapped system calls.
+
+<p>We used the first version, which lacked language tools, and found it was a good way of stating what the ABI was supposed to do. We extended on it to make a packaging-tool we called "dumb-ass-adl" (dadl)., but that was a sideline.
+
+<p>ADL was very good at stating in a pretty-readable for what we expected out of an ABI. I've not used the second version [https://dl.acm.org/doi/pdf/10.5555/974932] so I have no opinion about it.
+
+If you have an idea of what you would like to assert before and after the function, it is the cat's pyjamas (:-))
+
+<p>For example:
+<pre>
+void Buy(long account,  char* symbol,  long no_of_shares) {
+    semantics {
+        Cash_Balance(account) ==  @Cash_Balance(account) - @cost(symbol, no_of_shares);
+        Stock_Balance(account, symbol) == @Stock_Balance(account, symbol) + no_of_shares;
+    }
+}
+</pre>
+The @ means "before the call", so each line of the  spec says what changes.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028570/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1028734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Have a peek at ADL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2025 14:56 UTC (Sat)
+                               by <b>nreed</b> (subscriber, #153856)
+                              [<a href="/Articles/1028734/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nreed" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028734" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+       "dumb-ass-adl" (dadl) was funny :) . I had never seen [1] adl before, and wondered if there was something "modern" available.   
+<br><br>
+In my search for this "modern" adl I began to realize that this idea may just have been supplanted just "testing frameworks." 
+<br><br>
+I supposed there is [3] formally verified programs, which doesn't quite feel the same. 
+The closest that I have found tends to be a part of the language itself, ideas like "Design by Contract" in the [2] Eiffel programming language.  
+<br><br>
+
+Thoughts?
+
+<br><br>
+Very fun. Cheers!
+<br>
+- nate
+<br><br>
+[1] https://dl.acm.org/doi/pdf/10.5555/974932
+<br>
+[2] https://en.wikipedia.org/wiki/Eiffel_(programming_language)
+<br>
+[3] https://en.wikipedia.org/wiki/Formal_verification
+
+
+
+
+
+
+
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1028764"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Have a peek at ADL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2025 16:13 UTC (Sat)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1028764/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028764" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Testing frameworks are not the same thing, but are cool. I like the ideas of acceptance tests aimed at the abstract interface and one or more subsequent states of it.<br>
+<p>
+They feel a bit sequential from one example (<a href="https://www.eecs.yorku.ca/~wangcw/teaching/lectures/2020/F/EECS3311/slides/06-Eiffel-Testing-Framework.pdf">https://www.eecs.yorku.ca/~wangcw/teaching/lectures/2020/...</a>) from my old university, so neither they nor adl will be especially good for concurrency testing<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028764/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1028768"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Have a peek at ADL</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2025 17:31 UTC (Sat)
+                               by <b>nreed</b> (subscriber, #153856)
+                              [<a href="/Articles/1028768/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nreed" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028768" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      All in all a rather cool set of ideas. 
+<br><br>
+&gt; ideas of acceptance tests aimed at the abstract interface and one or more subsequent states of it
+<br><br>
+Its rather fun. I feel that this is very much adaptable in most languages too, the idea of an "Eiffel-like" testing methodology. I do something similar in _golang_ where I work, just not near to the extent that Eiffel was trying to achieve. Its been rather effective :)
+<br><br>
+&gt; They feel a bit sequential  ... so neither they nor adl will be especially good for concurrency testing
+<br><br>
+That part is rather unfortunate. Also, if you're interested I did find a fun little thread on Eiffel on hacker news(https://news.ycombinator.com/item?id=22281615) there is some nice user experience history in there. 
+<br><br>
+Cheers,
+<br>
+-nate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028768/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1028597"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">taskstats ABI breakage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2025 1:56 UTC (Fri)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/1028597/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pabs" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028597" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Example of a recent userspace ABI breakage, the taskstats structure added some members in the middle, which broke the Python and C implementations of iotop. The breakage was noticed by iotop-c folks, who added workarounds, and then kernel folks noticed, reverted the change, then the iotop-c folks noticed that and added compat for the newer version too.<br>
+<p>
+<a href="https://github.com/Tomas-M/iotop/issues/82">https://github.com/Tomas-M/iotop/issues/82</a><br>
+<a href="https://bugzilla.kernel.org/show_bug.cgi?id=220102">https://bugzilla.kernel.org/show_bug.cgi?id=220102</a><br>
+<a href="https://lkml.org/lkml/2025/5/25/345">https://lkml.org/lkml/2025/5/25/345</a><br>
+<a href="https://bugs.debian.org/1106606">https://bugs.debian.org/1106606</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028597/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1028700"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">taskstats ABI breakage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2025 16:11 UTC (Fri)
+                               by <b>JohnMoon</b> (subscriber, #157189)
+                              [<a href="/Articles/1028700/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="JohnMoon" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028700" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Notably, there's already some tooling in the kernel that could have caught this particular breakage. Apparently, nobody ran it:
+
+<pre>
+./scripts/check-uapi.sh -b 658eb5ab916ddc92f294dbce8e3d449470be9f86 -i
+--- snip ---
+==== ABI differences detected in include/linux/cgroupstats.h from \
+658eb5ab916ddc92f294dbce8e3d449470be9f86^1 - 658eb5ab916ddc92f294dbce8e3d449470be9f86 ====
+    [C] 'struct taskstats' changed:
+      type size changed from 3456 to 3968 (in bits)
+      8 data member insertions:
+     --- snip ---
+      50 data member changes:
+        '__u64 blkio_count' offset changed from 256 to 320 (in bits) (by +64 bits)
+        '__u64 blkio_delay_total' offset changed from 320 to 384 (in bits) (by +64 bits)
+      ...
+</pre>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028700/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1028713"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">taskstats ABI breakage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2025 23:58 UTC (Fri)
+                               by <b>skissane</b> (subscriber, #38675)
+                              [<a href="/Articles/1028713/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="skissane" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028713" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Notably, there's already some tooling in the kernel that could have caught this particular breakage. Apparently, nobody ran it</span><br>
+<p>
+I notice there are already robots building/testing kernels automatically and sending emails to LKML when it fails.<br>
+<p>
+Surely it wouldn't be a lot of work to have one of those robots automatically run "check-uapi.sh" too?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028713/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1028721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">taskstats ABI breakage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2025 4:35 UTC (Sat)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/1028721/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alison" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028721" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      On a related note, the BTF-based tool pahole is a great way to view the kernel's internal interfaces, in case anyone is unfamiliar.   It seems like a lost opportunity if KAPI does not build on BTF.
+<pre>
+$ pahole page
+struct page {
+        long unsigned int          flags;                /*     0     8 */
+        union {
+                struct {
+                        union {
+                                struct list_head lru;    /*     8    16 */
+                                struct {
+                                        void * __filler; /*     8     8 */
+                                        unsigned int mlock_count; /*    16     4 */
+                                };                       /*     8    16 */
+                                struct list_head buddy_list; /*     8    16 */
+                                struct list_head pcp_list; /*     8    16 */
+                        };                               /*     8    16 */
+      . . .
+};
+</pre>
+I presented a talk about the kernel ABI at Southern California Linux Expo in 2022.   There is a <a href="https://opensource.com/article/22/12/linux-abi">related blog post</a> at opensource.com.
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1028621"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">cargo semver-checks for the kernel?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2025 8:34 UTC (Fri)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1028621/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028621" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So if I read this correctly the end goal is to have something like cargo semver-checks for the kernel?<br>
+<p>
+If so this recent talk by the author of that tool might be interesting to some here<br>
+<p>
+<a href="https://www.youtube.com/watch?v=bUN54ByMp3U">https://www.youtube.com/watch?v=bUN54ByMp3U</a><br>
+<p>
+He talks a lot about the scope of the problem of automatically detecting API breakage and even the difficulty of fully defining what could be considered API breakage. The talk is about Rust but many of the concepts should apply to C as well, or if anything, the difficulties apply to a less rigorously typed language like C even more.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028621/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1028783"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Automatic generation </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2025 18:34 UTC (Sat)
+                               by <b>SLi</b> (subscriber, #53131)
+                              [<a href="/Articles/1028783/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="SLi" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028783" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interestingly, this feels like something where something could be automatically or semi-automatically generated. I see several approaches.<br>
+<p>
+First we can look at the kind of test cases generated by a fuzzer. Ideally we'll find something like a small set of test cases that causes each important C level branch to be taken or not (branch coverage).<br>
+<p>
+Then, at least for the simpler syscalls, I'd think this can be turned into that kind of human readable text by an LLM. Verify the transformation by checking that an LLM can generate from it a test case exercising the same path.<br>
+<p>
+It could also work with existing syscall documentation, generating an abstract model / test cases of how the syscall behaves from that documentation, detecting (perhaps together with a fuzzer) where the model diverges from the behavior, at least for simple cases like which error is returned.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028783/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1028818"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ABI checking tools</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 6, 2025 15:23 UTC (Sun)
+                               by <b>amadio</b> (subscriber, #96152)
+                              [<a href="/Articles/1028818/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="amadio" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1028818" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Kernel developers are probably already aware, but if not, I find the ABI checking tools from https://abi-laboratory.pro really useful to detect and prevent ABI breakage. Unfortunately, these tools are no longer being actively maintained since a few years. They only support DWARF 4 and distro packaged versions often no longer work out of the box. You can see (old) reports for Linux and glibc at the links below:<br>
+<p>
+https://abi-laboratory.pro/?view=timeline&amp;l=linux<br>
+https://abi-laboratory.pro/?view=timeline&amp;l=glibc<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028818/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1029115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">man pages generator?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2025 11:25 UTC (Tue)
+                               by <b>andy_shev</b> (subscriber, #75870)
+                              [<a href="/Articles/1029115/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andy_shev" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1029115" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Obvious idea here is to help with man (2) page generator and alike that can be really following "one source" concept.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1029503"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Duplicate work on the relevant man pages?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 11, 2025 0:44 UTC (Fri)
+                               by <b>vonbrand</b> (guest, #4458)
+                              [<a href="/Articles/1029503/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vonbrand" />
+                <input type="hidden" name="return" value="/Articles/1027811/#CommAnchor1029503" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Sure, having this in a strict format would be nice. But as it stands, it is duplicating the man pages in an opaque, non-standard format (if you do something like this, please use XML!). I fear they will drift apart and drive peope bonkers.
+Having a set of test cases sounds a lot more useful. As it "only" covers system calls, a special shared library having just those and a set of programs (using e.g. TAP) exercising each should not be that hard to whip up. Can start real small (just the typical I/O system calls first, just basic functionality) and expand from there. 
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1029503/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

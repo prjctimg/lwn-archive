@@ -1,0 +1,446 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>DMA addresses for UIO [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="DMA addresses for UIO">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Userspace I/O (UIO) subsystem was first added to the kernel by Hans J. Koch for the 2.6.32  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1017843/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>DMA addresses for UIO</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 22, 2025</br>
+           </div>
+The <a href="https://docs.kernel.org/driver-api/uio-howto.html">Userspace
+I/O (UIO) subsystem</a> was first <a
+href="https://git.kernel.org/linus/beafc54c4e2f">added to the kernel</a> by
+Hans J. Koch for the 2.6.23 release in 2007.  Its purpose is to facilitate
+the writing of drivers (mostly) in user space; to that end, it provides
+access to a number of resources that user-space code normally cannot touch.
+One piece that is missing, though, is DMA addresses.  <a
+href="/ml/all/20250410-uio-dma-v1-0-6468ace2c786@bootlin.com">A proposal to
+fill that gap</a> from Bastien Curutchet is running into some opposition,
+though.
+<p>
+While UIO drivers reside mostly in user space, they still require a small
+in-kernel component; it is essentially a bit of glue that can probe for a
+device and handle interrupts, and which informs the kernel of any
+memory-mapped <span class="nobreak">I/O</span> (MMIO) regions that should
+be made available to user space.  Showing its age, UIO also has a mechanism
+to make x86 <span class="nobreak">I/O</span> ports available.  Once that
+module is loaded, a user-space driver can open the appropriate
+<tt>/dev/uioX</tt> device, map the memory regions into its address space,
+use that mapping to program the device, and read from the device file
+descriptor to wait for interrupts.  The mapped MMIO areas are usually all
+that is needed to operate the device.
+<p>
+See <a href="232575.html">this 2007 article</a> for an overview of
+what the UIO interface looked like then and some of the discussions around
+its addition to the kernel.
+<p>
+UIO drivers are generally relatively simple; as the complexity of a device
+increases, so do the advantages of driving it entirely within the
+kernel.  Among other things, UIO drivers are normally limited to simple
+programmed <span class="nobreak">I/O</span>, where all data transferred
+goes through the CPU.  The performance of programmed <span
+class="nobreak">I/O</span> transfers is limited, though, so even relatively
+low-end devices now support DMA transfers instead.  Access to the MMIO
+region is usually sufficient to program a DMA operation into a device, but
+there is one little detail missing: the address of the <span
+class="nobreak">I/O</span> buffer to give to the device.
+<p>
+Coming up with DMA addresses is not quite as easy as it sounds.  A driver
+running in user space will see its virtual address space; it can create a
+buffer there, but the driver's virtual address for that buffer will mean
+nothing to the device.  Even on the simplest of systems, that address will
+need to be converted to a physical address that the device can access; the
+user-space pages involved will also need to be locked into memory for the
+duration of the transfer.  On more complex systems, the "physical address"
+will be in a separate address space for the bus on which the device
+resides, and may well be translated through an <span
+class="nobreak">I/O</span> memory-management unit (IOMMU), which must be
+appropriately programmed.  None of this work can be done from user space.
+<p>
+According to Curutchet, there are numerous UIO drivers that include hacks
+to enable the creation and export of DMA addresses for user-space drivers
+to use.  The posted patch series is an attempt to provide a standard,
+well-tested mechanism to carry out this task in a relatively safe way.  The
+kernel <i>does</i> have some infrastructure for the management of DMA
+buffers from user space: the <a
+href="https://docs.kernel.org/driver-api/dma-buf.html">dma-buf layer</a>,
+which was initially created to enable the sharing of DMA buffers between
+devices.  This layer does almost everything that a UIO driver needs, but it
+does not make the DMA addresses of its buffers available to user space.
+<p>
+Curutchet's patch set adds a new <a
+href="https://man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>
+operation to the dma-buf layer that can provide the DMA address for a
+dma-buf to the caller.  The series also adds a new <a
+href="https://docs.kernel.org/next/userspace-api/dma-buf-heaps.html">dma-buf
+heaps</a> module for the creation of simple, cache-coherent DMA buffers.
+Using this module, user-space drivers can create DMA buffers, but they do not
+have access to most of the more-complex dma-buf machinery, including all of
+its synchronization support.
+<p>
+Christian König repeatedly <a
+href="/ml/all/29eb3698-7dc2-4c32-b636-8ef0ee6d1f47@amd.com">requested</a>
+an open-source driver that uses this new feature.  As Thomas Petazzoni <a
+href="/ml/all/20250414135228.600c13e6@windsurf">pointed out</a>, though, an
+open-source user has never been required for any other UIO feature.  The
+presence of an open-source consumer for a new interface can be helpful
+during the review process, but it does seem a bit late to add that
+requirement here, when it has never been requested before.
+<p>
+Christoph Hellwig, instead, <a
+href="/ml/all/Z_yjNgY3dVnA5OVz@infradead.org">said</a> that the proper
+solution to this problem was to use the <a
+href="https://docs.kernel.org/next/driver-api/vfio.html">VFIO</a> and <a
+href="https://docs.kernel.org/next/userspace-api/iommufd.html">IOMMUFD</a>
+subsystems.  He later <a
+href="/ml/all/Z_zwZYBO5Txz6lDF@infradead.org">added</a> that the proposal
+is "<q>fundamentally broken and unsafe</q>" and that, if his suggested
+approach does not work, the only alternative is to write a full in-kernel
+driver.  Petazzoni <a
+href="/ml/all/20250414102455.03331c0f@windsurf">answered</a> that VFIO and
+IOMMUFD are not suitable for this use case, and <a
+href="/ml/all/20250414134831.20b04c77@windsurf">pointed out</a> that making
+DMA addresses available does not add safety concerns that are not already
+present:
+<p>
+<blockquote class="bq">
+	UIO allows to remap MMIO registers into a user-space application,
+	which can then do whatever it wants with the IP block behind those
+	MMIO registers. If this IP block supports DMA, it already means
+	that _today_ with the current UIO subsystem as it is, the
+	user-space application can program a DMA transfer to read/write to
+	any location in memory.
+</blockquote>
+<p>
+Creating a clean interface for the management of DMA buffers, he suggested,
+is likely to make UIO drivers more safe than they are now.  Andrew Davis <a
+href="/ml/all/8f55367e-45c0-4280-b1ed-7ce9160c1fad@ti.com">was not
+convinced</a>, though, characterizing Petazzoni's argument as: "<q>UIO is a
+broken legacy mess, so let's add more broken things to it as broken +
+broken =&gt; still broken, so no harm done</q>".  He later <a
+href="/ml/all/4c77a566-d231-43f2-ada6-a81ec6b58237@ti.com/">said</a> that
+improving the UIO interface "<q>gives the impression that is how drivers
+should still be written</q>" when, he said, the correct solution is to
+write an in-kernel driver.
+<p>
+As that last quote shows, the real point of contention here is not whether
+the provision of DMA addresses will somehow make UIO more dangerous; UIO
+drivers can already corrupt the system.  The question is whether UIO should
+exist at all in 2025.  Support for many classes of drivers in the kernel
+has improved significantly since UIO was merged, and some developers are
+undoubtedly unhappy with its potential use in developing proprietary
+drivers.  At this point, to some, the value provided by UIO may appear to
+be negative.
+<p>
+UIO cannot be removed, of course, without breaking an unknown number of
+existing drivers, but it can be frozen in place with the idea of reducing
+the number of drivers written to use the UIO interface in the future.  The
+real result of denying new UIO features, though, seems likely to be to just
+push those features into a set of (probably more dangerous) driver-specific
+hacks, as is evidently already happening for DMA addresses.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Device drivers/In user space</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1017449/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1018485"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">UIO appears to be tasked to address a particularly odd edge case here</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 22, 2025 19:14 UTC (Tue)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/1018485/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gutschke" />
+                <input type="hidden" name="return" value="/Articles/1017449/#CommAnchor1018485" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From what I got from that conversation on LKML, this is truly a very unusual edge case. It's already a very small group of people who would benefit from UIO in the first place. Two decades ago, it was primarily intended for one-off industrial extension cards that have a very simple MMIO interface. These days, you'd expect that most of these devices would long since have migrated to some other technology (e.g. USB). Apparently, you can even get devices that connect through USB and make an ISA slot available. So, if you are truly stuck having to use ancient hardware, that's yet another viable option.<br>
+<p>
+An even smaller subset of users have devices that are 1) one-off or low-volume, 2) plug into a PCI(e) slot, 3) and require DMA. Most of these users would be well-served with VFIO/IOMMUFD. It's pretty much custom-made for this exact use case, and it offers a much more natural interface. I would expect that anybody who looked at UIO in 2007 and who still today has to deal with interfacing to odd custom hardware would rather invest in VFIO/IOMMUFD-based userspace software.<br>
+<p>
+But in the particular scenario that prompted the current discussion, an additional wrinkle is the lack of an IOMMU in the user's PowerPC device. This is quickly approaching a point where you have to question whether a more pragmatic solution is a hardware upgrade instead of implementing a new user-facing API that will have to be maintained for decades with barely any new users.<br>
+<p>
+And if changing the hardware isn't viable, then writing (and maintaining) a proper kernelspace driver is maybe the best answer anybody can give to this user. At some point, I understand kernel developers being reluctant to add new interfaces, if it is unclear that anybody else really needs them.<br>
+<p>
+Unfortunately, the person who asked for this API was very reluctant to volunteer more information on what their exact use case is and why they are stuck with the particular combination of hardware.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018485/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1018488"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">UIO appears to be tasked to address a particularly odd edge case here</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 22, 2025 19:36 UTC (Tue)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/1018488/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edeloget" />
+                <input type="hidden" name="return" value="/Articles/1017449/#CommAnchor1018488" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, there are a lot of tech that could beneficiate from UIO DMA, the main one being the DPDK where all network drivers are implemented in user space. A lot of them already require some form of UIO and they often add other specific requirements such as a vendor provided BSP to support DMA transfers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018488/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1018489"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">UIO appears to be tasked to address a particularly odd edge case here</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 22, 2025 19:42 UTC (Tue)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/1018489/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gutschke" />
+                <input type="hidden" name="return" value="/Articles/1017449/#CommAnchor1018489" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't question the need for doing DMA from userspace. I can certainly see why some use cases call for that. What I am questioning is whether UIO is the best API to shoehorn this feature into, when VFIO is already a perfectly good option for most users and seems to be a lot more maintainable in the long run.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018489/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1018507"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">UIO appears to be tasked to address a particularly odd edge case here</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2025 0:55 UTC (Wed)
+                               by <b>ahippo</b> (subscriber, #154692)
+                              [<a href="/Articles/1018507/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ahippo" />
+                <input type="hidden" name="return" value="/Articles/1017449/#CommAnchor1018507" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I remember correctly, DPDK supports VFIO very well [1], both with and without IOMMU.<br>
+<p>
+In fact, I remember some NIC crashing a system under heavy load when used with igb_uio, but not with VFIO (thanks to IOMMU supposedly). <br>
+<p>
+<p>
+[1] <a href="https://doc.dpdk.org/guides/linux_gsg/linux_drivers.html#vfio">https://doc.dpdk.org/guides/linux_gsg/linux_drivers.html#...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018507/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1018506"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">USB HID</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 22, 2025 23:34 UTC (Tue)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/1018506/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ringerc" />
+                <input type="hidden" name="return" value="/Articles/1017449/#CommAnchor1018506" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Lots of weird custom hardware works via the USB HID interface, by exposing an on-board UHCI/XHCI with an integrated HID device.<br>
+<p>
+This became popular because user-space un-signed HID drivers could be written for Windows versions where other drivers require signing, WHQL etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018506/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1018508"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">USB HID</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2025 1:26 UTC (Wed)
+                               by <b>neggles</b> (subscriber, #153254)
+                              [<a href="/Articles/1018508/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neggles" />
+                <input type="hidden" name="return" value="/Articles/1017449/#CommAnchor1018508" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Drivers for custom USB devices are pretty easy these days; libusb on linux and WinUSB on windows are almost entirely API-compatible and WinUSB uses one kernel driver for all devices, so no HID trickery is needed anymore. As a bonus you get support for Windows on ARM (and linux on uncommon architectures) with little to no effort.<br>
+<p>
+Unfortunately, USB and PCI(e) are very different beasts - a USB device has much less control over and access to system memory. USB devices are reliant on their host controller for data movement, and don't have to handle physical memory addresses at all. It's kind of like the difference between read()/write() and mmap(), with PCI being the latter.<br>
+<p>
+The equivalent for PCIe on linux these days would be the vfio-pci kernel driver, which (contrary to popular belief) does not actually require an IOMMU to work. It might be worth updating the documentation to make it clear that using the "unsafe" no-iommu mode is only unsafe in the face of a misbehaving device, and is fine to use on systems without an IOMMU.<br>
+<p>
+That's probably the correct solution here, but i'm not sure how big of a job it would be to convert a driver like the one described here to use vfio-pci; is there a library of handy wrapper/boilerplate code like libusb but for pci?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018508/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1018515"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Simply deprecated interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2025 4:53 UTC (Wed)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1018515/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1017449/#CommAnchor1018515" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; UIO cannot be removed, of course, without breaking an unknown number of existing drivers, but it can be frozen in place with the idea of reducing the number of drivers written to use the UIO interface in the future.</span><br>
+<p>
+This is the essence of a "deprecated" interface. Was the "deprecated" terminology not used and if not then why not? It would IMHO clarify the situation and save misunderstandings, discussions and time.<br>
+<p>
+Maybe because "deprecated" usually means removal at some unknown point in the future? Removal means "breaking userspace"; the horror! Well, just assume the "unknown point" is "never" and that's it! You've just invented the "forever deprecated" interface which seems to describe UIO perfectly. Problem solved.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018515/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

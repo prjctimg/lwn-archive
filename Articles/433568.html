@@ -1,0 +1,265 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Uprobes: 11th time is the charm? [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Uprobes: 11th time is the charm?">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Last week's Kernel Page included an article about improving the ptrace() interface; the author  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/432757/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Uprobes: 11th time is the charm?</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 16, 2011</br>
+           </div>
+Last week's Kernel Page included <a href="432114.html">an article
+about improving the <tt>ptrace()</tt> interface</a>; the author of that
+work, Tejun Heo, was quoted as saying that part of the problem with
+<tt>ptrace()</tt> is that it has been starved of developer attention in
+favor of efforts to replace it entirely.  One of those efforts is uprobes,
+which has also been featured on this page a few times.  <a
+href="/Articles/433327/">A new uprobes patch</a> was posted on
+March&nbsp;14; so this seems like a good time to have a look at it and
+further deprive <tt>ptrace()</tt> of attention.  Uprobes looks like it is
+getting closer to acceptance, but it seems unlikely that the 11th revision
+will be the last.
+<p>
+The purpose of the uprobes subsystem is what one might expect: to enable
+the placement of probes into user-space executable process memory.  These
+probes might be used to support a debugger like gdb (though uprobes is <a
+href="/Articles/433572/">said</a> to be unsuitable for use by gdb in its
+current form) or to support user-space tracing.  This feature does thus
+duplicate some of the functionality provided by <tt>ptrace()</tt>, which
+will make its acceptance harder, especially since <tt>ptrace()</tt> is
+(more or less) a standardized interface.  To succeed, uprobes will clearly
+have to do things better than <tt>ptrace()</tt> does.
+<p>
+The <tt>ptrace()</tt> interface is tied to processes; uprobes, instead,
+works with files.  A probe is placed at a certain offset within a specific
+file; it will then trigger for every process which executes through the
+probe's location.  If the code placing the probe is only interested in
+specific processes, it will need to filter the events itself.  The
+interface may seem a little strange - users will probably almost always be
+interested in specific processes - but there are some advantages to doing
+things this way.
+<p>
+Underneath the hood, uprobes works by faulting in the page which will
+contain the probe.  The instruction at the probe location is copied aside
+and replaced by a breakpoint.  Every process which has that file mapped then
+gets a pointer in its <tt>mm</tt> structure pointing to the data describing
+the probe(s) for that file.  When a process executes the breakpoint, the
+probe's handler 
+function will be called; on that handler's return, the kernel will
+single-step the displaced instruction, then return to the location following
+the probe.
+<p>
+This "execute out of line" (XOL) mechanism has been controversial in the
+past because it requires the injection of a new virtual memory area (VMA)
+into every process which encounters probes.  That VMA is seen as a
+distortion of the process's behavior which could have strange effects.  The
+alternatives, though, are not entirely appealing either.  The
+<tt>ptrace()</tt> approach is to put the original instruction back into its
+original location, execute it, then replace the breakpoint; that only works
+if every process which has the file mapped is stopped for the duration of
+the operation (otherwise they might execute the affected code while the
+breakpoint is missing).  Uprobes, instead, is able to handle breakpoint hits without
+perturbing other processes.  Another alternative discussed in the past is
+emulating the displaced instruction in the kernel; that requires having a
+full x86 emulator in kernel space, which is not entirely appealing either.
+So the current plan appears to be to stick with XOL.
+<p>
+Not having to stop the world when a breakpoint is hit is one of the
+advantages of uprobes, but there are others.  It dispenses with the whole
+<tt>ptrace()</tt> mechanism involving signals, reparenting processes, and
+so on.  Handling a probe hit does not require a context switch unless the
+probe itself does; many types of tracing tasks, for example, would never
+have to switch 
+to another process.  Uprobes also allows multiple applications to be
+tracing the same set of processes at the same time.  All of these make the
+interface appealing to some users.
+<p>
+Who those users are is not clear to everybody, though.  There is clearly
+some interest in the SystemTap camp, but the needs of SystemTap do not
+necessarily carry a lot of weight on linux-kernel.  Thomas Gleixner <a
+href="/Articles/433582/">put it this way</a>:
+<p>
+<div class="BigQuote">
+	And it does not matter at all whether systemtap can use this or
+	not. If the main debuggers used like gdb are not going to use it
+	then it's a complete waste. We don't need another debugging
+	interface just for a single esoteric use case.
+</div>
+<p>
+At times, gdb developers have <a href="/Articles/433895/">indicated</a>
+that they might be open to using 
+a Linux-specific interface if there were advantages to doing so.  Such use
+seems distant at the moment, though.  More immediate users are likely to be
+found in the tracing community; uprobes opens the possibility of getting
+single stream of trace data covering both user and kernel space.
+<tt>ptrace()</tt> is not a useful interface for tracing, so something needs
+to be done (though there is still some disagreement over whether user-space
+tracing needs to involve the kernel at all).  Uprobes might be that
+something.
+<p>
+In fact, this version of the uprobes patch includes an ftrace-based
+interface.  Part&nbsp;20 of the patch contains the entirety of the
+documentation for this feature, quoted below:
+<p>
+<pre>
+    # cd /sys/kernel/debug/tracing/
+    # cat /proc/`pgrep  zsh`/maps | grep /bin/zsh | grep r-xp
+    00400000-0048a000 r-xp 00000000 08:03 130904 /bin/zsh
+    # objdump -T /bin/zsh | grep -w zfree
+    0000000000446420 g    DF .text  0000000000000012  Base        zfree
+    # echo 'p /bin/zsh:0x46420 %ip %ax' &gt; uprobe_events
+    # cat uprobe_events
+    p:uprobes/p_zsh_0x46420 /bin/zsh:0x0000000000046420
+    # echo 1 &gt; events/uprobes/enable
+    # sleep 20
+    # echo 0 &gt; events/uprobes/enable
+    # cat trace
+</pre>
+<p>
+An actual document is listed as a "TODO" item.  The current interface looks
+a bit painful to use, and it appears to be limited to printing register
+contents for now.  A more flexible and better documented interface could
+prove useful, though, especially if (as planned) it also can be made to
+work with the perf events subsystem.
+<p>
+The comments on the patch set indicate some concern about whether the
+kernel needs the feature or not.  But even the more critical reviewers
+have been going over the code pointing out small things - the kind of
+review one does when one wants to help the author get the code into shape
+for merging.  This code will not be merged for 2.6.39, and, for this type
+of code, making predictions for merging at any definite time is a hazardous
+affair.  But, given sufficient will, it seems like uprobes could be made
+ready for inclusion sometime this year.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Tracing</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Uprobes</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/433568/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor435132"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Uprobes: 11th time is the charm?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2011 6:06 UTC (Thu)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/435132/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kevinm" />
+                <input type="hidden" name="return" value="/Articles/433568/#CommAnchor435132" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So, if I want to put a probe in libc.so, it ends up being executed by every process on the system?<br>
+<p>
+Presumably I would have to have write permissions to libc to do so - so if gdb was to use this, I wouldn't be able to set breakpoints on library functions unless I'm root? That sounds like a nonstarter to me.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/435132/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor435241"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Uprobes: 11th time is the charm?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2011 17:41 UTC (Thu)
+                               by <b>fuhchee</b> (guest, #40059)
+                              [<a href="/Articles/435241/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fuhchee" />
+                <input type="hidden" name="return" value="/Articles/433568/#CommAnchor435241" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A future gdb interface for this functionality would not require nor give you any new privileges.  Probes would be naturally restricted to your processes.  No actual writing to the disk files is done.<br>
+<p>
+Systemtap has the same properties w.r.t. the older utrace/uprobes it carries: a root user can operate systemwide, and an unprivileged user can operate upon her own processes.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/435241/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2011, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

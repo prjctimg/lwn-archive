@@ -1,0 +1,342 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Apache range request denial of service [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Apache range request denial of service">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" A rather potent denial of service (DoS) vulnerability in the Apache HTTP server has dominated  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/456506/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Apache range request denial of service</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>August 31, 2011</br>
+           </div>
+<p>
+A rather potent denial of service (DoS) vulnerability in the Apache HTTP
+server has dominated the security news over the last week.  It was first
+reported by way of a <a
+href="http://seclists.org/fulldisclosure/2011/Aug/175">proof-of-concept</a>
+posted to the full-disclosure mailing list on August 20.  The problem
+itself is due to a bug in the way that Apache implemented HTTP <tt>Range</tt>
+headers, but there is also an underlying problem in the way those HTTP
+headers are defined.
+</p>
+
+<p>
+The proof-of-concept (posted by "Kingcope") is a fairly simple Perl script
+that makes multiple connections to a web host, each with a long and,
+arguably, incorrectly redundant <tt>Range</tt> specified in the headers.
+Only a small number 
+of these connections can cause enormous memory and CPU usage on the web
+host.  This is a classic "amplification" attack, where a small amount of
+resources on the attacker side can lead to consuming many more victim-side
+resources. In some sense, normal HTTP requests are amplifications, because
+a few bytes of request can lead to a multi-megabyte response (a large PDF
+for example), but this attack is different.  A single request can lead to
+multiple partial responses, each with their own header and, importantly,
+server overhead. It is the resources required to create the responses that
+leads to the DoS.
+</p>
+
+<p>
+The <tt>Range</tt> header is meant to be used to request just a portion of
+the resource, but, as we see here, it can be abused.  The idea is that a
+streaming client or other application can request chunks of the resource as
+it plays or displays them.  An HTTP request with the following:
+<pre>
+    Range: bytes=512-1023
+</pre>
+would be asking for 512 bytes starting at the 513th (it is zero-based).
+But it is not just a single range that can be specified:
+<pre>
+    Range: bytes=512-1023,1024-2047
+</pre>
+would request two ranges, each of which would be sent in either a separate
+response (each with a <tt>Content-Range</tt> header) or in a multipart
+response (i.e. with a <tt>multipart/byteranges</tt> <tt>Content-Type</tt>).
+</p>
+
+<p>
+Each of those examples is fairly benign.  The problem stems from requests
+that look like:
+<pre>
+    Range: bytes=0-,5-0,5-1,...,5-6,5-7,5-8,5-9,5-10,...
+</pre>
+which requests the whole file (<tt>0-</tt>) along with several nonsensical
+ranges (<tt>5-0,5-1,</tt>...) as well as a bunch of overlapping ranges.
+The example is taken from the proof-of-concept code (which creates 1300
+ranges for each request), and other kinds of
+lengthy range requests will also cause the DoS.
+</p>
+
+<p>
+When it receives range requests, Apache dutifully creates pieces of a multipart
+response for each range specified.  That eats up both memory and CPU on the
+server, and doing so tens or hundreds of times for multiple attacker
+connections is enough to exhaust the server resources and cause the DoS.
+The range requests in the attack are obviously not reasonable, but they are
+legal according to the HTTP specification.  There is <a
+href="http://trac.tools.ietf.org/wg/httpbis/trac/ticket/311">discussion</a>
+of changing the specification, but that doesn't help right now.
+</p>
+
+<p>
+An obvious solution would be to sort the ranges (as they don't have to be
+in any specific order) and coalesce those that are adjacent or overlap.  If
+the range turned out to correspond to the entire file, the server could
+just send that instead.  Unfortunately, (arguably) badly written applications or
+browsers may be expecting to get multipart responses in the same order, and
+with the same lengths, as
+specified in the request.  In addition, the HTTP specification does not allow
+that kind of reordering. 
+</p>
+
+<p>
+So the Apache <a href="/Articles/457039/">solution</a> is to look at the
+sum of the lengths of the ranges in a request
+and if that's greater than the size of the requested file, just send the
+whole file.  That will defeat the proof-of-concept and drastically reduce
+the amplification factor that any particular request can cause.  It doesn't
+completely solve the problem, but it alleviates the worst part.  Attackers
+can still craft nonsensical range requests, but the number of responses
+they can generate is vastly reduced.
+</p>
+
+<p>
+While Apache's implementation of range requests is fairly resource-hungry,
+which makes it easier to cause the DoS,
+the HTTP protocol bears some of the blame here too.  Allowing multiple
+overlapping ranges does not really make any sense, and not allowing servers
+to reorder and coalesce adjacent ranges seems poorly thought-out as well.
+No matter how efficiently implemented, allowing arbitrary ranges of that
+sort is going to lead to some sort of amplification effect.
+</p>
+
+<p>
+Apache's fix is for the stable 2.2 series, so it is necessarily fairly
+conservative. There are ongoing discussions going on in the Apache dev
+mailing list that indicate a more robust fix&mdash;probably following the
+proposed changes to the HTTP specification&mdash;is in the works for the 2.3
+development branch (which will eventually become the stable 2.4 release).
+</p>
+
+<p>
+As of this writing, only Debian has released a fix for the problem (which
+it did based on the patch while it was being tested and before Apache announced
+its fix).  Other distributions are sure to follow.  Since it is trivially
+easy to make an unpatched server unresponsive, it probably makes sense to
+use one of the <a href="/Articles/456513/">mitigation techniques</a>
+suggested by 
+Apache until a server update is available.
+
+<p>
+[ A word of warning to those who may be tempted to try the proof-of-concept
+code: while limiting the number-of-forks command-line parameter to 1 may
+seem like a good idea for testing purposes, it doesn't actually work in
+practice. If that parameter is &lt;= 1, the code sets it to 50, which is
+enough to DoS a server&mdash;trust me on that last part. ]
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Apache</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Vulnerabilities/HTTP range headers</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/456723/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor457707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apache range request denial of service</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2011 12:28 UTC (Mon)
+                               by <b>thoger</b> (guest, #51049)
+                              [<a href="/Articles/457707/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="thoger" />
+                <input type="hidden" name="return" value="/Articles/456723/#CommAnchor457707" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The important part of the upstream fix was to make ranges handling code use less memory.<br>
+<p>
+As for PoC, it does not have problem with numforks &lt;= 1, it just has problem with parsing its command line arguments.  numforks (2nd argument) is only used if it's called with at least 3 arguments.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/457707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor457788"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apache range request denial of service</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2011 9:06 UTC (Tue)
+                               by <b>jamesh</b> (guest, #1159)
+                              [<a href="/Articles/457788/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jamesh" />
+                <input type="hidden" name="return" value="/Articles/456723/#CommAnchor457788" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the HTTP specification says that the server needs to either return the requested ranges or the entire document, why would you consider clients "arguably" broken if they don't handle the server violating the spec?<br>
+<p>
+If the clients are expected to handle the server returning an equivalent set of ranges, you're asking that if the client asks for the first 100 bytes of a file that the server could return 100 single byte range responses in a random order, for example.  Now you've got another problem: the client might now have to buffer the entire response before it can interpret it.<br>
+<p>
+The proposed patch by Apache seems like the least bad option here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/457788/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor458382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apache range request denial of service</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2011 21:51 UTC (Sat)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/458382/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="slashdot" />
+                <input type="hidden" name="return" value="/Articles/456723/#CommAnchor458382" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Where's the issue?<br>
+<p>
+Of course you can request a lot of data with a simple request, but just repeatedly downloading the same large file will have the same effect.<br>
+<p>
+There is also no reason for such requests to require any unusual amount of resources, so it looks like the issue lies wholly in Apache's evidently poor implementation.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/458382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor458407"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apache range request denial of service</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2011 6:14 UTC (Sun)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/458407/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dlang" />
+                <input type="hidden" name="return" value="/Articles/456723/#CommAnchor458407" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+if they are done as separate requests an external firewall or load balancer will see all the individual requests and can throttle them.<br>
+<p>
+also, as separate requests, each one will get logged so it will be obvious that you have lots of requests from one source. as multiple overlapping ranges, you won't get any log message until everything is complete.<br>
+<p>
+I see this as primarily a HTTP protocol bug that apache ends up being especially inefficient at handling, but to a large degree all other servers should be vulnerable as well.<br>
+<p>
+but the idea that you can DOS apache is far from new, this is just one additional method of doing so.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/458407/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2011, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

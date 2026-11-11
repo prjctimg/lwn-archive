@@ -1,0 +1,206 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Read-copy-update for realtime [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Read-copy-update for realtime">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The developers working on realtime response for Linux have stated their intent to merge many of [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/200304/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Read-copy-update for realtime</h1>
+<div class="Byline">[Posted September 26, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+The developers working on realtime response for Linux have stated their
+intent to merge many of their remaining changes into 2.6.19.  One of those
+changes is a reworking of the read-copy-update mechanism for lower
+latencies; this work appears likely to go in regardless of the fate of the
+rest of the realtime code.  So it's worth a look.
+<p>
+
+RCU, remember, is a mechanism which allows certain types of data structure
+to be updated without requiring locking between readers and writers.  It
+works by splitting the update process into two steps: (1)&nbsp;replacing a
+pointer to old data with a pointer to the updated version, and
+(2)&nbsp;deferring the removal of the old data structure until it is known
+that no kernel code holds any references to that structure.  The part about
+knowing that no references are held is handled by (1)&nbsp;requiring all
+code which references RCU-protected data structures to be atomic, and
+(2)&nbsp;waiting until all processors have scheduled once.  Since a
+processor which schedules is not running atomic code, it cannot hold any
+references to RCU-protected data structures from before the call to
+<tt>schedule()</tt>.
+<p>
+
+This mechanism works well for most systems, but it presents a problem in
+realtime environments.  The requirement that references to RCU-protected
+data structures be handled by atomic code means that any such code cannot
+be preempted.  That, in turn, increases latencies, which is just what the
+realtime code is trying to avoid.  So another solution had to be found.  A
+couple of ideas have been pursued, one of which is now advanced to the
+point that it will likely find its way into 2.6.19.  Here we'll take a
+superficial look at how realtime RCU works; anybody interested in the
+details is advised to have a look at <a
+href="http://www.rdrop.com/users/paulmck/RCU/OLSrtRCU.2006.08.11a.pdf">the
+realtime RCU paper [PDF]</a> from the 2006 Ottawa Linux Symposium.
+<p>
+
+Fixing the RCU latency problem means ending the requirement that
+RCU-protected code be non-preemptible.  And that, in turn, means that RCU
+can no longer count on a processor rescheduling meaning that no references
+to RCU-protected structures exist on that processor.  So the accounting
+must be done in a more explicit manner.  The realtime RCU code handles this
+accounting with two sequence numbers, two per-CPU counters and three linked lists.
+<p>
+
+The sequence numbers track the specific batches of RCU callbacks to
+process; for added confusion value, both are named "completed," though they
+live in two different global structures.  The value
+<tt>rcu_ctrlblk.completed</tt> is the current batch number, which is
+accumulating new callbacks to process; <tt>rcu_data.completed</tt>,
+instead, is the number of the last batch of callbacks to have been
+processed.
+<p>
+
+Within any given RCU batch, one of the per-CPU counters tracks the
+number of kernel threads which are currently executing within RCU critical
+sections.  During
+this batch, any RCU callbacks queued (with <tt>call_rcu()</tt>) will be
+appended to the first of the linked lists: <tt>rcu_data.nextlist</tt>.
+Whenever code calls <tt>rcu_read_lock()</tt>, the appropriate
+counter is incremented; a pointer to that counter is also stored so that,
+should the thread change processors before calling
+<tt>rcu_read_unlock()</tt>, the right counter will be decremented. 
+<p>
+
+Another reason for storing a pointer to the counter has to do with the
+batch "flip" logic.  When the RCU code decides that it is time to start a
+new batch, it increments <tt>rcu_ctrlblk.completed</tt>; that, in turn,
+will cause <tt>rcu_read_lock()</tt> to switch to the second per-CPU
+counter, which will start out at zero.  Any new entries into RCU critical
+sections will increment the new counter.
+Meanwhile, any code which was in such a section when the flip happened
+retains a pointer to the old counter.  So, when that code calls
+<tt>rcu_read_unlock()</tt>, the older counter will be decremented.  When
+all of the counters from the old batch reach zero, the kernel knows that
+all references to RCU-protected data from the old batch are gone, and the
+corresponding RCU callbacks can be called.
+
+<p>
+
+Also at flip time, the set of RCU callbacks in <tt>rcu_data.nextlist</tt>
+is moved over to <tt>rcu_data.waitlist</tt>, since those callbacks are now
+waiting for any possible remaining references to go away.  When all of the
+counters for that batch drop to zero, these callbacks are moved to the
+third list (<tt>rcu_data.donelist</tt>) so that they can be invoked
+whenever the kernel decides to get around to it.  That work currently
+happens in a tasklet, but there is another patch queued for 2.6.19 which
+moves that work over to a separate software interrupt handler.
+
+<p>
+With this code in place, code within an RCU critical section can be
+preempted and it will still be possible to know when all references to
+protected data structures are gone.  RCU critical sections still cannot
+sleep, of course, or they could delay the batch flip indefinitely.  But
+they can be pushed out of the way temporarily if a higher-priority process
+needs to run.
+<p>
+
+The overall overhead of the new mechanism is higher, however, since it must
+maintain all of those counters.  For this reason, it is unlikely to ever be
+the default RCU on most systems.  Instead, the plan is to ship two RCU
+implementations, "classic" and "preempt," and allow the person configuring
+the kernel to choose between them.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Read-copy-update</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Realtime</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/201195/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor783880"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Read-copy-update for realtime</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2019 6:07 UTC (Mon)
+                               by <b>firolwn</b> (guest, #96711)
+                              [<a href="/Articles/783880/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="firolwn" />
+                <input type="hidden" name="return" value="/Articles/201195/#CommAnchor783880" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When is the flip time?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/783880/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

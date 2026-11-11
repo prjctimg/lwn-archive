@@ -1,0 +1,1826 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Slowing the flow of core-dump-related CVEs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Slowing the flow of core-dump-related CVEs">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The 6.16 kernel will include a number of changes to how the kernel handles the processing of co [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1023925/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Slowing the flow of core-dump-related CVEs</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 6, 2025</br>
+           </div>
+The 6.16 kernel will include a number of changes to how the kernel handles
+the processing of core dumps for crashed processes.  Christian Brauner <a
+href="https://mastodon.social/@brauner/114592290899392625">explained</a>
+his reasons for doing this work as: "<q>Because I'm a clown and also I had
+it with all the CVEs because we provide a **** API for userspace</q>".  The
+handling of core dumps has indeed been a constant source of
+vulnerabilities; with luck, the 6.16 work will result in rather fewer of
+them in the future.
+<p>
+<h4>The problem with core dumps</h4>
+<p>
+A core dump is an image of a process's data areas — everything except the
+executable text; it can be used to investigate the cause of a crash by
+examining a process's state at the time things went wrong.  Once upon a
+time, Unix systems would routinely place a core dump into a file called
+<tt>core</tt> in the current working directory when a program crashed.  The
+main effects of this practice were to inspire system administrators
+worldwide to remove <tt>core</tt> files daily via <tt>cron</tt> jobs, and
+to make it hazardous to use the name <tt>core</tt> for anything you wanted
+to keep.  Linux systems can still create <tt>core</tt> files, but are
+usually configured not to.
+<p>
+An alternative that <i>is</i> used on some systems is to have the kernel
+launch a process to read the core dump from a crashing process and,
+presumably, do something useful with it.  This behavior is configured by
+writing an appropriate string to <a
+href="https://docs.kernel.org/admin-guide/sysctl/kernel.html#core-pattern">the
+<tt>core_pattern</tt> sysctl knob</a>.  A number of distributors use this
+mechanism to set up core-dump handlers that phone home to report crashes so
+that the guilty programs can, hopefully, be fixed.
+<p>
+This is the "<q>**** API</q>" referred to by Brauner; it indeed has a
+number of problems.  For example, the core-dump handler is launched by the
+kernel as a user-mode helper, meaning that it runs fully privileged in the
+root namespace.  That, needless to say, makes it an attractive target for
+attackers.  There are also a number of race conditions that emerge from this
+design that have led to vulnerabilities of their own.
+<p>
+See, for example, <a
+href="/ml/all/20250529171556.GA9260@localhost.localdomain">this recent
+Qualys advisory</a> describing a vulnerability in Ubuntu's <a
+href="https://wiki.ubuntu.com/Apport"><tt>apport</tt></a> tool and the <a
+href="https://www.freedesktop.org/software/systemd/man/latest/systemd-coredump.html"><tt>systemd-coredump</tt></a>
+utility, both of which are designed to process core dumps.  In short, an
+attacker starts by running a setuid binary, then forcing it to crash at an
+opportune moment.  While the core-dump handler is being launched (a step
+that the attacker can delay in various ways), the crashed process is killed
+outright with a <tt>SIGKILL</tt> signal, then quickly replaced by another
+process with the same process ID.  The core-dump handler will then begin to
+examine the core dump from the crashed process, but with the information
+from the replacement process.
+<p>
+That process is running in its own attacker-crafted namespace, with some
+strategic environmental changes.  In this environment, the core-dump
+handler's attempt to pass the core-dump socket to a helper can be
+intercepted; that allows said process to gain access to the file descriptor
+from which the core dump can be read.  That, in turn, gives the attacker
+the ability to read the (original, privileged) process's memory, happily
+pillaging any secrets found there.  The example given by Qualys obtains the
+contents of <tt>/etc/shadow</tt>, which is normally unreadable, but it
+seems that SSH servers (and the keys in their memory) are vulnerable to the
+same sort of attack.
+<p>
+Interested readers should consult the advisory for a much more detailed
+(and coherent) description of how this attack works, as well as information
+on some previous vulnerabilities in this area.  The key takeaways,
+though, are that core-dump handlers on a number of widely used distributions
+are vulnerable to this attack, and that reusable integer IDs as a way to
+identify processes are just as much of a problem as the pidfd developers
+have been saying over the years.
+<p>
+<h4>Toward a better API</h4>
+<p>
+The solution to this kind of race condition is to give the core-dump
+handler a way to know that the process it is investigating is, indeed, the
+one that crashed.  The 6.16 kernel contains two separate changes toward
+that goal.  The first is <a
+href="https://git.kernel.org/linus/b5325b2a270f">this patch from
+Brauner</a> adding a new format specifier ("<tt>%F</tt>") for the string
+written to <tt>core_pattern</tt>.  This specifier will cause the core-dump
+handler to be launched with a pidfd identifying the crashed process
+installed as file descriptor number three.  Since it is a pidfd, it will
+always refer to the intended process and cannot be fooled by process-ID
+reuse.
+<p>
+This change makes it relatively easy to adapt core-dump handlers to avoid
+the most recently identified vulnerabilities; it has already been
+backported to <a href="/Articles/1023794/">a recent set of stable
+kernels</a>.  But it does not change the basic nature of the
+<tt>core_pattern</tt> API, which still requires the launch of a new, fully
+privileged process to handle each crash.  It is, instead, a workaround for
+one of the worst problems with that API.
+<p>
+The longer-term fix is <a
+href="/ml/all/20250507-work-coredump-socket-v4-0-af0ef317b2d0@kernel.org">this
+series from Brauner</a>, which was also merged for 6.16.  It adds a new
+syntax to <tt>core_pattern</tt> instructing the kernel to write core dumps
+to an existing socket; a user-space handler can bind to that socket and
+accept a new connection for each core dump that the kernel sends its way.
+The handler must be privileged to bind to the socket, but it remains an
+ordinary process rather than a kernel-created user-mode helper, and the
+process that actually reads core dumps requires no special privileges at
+all.  So the core-dump handler can bind to the socket, then drop its
+privileges and sandbox itself, closing off a number of attack vectors.
+<p>
+Once a new connection has been made, the handler can obtain a pidfd for the
+crashed process using the <tt>SO_PEERPIDFD</tt> request for <a
+href="https://man7.org/linux/man-pages/man2/setsockopt.2.html"><tt>getsockopt()</tt></a>.
+Once again, the pidfd will refer to the actual crashed process, rather than
+something an attacker might want the handler to treat like the crashed
+process.  The handler can pass the new <tt>PIDFD_INFO_COREDUMP</tt> option
+to the <a href="992991.html"><tt>PIDFD_GET_INFO</tt> <tt>ioctl()</tt>
+command</a> to learn more about the crashed process, including whether the
+process is, indeed, having its core dumped.  There are, in other words, a
+couple of layers of defense against the sort of substitution attack
+demonstrated by Qualys.
+<p>
+The end result is a system for handling core dumps that is more efficient
+(since there is no need to launch new helper processes each time) and which
+should be far more resistant to many types of attacks.  It may take some
+time to roll out to deployed systems, since this change seems unlikely to
+be backported to the stable kernels (though distributors may well choose to
+backport it to their own kernels).  But, eventually, this particular source
+of CVEs should become rather less productive than it traditionally has
+been.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.16</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Vulnerabilities</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1024160/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1024343"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 15:11 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1024343/">Link</a>] (33 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024343" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>then quickly replaced by another process with the same process ID</blockquote>
+Argh.  Why don't we move to 64-bit process ids, and guarantee that they are not reused except after a reboot?
+
+There are some fields expecting a smaller value, but surely if time_t could become 64 bit, we can do the same for pid_t.
+
+As it stands pretty much any use of process ids has this race condition.  A lot of effort has gone into pidfds, but they will never be used in the long tail of shell scripts and old code.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024343/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024365"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 16:51 UTC (Fri)
+                               by <b>AClwn</b> (subscriber, #131323)
+                              [<a href="/Articles/1024365/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="AClwn" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024365" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+OpenBSD randomizes its PIDs to reduce predictability and to avoid leaking information (i.e. preventing users from subtracting PIDs to determine how many processes had been created in the interim). Randomized PIDs would be incompatible with a no-reuse guarantee because you'd have to store (and search!) a table of previously-used PIDs.<br>
+<p>
+The obvious retort is that Linux doesn't randomize PIDs and it never will, so the only things you lose by extending PIDs to 64 bits are (1) a little bit of space wherever they're stored and (2) an entire class of PID-reuse security vulnerabilities, and that this is a pretty good tradeoff. I have nothing to say to that; I just wanted to mention PID randomization.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024365/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 5:45 UTC (Sat)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1024414/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024414" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I suppose if you had a big enough space for the ids you could randomize and still have them in monotone order.  Just leave random-sized gaps in the sequence. 64 bits might be enough that you could do that and still never run out of ids. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1026393"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2025 9:10 UTC (Sun)
+                               by <b>l0kod</b> (subscriber, #111864)
+                              [<a href="/Articles/1026393/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="l0kod" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1026393" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FYI, Landlock IDs follow this approach. One important difference is that we only need a bijection (i.e. Landlock IDs are not used to get a reference but only to identify an existing object). From the commit description, Landlock IDs have these properties:<br>
+- They are unique during the lifetime of the running system thanks to<br>
+  the 64-bit values: at worse, 2^60 - 2*2^32 useful IDs.<br>
+- They are always greater than 2^32 and must then be stored in 64-bit<br>
+  integer types.<br>
+- The initial ID (at boot time) is randomly picked between 2^32 and<br>
+  2^33, which limits collisions in logs across different boots.<br>
+- IDs are sequential, which enables users to order them.<br>
+- IDs may not be consecutive but increase with a random 2^4 step, which<br>
+  limits side channels.<br>
+<p>
+For more details, see <a href="https://git.kernel.org/torvalds/c/d9d2a68ed44bbae598a81cb95e0746fa6b13b57f">https://git.kernel.org/torvalds/c/d9d2a68ed44bbae598a81cb...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1026393/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1024477"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unique randomized wide PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2025 9:20 UTC (Sun)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/1024477/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024477" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Randomized PIDs would be incompatible with a no-reuse guarantee because you'd have to store (and search!) a table of previously-used PIDs.</span><br>
+<p>
+Um, no.  A Linear Feedback Shift Register (LFSR) that is based on an irreducible polynomial guarantees uniqueness over its entire period, which is near to 2**N.  Just initialize it to a random point in its sequence.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024477/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024479"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unique randomized wide PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2025 10:03 UTC (Sun)
+                               by <b>dezgeg</b> (guest, #92243)
+                              [<a href="/Articles/1024479/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dezgeg" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024479" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would that really help with anything though, given the sequence is still entirely predictable?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024479/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024484"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unique randomized wide PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2025 18:11 UTC (Sun)
+                               by <b>bmenrigh</b> (subscriber, #63018)
+                              [<a href="/Articles/1024484/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bmenrigh" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024484" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah an LFSR wouldn’t be secure. However a customer block cipher (where the block size matches the PID size) eliminates the predictability issue. Just generate a random key at startup.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024484/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024513"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unique randomized wide PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2025 12:00 UTC (Mon)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024513/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024513" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Although it is mildly amusing watching the rediscovery of UUIDs in this thread (hint: it's what Windows uses), it is unnecessary: with the new kernel the pidfd inode number is guaranteed unique per boot, so we have a solution for this now (there's also the boot uuid, so the combination of boot uuid + pidfd inode id gives a universal unique identifier, if that is needed). PIDs can never be changed, as all existing software will break. No, it's not just a matter of "recompiling", existing binaries need to work too with new kernels, so that's not an option. But we are starting to expose pidfd inodes in more places now, so I guess they'll slowly take over for new functionality.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024513/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unique randomized wide PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2025 8:48 UTC (Thu)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1025094/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1025094" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      However, I wonder how userspace can easily determine whether a pidfd inode number comes from a system that guarantees uniqueness.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unique randomized wide PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2025 11:15 UTC (Thu)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1025107/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1025107" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There was a way, I forget the details, but on systems where it's not unique it's a fixed/hardcoded/well-known inode number, because it's an anonymous inode rather than from pidfdfs? Details are fuzzy so I might be getting this wrong<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025454"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unique randomized wide PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 14, 2025 9:45 UTC (Sat)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1025454/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1025454" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I found that you can use fstatfs() on the file descriptor and see if f_type == PID_FS_MAGIC ( 0x50494446; /* "PIDF" */ ). On an elder system it is ANON_INODE_FS_MAGIC (0x09041934)<br>
+<p>
+Note, that although pidfd_open(2) says opening a "/proc/[PID]" directory would be an alternative way to get a PID file descriptor, this is only half true: You can use such a file descriptor with pidfd_* calls, but it is another type of file descriptor with f_type == PROC_SUPER_MAGIC ( 0x9fa0 ) and you can't use the inode number from that kind of file descriptor as a unique process identifier. <br>
+<p>
+I still wish, processes had UUIDs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025454/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2025 16:37 UTC (Mon)
+                               by <b>dsfch</b> (subscriber, #176007)
+                              [<a href="/Articles/1024632/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dsfch" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024632" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+64bit PIDs would be an ABI break, right ? `pid_t` being 32bit is all over glibc &amp; Co. as well as in `&lt;uapi/asm-generic/posix_types.h&gt;` so it's not just a trivial substitute ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1024368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 16:52 UTC (Fri)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024368/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024368" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because it would most likely break everything left and right. With the pidfdfs (say that quickly 3 times in a row) inode we have something close enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1024373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 17:09 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1024373/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024373" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Long numbers SUCK for UI purposes. What would help is a _separate_ handle-type process identifier that is guaranteed to be unique and can be even 128-bit long.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024391"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 20:42 UTC (Fri)
+                               by <b>warrax</b> (subscriber, #103205)
+                              [<a href="/Articles/1024391/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="warrax" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024391" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you ever do anything other than copy/paste PIDs when using the command line (which I assume you mean by UI), I'd be a bit worried. Actually... I think it'd actually be better if it was hard-enough-to-type so that it MUST be copy/pasted. Killing a mistyped PID *should* do nothing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024391/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 20:43 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1024392/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024392" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I absolutely do stuff other than act as a copypaste bot. Including looking at logs, and correlating things across multiple sources. I almost never need to actually kill processes by ID.<br>
+<p>
+Long IDs make that harder.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 5:42 UTC (Sat)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1024413/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024413" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On the other hand, right now if you are looking for a process id in a log file, you don’t have any guarantee that it’s the same process, since pids can be reused. Making them unique has to be better, even if it means the number might be longer. (You’d only get the big numbers on a long-running system that has forked vast numbers of processes, and in that case I suggest you’d particularly benefit from not having a number reused.)<br>
+<p>
+Even in ordinary command line use like “see a process id in top and then kill it” there is a race condition and some danger if pids are not unique. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024415"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 5:53 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1024415/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024415" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; On the other hand, right now if you are looking for a process id in a log file, you don’t have any guarantee that it’s the same process</span><br>
+<p>
+That's true, but in practice infrequent, outside of deliberate attacks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024415/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1024417"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 6:51 UTC (Sat)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1024417/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024417" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I often use them to identify the lines from some process that are interspersed with lines from other related processes. Occasionally, the same PID is a different process later, but only after the last line that is from the same process. It's also useful in REST API server logs: different lines from serving the same request have the same PID, but even if there isn't any PID reuse, the same process generally goes on to serve another request, but not until it's done with the first one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024417/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024359"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 17:38 UTC (Fri)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024359/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024359" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Why don't we move to 64-bit process ids</span><br>
+<p>
+What do you give to a process that still expects a 32-bit pid when the value does not fit?<br>
+And if we provide a 64-bit API while keeping the 32-bit values for a while for backward compatibility, how long should we wait before switching? ...And in the interim, the problem persists, even for applications that did update.<br>
+<p>
+With pidfs, you solve the problem for modern applications *now*, while keeping backward compatibility for older code forever (or until we choose to remove support for 32-bit PIDs).<br>
+<p>
+<p>
+<span class="QuotedText">&gt; surely if time_t could become 64 bit, we can do the same for pid_t.</span><br>
+<p>
+You do know how a painful that switch was (and still is, since not everything code base has been updated yet), right?  <br>
+Remember that this is not just about updating the kernel API, but also updating code wherever pids are used (internally in applications, or externally, i.e. storage, network, ...)<br>
+<p>
+<p>
+<span class="QuotedText">&gt; they will never be used in the long tail of shell scripts and old code</span><br>
+<p>
+If they won't be updated to pidfs, why do you believe they will be updated for 64-bit pids?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024359/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024406"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 2:48 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1024406/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024406" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+PID namespaces are already a thing, so you could (in theory) migrate a system gradually rather than all at once. In practice, I'm not sure how useful that is to any distro that is not NixOS. But I suppose it probably does also work for Flatpak-shaped things?<br>
+<p>
+<span class="QuotedText">&gt; What do you give to a process that still expects a 32-bit pid when the value does not fit?</span><br>
+<p>
+Under the assumption that we're migrating individual PID namespaces rather than a system-wide setting, if a process is in a PID namespace that uses 64-bit PIDs, it should have been migrated to the new API already (or else userspace should not have enabled 64-bit PIDs for this namespace). If it nevertheless asks for a 32-bit PID by calling into the old 32-bit interface, then it gets -ENOSYS or some equivalent, and probably crashes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024406/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024449"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 19:29 UTC (Sat)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024449/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024449" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; PID namespaces </span><br>
+<p>
+That looks like a big big can of worms.<br>
+<p>
+How do non-updated apps and updated ones mix? Say an updated shell trying to start an old app or vice-versa?<br>
+Or do you expect the user to use different launcher/shell and choose which to interact with depending on what type of apps they use? And have different binaries with different pid size for apps used in both (shell, launcher, UI, ssh, ...)?<br>
+How do apps communicates pids with each other if they are not in the same namespace? Say someone uses an updated "top" command and thus gets 64-bit pids, then try to use the shell's builtin "kill" command which is still expecting 32-bit pid?<br>
+<p>
+What/who decides what namespace to use? The kernel? The shell/launcher? The user? How does it/he/she know what namespace to use?<br>
+<p>
+Namespaces work well if a whole ecosystem can be independent from everything else wrt to that namespace. They also work because only values changes, not the types, the binaries are the same (i.e. a shell in one namespace can work as well in another, they will just print different values for pids, or see different files, ...)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024449/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024465"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2025 3:16 UTC (Sun)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1024465/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024465" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The idea would be, broadly speaking, all namespaces are 64-bit capable, but by default they only generate PIDs in the 32-bit compatible range. You can use the new 64-bit API for everything and it always works, and you can use the old API if you're in a namespace that is limited to the 32-bit range. A 64-bit namespace may contain 32-bit children, but not vice-versa.<br>
+<p>
+The answers to most of your more specific questions can be summarized as "the distro can do what it sees fit, and if it chooses to do nothing, then it continues to use 32-bit PIDs for everything indefinitely."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024465/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024471"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2025 3:20 UTC (Sun)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1024471/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024471" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Addendum: Some of your questions are better answered by referring you to pid_namespaces(7), which see.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024471/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024412"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 5:38 UTC (Sat)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1024412/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024412" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A shell script needs no update for 64-bit process ids. It’s just a slightly longer string than before. A C program using pid_t may just need a recompile, though of course there will be some code putting a process id into an int (I imagine a compiler warning can mostly catch this). <br>
+<p>
+Rewriting a C program to use pidfds is a much bigger task, and rewriting a shell script with them is essentially impossible. <br>
+<p>
+Scripting languages like Perl, Python, and Tcl would usually just need the interpreter itself recompiled for 64-bit pids and existing scripts will work unchanged. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024412/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024445"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 18:58 UTC (Sat)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024445/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024445" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; A shell script needs no update for 64-bit process ids</span><br>
+<p>
+Most won't, but a script can still make assumption on the pid size, e.g. it only contains 10 digits.<br>
+<p>
+<span class="QuotedText">&gt; A C program using pid_t may just need a recompile</span><br>
+<p>
+Keyword "may".<br>
+And even for the simple cases, this depends a lot on how 64-bits pids would be implemented, e.g. would this be a compilation flag? Or a "#define USE_PID64"? Or would this be changing all the "pid_t"/"getpid()"/... to "pid64_t"/"getpid64()"/...?<br>
+<p>
+And in the non-simple cases, the issues are the same for 64-bits pids and pidfds (apps using pid in a "smart" way will be majorly broken, pid64/pidfd cannot be passed as-is when communicating a 32-bit pid apps, ...). <br>
+<p>
+<p>
+<span class="QuotedText">&gt; I imagine a compiler warning can mostly catch this</span><br>
+<p>
+Only in simple cases, maybe. And AFAIK, currently, compilers will not complain when storing a in64_t in an int32_t without the "-Wconversion" flag (which is not enabled even when using "-Wall -Wextra -pedantic"). And even "-Wconversion" will not complain if there is a cast involved. <a href="https://godbolt.org/z/z3jGbYb86">https://godbolt.org/z/z3jGbYb86</a><br>
+<p>
+<span class="QuotedText">&gt; there will be some code putting a process id into an int </span><br>
+<p>
+Or putting it in the low bits of an int64_t then use the high bits for something else.<br>
+Or assume that a struct containing a pid has a specific size. Or that fields in that struct after the pid are at specific offsets.<br>
+Or ... (don't underestimate what people do when they assume something will be true forever)...<br>
+<p>
+Basically, one can look at what happened during then transition from 32-bit to 64-bit platforms, the switch to large file (&gt;4GB), and the Y38 problems, to see all the possible issues than can arise.<br>
+<p>
+<span class="QuotedText">&gt; Rewriting a C program to use pidfds is a much bigger task</span><br>
+<p>
+I'm not so sure. Since a pidfd is actually a pid_t type, and depending on what pid/pidfd are used for, updating could boil down to calling "pidfd_xyz()" instead of "xyz()", or passing a "XYZ_PIDFD" flag.<br>
+<p>
+For the rest, that can be a big task to fix in either case. For instance, if the problem is someone combining the pid with something else in an int64_t, then a pidfd will still work fine, while the pid64 will need a redesign.<br>
+Or people might make the same assumption that you did, that pid64 is just a recompilation, then spend a lot of time tracking down bugs. While with pidfs, they would spend time looking at each call sites first, fixing the problems before they arise and need tracking.<br>
+Which one will take more time will depend on the applications. Sometimes it's faster to think things through first, some others it faster to just try&amp;fix. This very much apply here IMHO.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024445/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1028685"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2025 13:51 UTC (Fri)
+                               by <b>judas_iscariote</b> (guest, #47386)
+                              [<a href="/Articles/1028685/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="judas_iscariote" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1028685" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  A C program using pid_t may just need a recompile</span><br>
+<p>
+You are assuming a properly carefully wrritten program..there is still code out there that assumes pids are 16 bit and store them in a ushort..There is incorrect casting, there is code not using pid_t at all.. I mean there is a lot of buggy software out there...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1028685/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1024448"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 19:05 UTC (Sat)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1024448/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024448" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      &gt; Why don't we move to 64-bit process ids, and guarantee that they are not reused except after a reboot</p>
+
+Or a UUID for every process. While pidfs inode numbers (or a hypothetical 64bit pid)  are good for the lifetime of the system, you sometimes want to persist identifiers for longer than that, for example in a database or on another system. We have this problem for a cluster queuing system where the job controller is designed to be restartable and has to identify which of its jobs, which are stored in a sql database, are still alive and which aren't. Our current solution is so ugly that I don't want to mention it and our next solution might be to consider boot_id + pidfs inode number. Any better ideas someone?
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024448/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024451"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 19:37 UTC (Sat)
+                               by <b>snajpa</b> (guest, #73467)
+                              [<a href="/Articles/1024451/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="snajpa" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024451" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think if you keep adding more context from /proc/&lt;pid&gt;, you should arrive at sufficiently reliable input for some good enough hash function. Start time of the process can't be changed by the process itself AFAIK. Just that along with the pid could do the trick, IMHO. Save the hash when the task is started, maybe assert that it hasnt changed while doing a dev build shutdown... cca what I would do<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024451/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024515"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2025 12:14 UTC (Mon)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024515/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024515" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Start time of the process can't be changed by the process itself AFAIK. Just that along with the pid could do the trick, IMHO.</span><br>
+<p>
+It very much doesn't, so-much-so that relying on that combination for uniqueness caused several CVEs in the past. The start time is not granular enough, and attackers are able to cause a PID + start time clash at their leisure. This is why PIDFDs exist, and we use them when we need to uniquely identify processes for any security-relevant reason (and also more and more non-security-relevant too)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024515/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024648"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2025 20:10 UTC (Mon)
+                               by <b>snajpa</b> (guest, #73467)
+                              [<a href="/Articles/1024648/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="snajpa" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024648" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Are you able to link simply just a single CVE that proves it isn't sufficient in the real practical world? You know, hash algos are bound to have collisions too, yet we use them. Taking an argument to an extreme isn't helpful.<br>
+<p>
+Besides, how are you going to use pidfds in this specific case you are replying to? Much confidence in your reply, let's see if you can back that confidence up with something.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024648/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024649"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2025 20:26 UTC (Mon)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024649/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024649" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can start from CVE-2019-6133 and continue from there.<br>
+<p>
+The combination of pidfd inode id plus boot uuid can uniquely identify a process across machines/reboots/everything, so it is suitable for that use case.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024649/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2025 16:11 UTC (Tue)
+                               by <b>snajpa</b> (guest, #73467)
+                              [<a href="/Articles/1024748/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="snajpa" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024748" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm gonna solve this by muting you, as your whole reaction is just to prove... you can't read or fit into context of what you're replying to, I can only feel your need to be right every single time we interact here. Context be damned, right...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Process ids again</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2025 16:13 UTC (Tue)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024749/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024749" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Suit yourself. You asked for a CVE, it's been provided. You asked for a solution for a problem, it's been provided. If you can't handle receiving answers, maybe stop asking questions?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024357"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 16:27 UTC (Fri)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024357/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024357" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The end result is a system for handling core dumps that is more efficient (since there is no need to launch new helper processes each time)</span><br>
+<p>
+Having a process running all the time (and thus using RAM) for the (hopefully) rare crash is not what I would call a "more efficient" use of resources. <br>
+<p>
+Either way is probably efficient (a helper in stand-by should be using very little resources, while starting a new process is likely very cheap compared to handling a core dump) but I don't know which would be "more efficient", much less if it's significantly so (*).<br>
+<p>
+(*) and if it is, it's probably context dependent too, i.e. if one is memory-bound or CPU+IO bound<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024357/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 16:51 UTC (Fri)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024367/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024367" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Meet my little friend the <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html">https://www.freedesktop.org/software/systemd/man/latest/s...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 17:37 UTC (Fri)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024372/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024372" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What of it? Sure, systemd is already be running anyway, so it wouldn't use more resource (nitpick: arguably it does since it will have one more socket to track), but it then needs to start a new process to handle a crash, like core_pattern did, so it's no more efficient than before.<br>
+<p>
+The only case I can imagine where the new method would be more efficient is if one already has a crash handler daemon, and use a core_pattern helper to pass the data from the kernel to the daemon. In this case the helper can now be skipped and the core dump can go directly from the kernel to the daemon. But I doubt this is common usage, if it even exists anywhere, since it would combine the worst of both methods.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024377"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 17:54 UTC (Fri)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024377/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024377" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; but it then needs to start a new process to handle a crash, like core_pattern did, so it's no more efficient than before.</span><br>
+<p>
+It is, as there's one fewer process. It's already socket activated - the umh only receives the core, it doesn't do any analysis, as it's dangerous. The umh forwards the core to a different socket-activated process, that is ran at minimum privilege, which does the analysis.<br>
+Now we can remove the middleman.<br>
+<p>
+<span class="QuotedText">&gt; But I doubt this is common usage, if it even exists anywhere, since it would combine the worst of both methods.</span><br>
+<p>
+It's the most common usage (whether via apport or systemd-coredump or something else), as the article writes just writing files around from the kernel is really bad, and only legacy (or manual) setups do that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024377/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 19:25 UTC (Fri)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024379/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024379" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess we are not arguing at the same level.<br>
+<p>
+If your crash manager already has a persistent process, like systemd does, then yes, you become more efficient. Having a persistent process for them was a sunk cost since systemd already has a persistent process for monitoring services. But the gain in efficiency for them comes from their implementation choices, from the kernel API now matching their usage better, it does not come from a more efficient API. I'm arguing the latter, you're arguing the former.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024394"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2025 20:49 UTC (Fri)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024394/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024394" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; If your crash manager already has a persistent process, like systemd does</span><br>
+<p>
+It doesn't<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024394/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024403"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 0:41 UTC (Sat)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024403/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024403" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;&gt; If your crash manager already has a persistent process, like systemd does</span><br>
+<span class="QuotedText">&gt;</span><br>
+<span class="QuotedText">&gt; It doesn't</span><br>
+<p>
+Uh? Systemd has a persistent process, it's called "systemd" daemon, aka "init", aka PID 1. What do you think monitors the various systemd units, including sockets?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024403/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024431"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 11:46 UTC (Sat)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024431/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024431" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, really? I had no idea! /s<br>
+<p>
+It's not an _extra_ one as you implied. There's no extra cost, it's already there for other purposes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024431/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024510"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2025 10:04 UTC (Mon)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1024510/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024510" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Every additional feature/thing that systemd has to watch for consumes another little bit of memory though, and probably another thing that sits in a list or other DS that has to be scanned through regularly.<br>
+<p>
+Worth it, for me I'd say yes, and I doubt anyone could notice that 1 additional feature, but you can't dismiss the argument others have on the basis there are no extra resources used.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024510/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024511"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2025 10:48 UTC (Mon)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1024511/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024511" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Once again: there are no extra resources used. There is already a systemd-coredump.socket, and there always was, as it's trivial to verify.<br>
+<p>
+With this feature it's now kernel -&gt; socket, instead of kernel -&gt; usermode helper -&gt; socket.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024511/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024419"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 8:41 UTC (Sat)
+                               by <b>james</b> (guest, #1325)
+                              [<a href="/Articles/1024419/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="james" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024419" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>but it then needs to start a new process to handle a crash, like core_pattern did, so it's no more efficient than before.</blockquote>
+Is this really the sort of efficiency we should be optimising for? I mean, by definition we've just had a program crash: this should not be a common occurrence!
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024419/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024437"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More efficient?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 15:23 UTC (Sat)
+                               by <b>Nahor</b> (subscriber, #51583)
+                              [<a href="/Articles/1024437/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Nahor" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024437" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Is this really the sort of efficiency we should be optimising for?</span><br>
+<p>
+Probably not, but the article does assert the new API is "more efficient (since there is no need to launch new helper processes each time)". I question that (at least a generalization, since it's true for the particular case of systemd, because systemd-coredump's main part is already socket-based, so now it can just drop the core_pattern helper part).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024437/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1024421"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Get the kernel out of this business</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 9:51 UTC (Sat)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1024421/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024421" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Crash dumping is something userspace can do all by itself --- consider breakpad and crashpad. Wire up a signal handler; make direct system calls to fork and execve a helper; ptrace your parent. Now you can dump the process without the kernel's help, the usual way, with normal privileges. The whole kernel-driven core dump mechanism is more trouble than it's worth. libc can provide a default handler that approximates what we have today if we really need it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024421/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Get the kernel out of this business</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 16:31 UTC (Sat)
+                               by <b>jwadams</b> (subscriber, #123485)
+                              [<a href="/Articles/1024440/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jwadams" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024440" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Getting this right completely in process is extremely hard to do (using only async-safe interfaces, possibly racing with other signal handlers trying to do the same thing, etc), and has a good chance of destroying the state you were trying to report.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1024461"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Get the kernel out of this business</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2025 23:30 UTC (Sat)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1024461/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1024160/#CommAnchor1024461" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Getting this right completely in process is extremely hard </span><br>
+<p>
+Yet it's done. Every major Android app uses some kind of in-process signal-based crash reporting system and it works fine. You barely have to do anything in an async-signal-safe way: just use direct system calls like in <a href="https://github.com/linux-on-ibm-z/linux-syscall-support/blob/master/linux_syscall_support.h">https://github.com/linux-on-ibm-z/linux-syscall-support/b...</a>, vfork, and execve a crash handler that ptrace it parent and run normal signal-unsafe code at its leisure to dump the crashing process --- probably to a format better than traditional coredumps, one like minidump.<br>
+<p>
+Speaking of minidumps: Windows crash dumps are all-userspace and work just fine. <br>
+<p>
+At the most, I'd approve of the Linux kernel having a mechanism to signal some kind of registered crash daemon over IPC when another process crashes. This way, the crashing process doesn't need a signal handler or any async-signal-safe code at all. Linux should just delete all the code that produces actual core dumps and delegate the dirty work to userspace.<br>
+<p>
+<span class="QuotedText">&gt; possibly racing with other signal handlers</span><br>
+<p>
+Safely sharing signal handlers is a problem all its own. Besides: futex works fine even in async-signal-safe code.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1024461/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,298 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The Grand Unified Flow Cache [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The Grand Unified Flow Cache">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Grand Unified Flow Cache is one of those items which shows up as a bullet in networking sum [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/194020/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The Grand Unified Flow Cache</h1>
+<div class="Byline">[Posted August 7, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+The Grand Unified Flow Cache is one of those items which shows up as a
+bullet in networking summit presentations; the networking folks appear to
+know what it means, but they have been somewhat remiss in documenting the
+idea for the rest of us.  This concept has returned in the context of the
+network channels discussion, and enough hints have been dropped to let your
+editor - who is not afraid to extrapolate a long way from minimal data -
+get a sense for what the term means.  Should it be implemented, the GUFC
+could bring significant changes to the entire networking stack.
+<p>
+
+The net channel concept requires that the kernel be able to quickly
+identify the destination of each packet and drop it into the proper
+channel.  Even better would be to have a smart network adapter perform that
+classification as the packet arrives, taking the kernel out of that part of
+the loop altogether.  One way of performing this classification would be to form a
+tuple from each packet and use that tuple as a lookup key in some sort of
+fast data structure.  When a packet's tuple is found in this structure (the
+flow cache), its fate has been determined and it can be quickly shunted off
+to where it needs to be.
+<p>
+
+This tuple, as <a href="/Articles/194461/">described</a> by Rusty Russell,
+would be made up of seven parameters:
+<p>
+<ul>
+<li> The source IP address
+<li> The destination IP address
+<li> A bit indicating whether the source is local
+<li> A bit indicating whether the destination is local
+<li> The IP protocol number
+<li> The source port
+<li> The destination port
+</ul>
+<p>
+These numbers, all together, are sufficient to identify the connection to
+which any packet belongs.  A quick lookup on an incoming packet should,
+thus, yield a useful destination (such as a network channel) for that
+packet with no further processing.
+<p>
+
+Features like netfilter mess up this pretty picture, however.  Within the
+kernel, netfilter is set up such that every packet is fed to the
+appropriate chain(s).  As soon as every packet has to go through a common
+set of hooks, the advantage of the GUFC is lost.  Rusty's description of
+the problem is this:
+<p>
+<div class="BigQuote">
+	The mistake (?) with netfilter was that we are completely general:
+	you will see all packets, do what you want.  If, instead, we had
+	forced all rules to be of form "show me all packets matching this
+	tuple" we would be in a [position to] combine it in a single lookup
+	with routing etc.
+</div>
+<p>
+
+So, the way around this problem would be to change the netfilter API to
+work better with a grand unified flow cache.  Rules could be written
+in terms of the above tuples (with wild cards allowed), and only packets
+which match the tuples need pass through the (slow) netfilter path.  That
+would allow packets which are not of interest to the filtering code to
+bypass the whole mechanism - and the decision could be made in a single
+lookup.
+<p>
+
+Often, however, a packet filtering decision can be made on the basis of the
+tuple itself - once a packet matches the tuple, there is no real need to
+evaluate it against the rule separately.  So, for example, once the
+connection tracking code has allowed a new connection to be established,
+and a tuple describing that connection has been added to the cache, further
+filtering for that connection should not be required.  If netfilter and the
+flow cache worked together effectively, the per-packet overhead could be
+avoided in many cases.  
+<p>
+
+One way this might work would be to have a set of callbacks invoked for
+each tuple which is added to the flow cache.  A module like netfilter could
+examine the tuple relative to the current rule set and let the kernel know
+if it needs to see packets matching that tuple or not.  Then, packets could
+be directed to the appropriate filters without the need for wildcard
+matching in the tuple cache.
+<p>
+
+There is a small cost to all of this:
+<p>
+<div class="BigQuote">
+	Of course, it means rewriting all the userspace tools,
+	documentation, and creating a complete new infrastructure for
+	connection tracking and NAT, but if that's what's required, then so
+	be it.
+</div>
+<p>
+Rusty has never let this sort of obstacle stop him before, so all of this
+might just happen.  
+<p>
+But probably not anytime soon.  There's a long list of questions which need
+to be answered before a serious implementation attempt is made.  Whether
+it would truly perform as well as people hope is one of them; these schemes
+can get quite a bit slower once all of the real-world details are factored
+in.  Rule updates could be a challenge; an administrator who has just
+changed packet filtering rules is unlikely to wait patiently while the new
+rules slowly work their way into the cache.  Finding a way to get the
+hardware to help in the classification process will not be entirely
+straightforward.  And so on.  But it would seem that there are a number of
+interesting ideas in this area.  That is bound to lead to
+good stuff sooner or later.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Grand Unified Flow Cache</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Networking/Channels</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/194443/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor194784"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Grand Unified Flow Cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2006 3:08 UTC (Thu)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/194784/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="flewellyn" />
+                <input type="hidden" name="return" value="/Articles/194443/#CommAnchor194784" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      From the sound of things, this could result in a set of filtering tools that (at least externally) <br>
+would look a bit more like OpenBSD's pf.<br>
+<p>
+Since pf is about the only thing in OpenBSD which I think they did better than in Linux, this <br>
+would be very welcome for my favorite OS kernel.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/194784/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor196607"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Grand Unified Flow Cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2006 8:10 UTC (Wed)
+                               by <b>csamuel</b> (<b>&#x272D; supporter &#x272D;</b>, #2624)
+                              [<a href="/Articles/196607/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="csamuel" />
+                <input type="hidden" name="return" value="/Articles/194443/#CommAnchor196607" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Rusty has a post about <a 
+href="http://ozlabs.org/~rusty/index.cgi/2006/08/15#2006-08-15">pf versus 
+iptables</a> on his blog now, which sheds some light on his thoughts.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/196607/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor194951"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Grand Unified Flow Cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2006 21:16 UTC (Thu)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/194951/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smoogen" />
+                <input type="hidden" name="return" value="/Articles/194443/#CommAnchor194951" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I think that in the case of rule changes, a flush of the cache would be needed when changes are done. I am guessing that depending on how the cache is setup.. one could do a partial flush versus a full one.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/194951/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor195879"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Grand Unified Flow Cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2006 11:22 UTC (Thu)
+                               by <b>renox</b> (guest, #23785)
+                              [<a href="/Articles/195879/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="renox" />
+                <input type="hidden" name="return" value="/Articles/194443/#CommAnchor195879" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Have they found a way to workaround the 'swapped process' problem?<br>
+<p>
+I.e if you send a packet to a big process swapped to the disk, the ack could be sent quite a long time afterwards..<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/195879/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

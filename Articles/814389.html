@@ -1,0 +1,933 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The Let's Encrypt certificate revocation scare [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="The Let's Encrypt certificate revocation scare">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Let's Encrypt project has made real strides in helping to ensure that every web site can us [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/813895/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The Let's Encrypt certificate revocation scare</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>March 10, 2020</br>
+           </div>
+<p>
+The <a href="https://letsencrypt.org/">Let's Encrypt</a> project has made
+real strides in helping to ensure that every web site can use the encrypted
+HTTPS protocol; it has provided TLS certificates at no charge that are
+accepted by most or all web browsers. Free certificates accepted by the
+browsers are something that was difficult to find 
+prior to the advent of the project in 2014; as of the end of February, the
+project has <a
+href="https://letsencrypt.org/2020/02/27/one-billion-certs.html">issued
+over a billion certificates</a>.  But a bug that was recently
+found in the handling of <a
+href="https://letsencrypt.org/docs/caa/">Certificate Authority
+Authorization</a> (CAA) by the project put roughly 2.6% of the active
+certificates—roughly three million—at risk of immediate revocation.  As might be
+expected, that caused a bit of panic in some quarters, but it turned out
+that the worst outcome was largely averted.
+</p>
+
+<p>
+Let's Encrypt allows web-site operators to sign up for its service to sign
+their TLS certificates, so that browsers will recognize the
+certificate as valid.  Let's Encrypt acts as a Certificate Authority (CA) and its keys
+are signed by a CA (IdenTrust) that is carried in the root certificate store for the
+browsers.  That means a browser can follow the signature chain from a root
+certificate it trusts all the way to the certificate of the site, thus
+establishing the validity of the keys contained in the certificate.
+</p>
+
+<p>
+In order for a site to get a certificate from Let's Encrypt, its
+administrator needs to show that they control the domain in question.
+That's typically done by adding a challenge value provided by Let's Encrypt
+to either the DNS information for the domain or via a URL that can be
+retrieved from
+the domain's web server.  The administrator proves that they have the needed
+access, thus show that the domain is under their control.
+</p>
+
+<p>
+Administrators who wish to restrict the kinds of certificates that can be
+issued for their domains can add CAA records to their DNS configuration.
+Those can be used to disallow certain providers, such as Let's Encrypt,
+from issuing certificates for a domain or portion of one.  For example, the
+web site administrator at "subdomain.example.com" could not receive a
+certificate from Let's Encrypt or some other CA simply by adding a web page
+to the server they control if the administrator of the top-level
+"example.com" domain disallowed that with CAA records.  Some sites may also
+want to restrict the CAs that can be used; some CAs offer 
+services beyond just signing, which may be required for security or
+regulatory compliance.
+</p>
+
+<p>
+So when Let's Encrypt is checking a site's validity, it needs to consult
+the CAA records as well, which turns out to be where the bug was.  Let's
+Encrypt allows users to wait up to 30 days after proving they control the
+domain before requesting a certificate.  But the CAA information needs to be
+checked within eight hours of issuance, so a recheck is done if needed.  As
+<a
+href="https://community.letsencrypt.org/t/2020-02-29-caa-rechecking-bug/114591">reported</a>
+by Josh Aas, the executive director of the <a
+href="https://www.abetterinternet.org/">Internet Security Research
+Group</a>  
+(the entity behind Let's Encrypt), the <a
+href="https://github.com/letsencrypt/boulder">Boulder CA server</a> had a
+problem in the recheck code:
+<div class="BigQuote">
+The bug: when a certificate request contained N domain names that needed
+CAA rechecking, Boulder would pick one domain name and check it N
+times. What this means in practice is that if a subscriber validated a
+domain name at time X, and the CAA records for that domain at time X
+allowed Let’s Encrypt issuance, that subscriber would be able to issue a
+certificate containing that domain name until X+30 days, even if someone
+later installed CAA records on that domain name that prohibit issuance by
+Let’s Encrypt.
+</div>
+</p>
+
+<p>
+Before the bug was fixed, 
+certificates issued by Let's Encrypt based on a certificate request with
+multiple domains in it may not have had their domain's CAA records checked
+properly.  Those affected certificates were thus not in compliance.
+</p>
+
+<p>
+That led to a <a
+href="https://community.letsencrypt.org/t/revoking-certain-certificates-on-march-4/114864">message</a>
+on March&nbsp;3 from a Let's Encrypt staff member saying that any of the affected
+certificates that had not been renewed by March&nbsp;5 would be revoked.
+That would mean browsers would stop accepting the certificates from those
+three million sites.  But by March&nbsp;4, Aas <a
+href="https://community.letsencrypt.org/t/2020-02-29-caa-rechecking-bug/114591/3">said</a>
+that 1.7 million certificates had been renewed, which meant the existing,
+possibly invalid, certificates for those sites could be revoked without
+causing any problems.  Of the remaining certificates, only 445 were for
+sites where the CAA record would disallow certificates being issued by
+Let's Encrypt; those were forcibly revoked, but the rest would not be
+revoked, at least immediately.
+</p>
+
+<p>
+Let's Encrypt certificates are only issued for 90 days and must be renewed
+before the end of that time period.  In the worst case, it means that
+around 1.3
+million sites would have invalid certificates, at least in a technical
+sense, for up to three months.  The <a
+href="https://cabforum.org/">CA/Browser Forum</a> (CA/B), which sets the standards
+that CAs need to comply with, does not consider certificates to be valid if
+the CAA records were not checked within eight hours before issuance.  So
+even though none of those sites currently have a CAA record prohibiting the
+issuance of Let's Encrypt certificates, the existing set are not valid under the rules.
+The timeline set by CA/B for revocations is what drove the original
+March&nbsp;5 deadline.
+</p>
+
+<p>
+A Mozilla <a
+href="https://bugzilla.mozilla.org/show_bug.cgi?id=1619179">bug report</a>
+was filed by Aas to request an exemption from the requirement to revoke all
+of the affected certificates.  Wayne Thayer <a
+href="https://bugzilla.mozilla.org/show_bug.cgi?id=1619179#c1">pointed</a>
+Aas at the Mozilla <a
+href="https://wiki.mozilla.org/CA/Responding_To_An_Incident#Revocation">guidelines
+on revocation</a>, which notes that the company does not grant exceptions
+but recognizes that there may be times when "<q>revoking misissued
+certificates within the prescribed deadline may cause significant
+harm</q>".  He also said that Mozilla requests some more
+information if a CA decides not to revoke the certificates.
+</p>
+
+<p>
+Jacob Hoffman-Andrews <a
+href="https://bugzilla.mozilla.org/show_bug.cgi?id=1619179#c7">replied</a>
+with additional details to explain why Let's Encrypt felt that it would be
+detrimental to do the bulk revocation.  He said that users who encountered
+an error when browsing to an affected site would likely "<q>look up
+instructions on how to bypass revocation checks</q>"; once doing so they
+might well forget to re-enable those checks, so they would
+miss other revocations.  It could also trigger "warning blindness", where
+users see so many warnings that they stop paying attention to them.  But he
+noted a larger problem, as well:
+<div class="BigQuote">
+By reviewing previous incident reports and analyzing our current situation,
+a common root cause of failure to timely revoke is that Subscribers are not
+able to replace certificates on the BR- [<a
+href="https://cabforum.org/baseline-requirements-documents/">baseline
+requirements</a>] mandated timelines (24 hours and 5
+days, depending on the issue).
+<p>
+Most Subscribers are not able to field round-the-clock incident response,
+so improving the speed of manual replacement processes cannot be the
+answer. Increasing public acceptance of revoked certificate errors also
+cannot be the answer, because that would undermine public faith in the web
+PKI. Reducing the incidence and scope of CA errors is an important part of
+the solution, and we have laid out some plans to that effect at
+<a
+href="https://bugzilla.mozilla.org/show_bug.cgi?id=1619047">https://bugzilla.mozilla.org/show_bug.cgi?id=1619047</a>. However,
+responsible 
+systems design requires layered responses, and it is possible that we, or
+another CA, will have a similar-sized incident in the future despite our
+best practices and best efforts.
+</div>
+</p>
+
+<p>
+He said that Let's Encrypt plans to work on an open protocol to notify users of
+automated CAs of an imminent revocation in such a way that those
+certificates can be automatically renewed.  In a world where even the
+smallest web sites have TLS certificates so that they can offer encrypted
+communications to their users, it is certainly important for them to be
+able to maintain their certificates—even without staff dedicated to
+handling such things.  Those who are wondering can consult a <a
+href="https://checkhost.unboundtest.com/">site</a> where
+users of Let's Encrypt certificates can check whether they
+need an update.
+</p>
+
+<p>
+The browser makers have the final authority on what root certificates they
+will accept, but they need to be cognizant of the impact removing one would
+have.  If one or more of the big players decides that the steps taken by
+Let's Encrypt were not sufficient, they could remove the IdenTrust root
+certificate from their root store, though that would affect far more than
+just Let's Encrypt certificates.  In that unlikely scenario, IdenTrust
+might decide (or be pressured) to revoke the Let's Encrypt certificates
+instead.  No actions of that sort have been mooted—at least publicly. The
+havoc caused by such a move would be monumental.
+</p>
+
+<p>
+One possible downside of the widespread availability of gratis certificates from
+Let's Encrypt is the creation of a monoculture. Concentrating TLS
+certificate issuance in a single organization might be worrisome, whether
+it is Let's Encrypt or one of the commercial providers.  We are far from
+that situation now, but this incident does show that a problem found in a
+large number of issued certificates may leave any CA in an unenviable
+position—certificates that do not expire for a year or more would only add
+to the mess.
+</p>
+
+<p>
+Overall, Let's Encrypt did an excellent job in a rather compressed time
+frame to identify, fix, and partly mitigate what was, in truth, just a
+technical violation of the specifications for CAs.  It seems rather
+unlikely that many—perhaps any—of the remaining unrevoked certificates were actually
+issued for domains that they should not have been.
+That is not to say that
+technicalities should be ignored, but it is clear that sometimes there are
+overarching considerations as well.  
+The bug and the problems it caused are
+unfortunate, for sure, but things seem to be moving in the right direction
+at this point.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Certificate Authorities (CAs)</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Encryption/Web</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/814389/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor814512"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 17:41 UTC (Tue)
+                               by <b>jani</b> (subscriber, #74547)
+                              [<a href="/Articles/814512/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jani" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814512" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While I found it annoying initially, I must applaud Let's Encrypt's original decision to limit certificate validity to just 90 days. That has practically forced everyone to automate the renewal process. And it obviously mitigates problems like this as well, and even more so after automated renewal on revocation.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814512/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor814514"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 17:45 UTC (Tue)
+                               by <b>logang</b> (subscriber, #127618)
+                              [<a href="/Articles/814514/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="logang" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814514" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why doesn't certbot periodically check that its current certificate is revoked (or, even better, on an about to be revoked list) and try to get a new one if it is? Then when things like this happen Let's Encrypt doesn't need to rely on millions of system admins to be proactive and manually renew the certificate for them. They can simply add all the offending certificates to a list and have the tools handle the problem for them. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814514/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814518"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 18:29 UTC (Tue)
+                               by <b>TomH</b> (subscriber, #56149)
+                              [<a href="/Articles/814518/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="TomH" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814518" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Like <a href="https://github.com/certbot/certbot/pull/7829">https://github.com/certbot/certbot/pull/7829</a> you mean ;-)<br>
+<p>
+I believe the idea of a "about to be revoked" status is also being discussed but that obviously needs changes to ACME to provide a way to report that status to clients.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814518/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814532"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 21:33 UTC (Tue)
+                               by <b>Felix</b> (subscriber, #36445)
+                              [<a href="/Articles/814532/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Felix" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814532" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This change is part of certbot 1.3 which was released 7 days ago so maybe it's already working on many production machines.<br>
+<p>
+The new version is available via Fedora's updates-testing repos already. I hope CentOS/RHEL (via Fedora EPEL) will follow soon-ish.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814532/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814671"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2020 17:48 UTC (Thu)
+                               by <b>kpfleming</b> (subscriber, #23250)
+                              [<a href="/Articles/814671/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kpfleming" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814671" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I keep Certbot up to date on my systems by installing it from PyPI; it's simple to do and avoids delays in getting new features like this (or important bug fixes).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814671/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor814521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 18:56 UTC (Tue)
+                               by <b>rahvin</b> (guest, #16953)
+                              [<a href="/Articles/814521/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahvin" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814521" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even early on a typical distro install puts a cron job in to check nightly the status of the certificate.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814524"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 19:21 UTC (Tue)
+                               by <b>gevaerts</b> (subscriber, #21521)
+                              [<a href="/Articles/814524/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gevaerts" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814524" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That typically only checks for the expiration date of the certificate itself, which won't change if it's revoked.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814524/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814593"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2020 20:29 UTC (Wed)
+                               by <b>rahvin</b> (guest, #16953)
+                              [<a href="/Articles/814593/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rahvin" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814593" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Unless I'm mistaken when certbot checks the expiration it also reviews the revocation list that updates when certbot connects. I did this just the other day on a new server and I remember the step where it downloads and checks the revoke list. <br>
+<p>
+That was one of their smartest decisions with Let's Encrypt, right behind the 90 day certs, in that revoke lists were fully integrated into the process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814593/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2020 0:35 UTC (Thu)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/814605/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyphar" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814605" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a new feature, merged and released last week (<a href="https://github.com/certbot/certbot/pull/7829">https://github.com/certbot/certbot/pull/7829</a>).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor814525"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 19:27 UTC (Tue)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/814525/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jthill" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814525" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>That is not to say that technicalities should be ignored, but it is clear that sometimes there are overarching considerations as well</blockquote>
+
+Yes. The rules are there to stop accidents (or worse) happening.
+
+The right response when something bad happens anyway, as it will, is to mitigate the damage and decide whether and how to beef up the rules and procedures. Somebody didn't do their preflight checks, that means the plane shouldn't be up there but does not mean we shoot the plane out of the sky.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814525/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor814533"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 21:40 UTC (Tue)
+                               by <b>arekm</b> (guest, #4846)
+                              [<a href="/Articles/814533/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arekm" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814533" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My initial impression was that LE will redo CAA checks at current time and revoke only these certificates that don't match current CAA records.<br>
+<p>
+Unfortunately they revoked all these certs regardless of current CAA state. Email notification failed (I guess because emails subscription was disabled due to LE sending other, useless in our case, emails).<br>
+<p>
+When we noticed this then reissuing required certificates took double digit number of hours due to very low limits (only 300 orders per 3h and the queue was already full of other pending orders; yes we have tons of certs on single account).<br>
+<p>
+Not happy. It wasn't perfectly handled by LE and by us here :/<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814533/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814539"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2020 23:44 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/814539/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814539" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; My initial impression was that LE will redo CAA checks at current time and revoke only these certificates that don't match current CAA records.</font><br>
+<p>
+The CA/B requirements specifically prohibit this behavior. CAA checks, as the article notes, must be performed within 8 hours of issuance. DNS has no history, so the only way to be sure that a certificate was CAA-compliant at time of issuance is to check at time of issuance.<br>
+<p>
+Realistically, nobody is going around changing their CAA settings every time they want to issue a certificate, so this is unlikely to matter. But CA/B does not allow CAs to say "eh, it's probably fine." If the certificate is non-compliant, it's supposed to be revoked.<br>
+<p>
+I've also heard people suggest that CAA should be checked by browsers instead of or in addition to CAs, but this is basically negative DANE, and negative DANE requires the end user to have real DNS (i.e. they should be able to successfully query arbitrary DNS records without interference by their ISP or anyone else). If they don't, then you either have to hard-fail the connection (which makes the modern web unusable for those users) or else you allow any MitM attacker to disable the check by blocking the lookup (so you might as well not do the check at all).<br>
+<p>
+Unfortunately, many users do not have real DNS, because many ISPs and governments "know" that you only "have to" resolve A and AAAA records (and perhaps one or two others) for the "internet" to "work" as far as a typical non-technical end user is concerned, so if you look up a TXT record or something more exotic, it may simply fail or return nonsense. This is also one of the motivating factors in DoH deployment - most intermediaries take a "hands off" approach to anything that looks like an HTTPS stream, because you can't do much with them anyway.<br>
+<p>
+<font class="QuotedText">&gt; When we noticed this then reissuing required certificates took double digit number of hours due to very low limits (only 300 orders per 3h and the queue was already full of other pending orders; yes we have tons of certs on single account).</font><br>
+<p>
+I would like to respectfully suggest that, if you really have that many certificates, and really need to process them that quickly, and both of those things are hard "my business is in danger of going broke" requirements, you might consider paying for them, or (if possible) changing your system in such a way that you can relax one or both of those requirements. Let's Encrypt is a free service. It does not come with a Service-Level Agreement, which it sounds like you need.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814539/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814674"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2020 18:00 UTC (Thu)
+                               by <b>arekm</b> (guest, #4846)
+                              [<a href="/Articles/814674/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arekm" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814674" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ok, CA/B requirements explain why it was done this way.<br>
+<p>
+About limits. We would go multi-account and do not have limit problem at all but <a href="https://letsencrypt.org/docs/rate-limits/">https://letsencrypt.org/docs/rate-limits/</a> recommends "using one account for many customers" which turns out to be a big trap.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814674/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor814672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2020 17:51 UTC (Thu)
+                               by <b>kpfleming</b> (subscriber, #23250)
+                              [<a href="/Articles/814672/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kpfleming" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814672" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Email notification failed (I guess because emails subscription was disabled due to LE sending other, useless in our case, emails).</font><br>
+<p>
+I've been using LE certs for years, and I've never once received an email from them which wasn't timely and appropriate and specifically about my usage of their service. If you're blocking email from LE, that's quite unfortunate.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814673"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2020 17:57 UTC (Thu)
+                               by <b>arekm</b> (guest, #4846)
+                              [<a href="/Articles/814673/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="arekm" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814673" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Emails about expiring certificates are useless here.<br>
+<p>
+Emails about certificates being revoked are very important.<br>
+<p>
+If you don't want first type of emails you also didn't get second type (at least I didn't).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814673/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814690"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2020 21:13 UTC (Thu)
+                               by <b>kpfleming</b> (subscriber, #23250)
+                              [<a href="/Articles/814690/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kpfleming" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814690" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's fair, I suppose, except in my case if I get an email about an expiring certificate it's because my automatic renewal process is failing and I want to know about that.<br>
+<p>
+The only other 'expiring certificate' messages I get which are not useful are those for certificates I am no longer using; I have not investigated to see if there's a way to tell LE that a certificate is no longer in use and should just be immediately expired and forgotten.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814690/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor814543"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2020 0:40 UTC (Wed)
+                               by <b>kf6nux</b> (guest, #124569)
+                              [<a href="/Articles/814543/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kf6nux" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814543" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My company was able to identify the ~1000 certs of ours that were affected and get them renewed before the (second) deadline.  It wasn't easy and I know others (such as Akamai) were having difficulty.  I'm glad LE decided to revisit the original decision. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814543/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor814746"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2020 8:24 UTC (Fri)
+                               by <b>amarao</b> (guest, #87073)
+                              [<a href="/Articles/814746/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="amarao" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814746" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This case should illustrate that centralization is evil regardless of the best intentions of its creation.<br>
+<p>
+Some authority with ability to disrupt two-digit percentage of internet... Is this a distopian future? No, it's a grim PKI reality.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814746/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2020 1:17 UTC (Sat)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/814873/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pabs" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814873" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Has anyone considered creating an EU based equivalent to Let's Encrypt?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor814880"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Let's Encrypt certificate revocation scare</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2020 6:19 UTC (Sat)
+                               by <b>zdzichu</b> (subscriber, #17118)
+                              [<a href="/Articles/814880/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zdzichu" />
+                <input type="hidden" name="return" value="/Articles/814389/#CommAnchor814880" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+BuyPass (<a href="https://www.buypass.com/ssl/products/acme">https://www.buypass.com/ssl/products/acme</a>) is in Norway. There are probably more, Wikipedia lists 8 ACME-compatible cert providers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/814880/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1378 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Toward fast, containerized, user-space filesystems [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Toward fast, containerized, user-space filesystems">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Filesystems are complex and performance-sensitive beasts.  They can also present security conce [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1045244/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Toward fast, containerized, user-space filesystems</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 6, 2025</br>
+           </div>
+Filesystems are complex and performance-sensitive beasts.  They can also
+present security concerns.  Microkernel-based systems have long pushed
+filesystems into separate processes in order to contain any vulnerabilities
+that may be found there.  Linux can do the same with the <a
+href="https://docs.kernel.org/filesystems/fuse/">Filesystem in
+Userspace</a> (FUSE) subsystem, but using FUSE brings a significant
+performance penalty.  Darrick Wong is working on ways to eliminate that
+penalty, and he has <a
+href="/ml/all/20251029002755.GK6174@frogsfrogsfrogs">a massive patch
+set</a> showing how ext4 filesystems can be safely implemented in user space by
+unprivileged processes with good performance.  This work has the potential
+to radically change how filesystems are managed on Linux systems.
+
+<p>
+One of the biggest challenges faced by a filesystem implementation is the
+need to parse and maintain a complex data structure that can be entirely
+under an attacker's control.  It is possible to compromise almost any Linux
+filesystem implementation with a maliciously crafted filesystem image.
+While most filesystems are robust against corrupted images in general,
+<i>malicious</i> corruption is another story, and most filesystem
+developers only try so hard to protect against that case.  For this reason,
+mounting a filesystem, which would otherwise be an inherently safe thing to
+do when certain protections (against overmounting system directories or
+adding setuid binaries, for example) are in place, remains reserved to
+privileged users.
+<p>
+If the management of filesystem metadata is moved to user space, though,
+the potential for mayhem from a malicious image is greatly reduced.  FUSE
+allows exactly that, but the overhead of passing all filesystem I/O over
+the connection to the user-space FUSE server makes FUSE filesystems slow.
+Wong's attempt to address this problem is somewhat intimidating at first
+look; it is a collection of five independent patch topics, most of which
+have multiple sub-parts.  It comprises 182&nbsp;patches in total.  There is
+a lot of complexity, but the core idea is relatively simple.
+<p>
+<h4>Iomap</h4>
+<p>
+Filesystems move a lot of data around.  Much of the added cost of a FUSE
+filesystem comes from the need to pass data between the kernel and the FUSE
+server as filesystem operations are requested.  If a process writes some
+data to a file on a FUSE filesystem, the kernel must pass that data to the
+user-space FUSE server to implement that write; the server will, almost
+certainly, then pass the data <i>back</i> to the kernel to actually land it
+in persistent storage.  An obvious way to improve this situation would be
+to somehow keep the data movement within the kernel, and just have the FUSE
+server tell the kernel where blocks of data should be read from or written
+to.  That would allow the FUSE server to handle the metadata management
+while removing the extra cost from the I/O path.
+<p>
+In the end, much of a filesystem's job consists of maintaining mappings
+between logical offsets within files and physical locations on persistent
+storage.  Once that is done, file I/O boils down to using those mappings to
+move blocks of data back and forth — a task that is independent of any
+given filesystem.  (Of course, every filesystem developer reading this text
+is now seething at this extreme oversimplification; there is little to be
+done for that.)  The kernel has offered various mechanisms for managing
+this mapping, including <a href="930173.html">buffer heads</a>, which
+were part of the first public release of the Linux kernel.
+<p>
+In more recent times, though, this mapping task is supported in the kernel
+by the <a href="https://docs.kernel.org/filesystems/iomap/">iomap
+layer</a>.  It was first <a
+href="https://git.kernel.org/linus/ae259a9c8593">introduced</a> by
+Christoph Hellwig (based on older code from the XFS filesystem) for the 4.8
+release in 2016, and other filesystems have been slowly making use of it
+since then.  The iomap layer abstracts out a lot of details, simplifying
+matters on the filesystem side.  At its core are <a
+href="https://docs.kernel.org/filesystems/iomap/design.html#struct-iomap-ops">two
+callbacks</a> that filesystems must provide:
+<p>
+<pre>
+    int (*iomap_begin)(struct inode *inode, loff_t pos, loff_t length,
+    		       unsigned flags, struct iomap *iomap,
+		       struct iomap *srcmap);
+    int (*iomap_end)(struct inode *inode, loff_t pos, loff_t length,
+		     ssize_t written, unsigned flags, struct iomap *iomap);
+</pre>
+<p>
+Without getting into the details, <tt>iomap_begin()</tt> requests the
+filesystem to specify the on-disk mapping for the given <tt>inode</tt> over
+the range of <tt>length</tt> bytes starting at <tt>pos</tt>.  When the
+kernel is done with the mapping, it will inform the filesystem with a call
+to <tt>iomap_end()</tt>.  In between, the kernel may well use that mapping
+to move data between memory and the filesystem's storage device.
+<p>
+<a
+href="/ml/all/176169810144.1424854.11439355400009006946.stgit@frogsfrogsfrogs">Sub-Part
+4</a> of Wong's series adds two new operations, <tt>FUSE_IOMAP_BEGIN</tt>
+and <tt>FUSE_IOMAP_END</tt> to the FUSE API.  These operations correspond to
+the two callbacks above, allowing a user-space filesystem to build an I/O
+mapping in the kernel, which can then use that mapping to perform many I/O
+operations directly, without having to involve the user-space server
+further.  While the longer-term goal is to enable unprivileged filesystem
+mounts, the ability to use iomap in FUSE is restricted to processes that
+have the <tt>CAP_SYS_RAWIO</tt> capability.
+<p>
+Providing basic iomap access can speed FUSE servers by avoiding the need to
+move file data between the kernel and user space, but there is more to be
+done to reach a high level of performance.  One step is in <a
+href="/ml/all/176169812012.1426649.16037866918992398523.stgit@frogsfrogsfrogs">this
+series</a>: it allows the kernel to cache iomap mappings created by the
+FUSE server.  That reduces the number of round trips to the server
+required, but it is also needed to correctly manage mappings in cases where
+I/O might cause them to change.  Another performance improvement comes with
+<a
+href="/ml/all/176169811533.1426244.7175103913810588669.stgit@frogsfrogsfrogs">this
+series</a>, which moves much of the management of timestamps and
+access-control lists into the kernel. 
+<p>
+Finally, <a
+href="/ml/all/176169812502.1427080.11949246505492038165.stgit@frogsfrogsfrogs">this
+short series</a> allows a privileged mount helper to set a special bit
+enabling the FUSE server process to use the iomap capability, regardless of
+whether it has <tt>CAP_SYS_RAWIO</tt>.  That makes it possible for a server
+process to run in an unprivileged mode, opening up the possibility of
+implementing filesystems in unprivileged processes that are unable to
+compromise the system.
+<p>
+<h4>User space</h4>
+<p>
+That, however, is only the kernel side of the equation.  There are another
+five sub-parts of the series that add the equivalent support to the <a
+href="https://github.com/libfuse/libfuse?tab=readme-ov-file#libfuse">libfuse</a>
+user-space library.  Yet another six sub-parts add support for the new FUSE
+features to <a
+href="https://www.man7.org/linux/man-pages/man1/fuse2fs.1.html">fuse2fs</a>,
+the server program that implements the ext4 filesystem (and ext3 and ext2
+as well) in user space.  As Wong points out in <a
+href="/ml/all/176169817482.1429568.16747148621305977151.stgit@frogsfrogsfrogs">sub-part&nbsp;1</a>,
+the results are encouraging:
+<p>
+<blockquote class="bq">
+	The performance of this new data path is quite stunning: on a warm
+	system, streaming reads and writes through the pagecache go from
+	60-90MB/s to 2-2.5GB/s.  Direct IO reads and writes improve from
+	the same baseline to 2.5-8GB/s.  FIEMAP and SEEK_DATA/SEEK_HOLE now
+	work too.  The kernel ext4 driver can manage about 1.6GB/s for
+	pagecache IO and about 2.6-8.5GB/s [for direct I/O], which means
+	that fuse2fs is about as fast as the kernel for streaming file IO.
+</blockquote>
+<p>
+He does also acknowledge that the results for random buffered I/O are not
+as good at this point.
+<p>
+The patch series includes a fair amount of support for running unprivileged
+FUSE filesystem servers, further containing any
+fallout from a compromised (or malicious) FUSE server.  The whole series
+ends with <a
+href="/ml/all/176169819804.1433624.11241650941850700038.stgit@frogsfrogsfrogs">a
+33-patch sub-part</a> adding testing support for ext4 under FUSE.
+<p>
+<h4>Prospects</h4>
+<p>
+This is a lot of work that offers some obvious benefits, but it is also a
+lot for the filesystem developers to absorb.  Even so, Wong said in the
+cover letter that he would like to merge these patches for the 6.19 kernel
+release.  That seems rather ambitious.  Hellwig <a
+href="/ml/all/aQHf3UGaURFzC17U@infradead.org">asked</a> for the series to
+be split up and made easier to review; it is not clear whether Wong intends
+to do that.  He has not gotten around to documenting the iomap changes,
+though that work must surely be at the top of his to-do list.  And, of
+course, all of this work will need to be reviewed, and likely revised,
+before it can be merged.
+<p>
+So, in summary, it would be somewhat surprising to see these changes
+actually land for 6.19.  But, given the obvious value that this work
+brings, Wong may well succeed in upstreaming it in the not-too-distant
+future.  If his results bear out in wider usage, distributors and system
+integrators could start shipping systems with FUSE-implemented filesystems,
+which would be a significant change from how Linux systems have worked
+since the beginning.  Linux may never be a microkernel, but it may soon
+look rather more microkernel-like than it does now.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/In user space</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1044432/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1045429"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 18:47 UTC (Thu)
+                               by <b>vivo</b> (subscriber, #48315)
+                              [<a href="/Articles/1045429/">Link</a>] (32 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vivo" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045429" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would be interested to see a ZFS implementation since some kernel developers seems to be pretty hostile to link that non GPL filesystem to the kernel. A Fuse fast implementation would make everybody separated and happy.<br>
+<p>
+Also nice would be to have GPU drivers in userspace those beast are often rather buggy in my experience<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045429/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Data transforms in the fast path</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 19:39 UTC (Thu)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1045435/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045435" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ZFS, BTRFS, and bcachefs all do data transformation in the fast path.  This means that it isn’t possible for the kernel to send userspace buffers to disk without modification.  Instead, a copy must be made for checksumming, encryption, and/or compression.<br>
+<p>
+However, the algorithms used for these are all well-known, implemented in the kernel, and intended to be secure against maliciously crafted input.  While compression does have some attack surface, passing malicious data to the cryptographic or checksumming code is definitely okay.  Therefore, this could be extended to allow userspace to ask the kernel to perform an operation on the data without having to actually access the data.<br>
+<p>
+I don't know how much this helps, though.  It's not safe to pass buffers to these functions that may be concurrently modified, so you have to make a copy anyway.  At this point, exposing the data to userspace for transformation might not be a big overhead.  Userspace could then use direct I/O to write data to the underlying storage without any more copies.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046444"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Data transforms in the fast path</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 11:18 UTC (Fri)
+                               by <b>Lennie</b> (subscriber, #49641)
+                              [<a href="/Articles/1046444/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lennie" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046444" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+" Instead, a copy must be made for checksumming, encryption, and/or compression."<br>
+<p>
+This sounds like you could make an API for io_ring to handle it ? big maybe.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046444/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046447"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Data transforms in the fast path</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2025 11:46 UTC (Fri)
+                               by <b>Lennie</b> (subscriber, #49641)
+                              [<a href="/Articles/1046447/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Lennie" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046447" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe I should say: BPF instead ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046447/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1045439"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2025 19:52 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1045439/">Link</a>] (28 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045439" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; since some kernel developers seems to be pretty hostile to link that non GPL filesystem to the kernel</span><br>
+<p>
+That's an odd way of phrasing "care about the fact that ZFS is incompatible with the GPL". This is a problem on the ZFS end, originating from its original release and license, not a problem on the Linux end.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045439/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045458"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 0:24 UTC (Fri)
+                               by <b>muase</b> (subscriber, #178466)
+                              [<a href="/Articles/1045458/">Link</a>] (14 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="muase" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045458" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which would be a useful argument, if Linux had an alternative that would fill that niche. Don't get me wrong – I'm not blaming Linux for the license problematic; that's definitely Sun's fault (but: also not the fault of the OpenZFS developers).<br>
+<p>
+<span class="QuotedText">&gt; This is a problem on the ZFS end, originating from its original release and license, not a problem on the Linux end</span><br>
+<p>
+But I disagree on this stance, It is a huge problem on the Linux end too, because up until today there is literally no first-class filesystem that combines modern features in a stable way. Cow, snapshots, online-dedup, encryption, compression, datasets, raid-likes, ... – all those are useful features for a variety of systems; and something where Linux is decades behind by now.<br>
+<p>
+And I think a hostile stance is an understandable interpretation here. ZFS in the kernel wouldn't work; that's clear – but there are a lot of possible compromises. You could give (unofficial) API guarantees, you could do cooperative development, or maybe at least coordinate breaking changes to affected APIs etc. – I mean, we have shims for closed-source GPU drivers nowadays; but friendly cooperation from one open-source-community to another to maybe not unnecessarily break a DKMS module is impossible now?<br>
+<p>
+Let's be real – the ZFS-on-Linux problems are not due to license mismatch; they're because some parts have zero interest in any form of even soft-cooperation here. And that's fair – but IMO it's also fair to call that out.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045458/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045459"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 0:46 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1045459/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045459" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think it's reasonable to characterize the response as "hostile" in the first place. ZFS is incompatible with the Linux kernel. Anything derived from it will never be in the Linux kernel.<br>
+<p>
+If someone wanted to write a clean-room implementation, that'd be awesome. But in the meantime, the list of features ZFS has is entirely immaterial to the question of "cooperation". ZFS can't ever be in the Linux kernel until someone writes a clean-room implementation under a compatible license.<br>
+<p>
+Meanwhile, even *nvidia* of all people has managed to transition away from proprietary kernel drivers.<br>
+<p>
+<span class="QuotedText">&gt; You could give (unofficial) API guarantees, you could do cooperative development, or maybe at least coordinate breaking changes to affected APIs etc</span><br>
+<p>
+<a href="https://docs.kernel.org/process/stable-api-nonsense.html">https://docs.kernel.org/process/stable-api-nonsense.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045459/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045462"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 2:43 UTC (Fri)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1045462/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045462" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel - Christoph, really - are pretty hostile to out of tree code.<br>
+<p>
+He wasted no time with yanking an EXPORT_SYMBOL() on code I originally authored, and nacks patches over EXPORT_SYMBOL() vs. EXPORT_SYMBOL_GPL()...<br>
+<p>
+I totally get being hostile to the likes of VMWare, but ZFS? Really?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045462/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045684"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 20:37 UTC (Fri)
+                               by <b>tim-day-387</b> (subscriber, #171751)
+                              [<a href="/Articles/1045684/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tim-day-387" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045684" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If an EXPORT_SYMBOL() isn't used by in-tree code, they ought to be removed. It's not great for out-of-tree filesystems, but I'm skeptical any other approach would be sustainable. I don't think this makes the kernel hostile to out-of-tree modules per se. Rather, people that primarily work on the mainline kernel aren't interested in spending time accommodating out-of-tree modules.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045684/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045690"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Removing EXPORT_SYMBOLs not used by in-tree code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 23:39 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1045690/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045690" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The critical thing about removing these "unused" symbols is that if there's no in-tree user, there's no easy way for the maintainer to confirm that a "should be OK" change doesn't affect users. You're increasing the amount you ask from "compile the kernel as a whole, test it with something that uses this symbol" to "track down an out-of-tree user of this symbol, compile the kernel, compile the out-of-tree user, fix any issues unrelated to your change that prevent you compiling the out-of-tree user, test it with the user of this symbol".
+<p>We already have issues with maintainers not coping with the amount of labour they're asked to do for each change and burning out; increasing the amount of labour asked of them doesn't seem like a good path to avoiding that.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045690/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045705"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Removing EXPORT_SYMBOLs not used by in-tree code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 8, 2025 13:31 UTC (Sat)
+                               by <b>muase</b> (subscriber, #178466)
+                              [<a href="/Articles/1045705/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="muase" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045705" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The critical thing about removing these "unused" symbols is that if there's no in-tree user, there's no easy way for the maintainer to confirm that a "should be OK" change doesn't affect users</span><br>
+<p>
+I think if that happens by accident/oversight, or for other convincing reasons, that wouldn't be a problem. In the end, out-of-tree code is on its own – and that makes sense; the kernel cannot and should not be responsible to track those projects as well.<br>
+<p>
+It tends to get political – and some people might consider it hostile – if it looks like it is done on purpose, despite knowing that the symbol is still in use by a very popular external project, and there are no convincing reasons about it why that needs to be done now, instead of giving a reasonable transition time/alternative.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045705/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045718"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Removing EXPORT_SYMBOLs not used by in-tree code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 8, 2025 15:54 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1045718/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045718" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One of the nice things about working in the Linux kernel is that you can change an API at any time: you just have to go change every user in the tree. This is one of many reasons the kernel decided a long time ago, and repeatedly reconfirmed, that there is no stable API or even semi-stable API for out-of-tree modules. That way, any fixes can be checked by doing a build. <br>
+<p>
+It's hard enough to refactor code, or clean up technical debt, or introduce new APIs and move kernel code over to them, or introduce new features and plumb them through existing code, when just dealing with all the code in tree.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045718/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1045738"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Removing EXPORT_SYMBOLs not used by in-tree code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 9, 2025 11:44 UTC (Sun)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1045738/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045738" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nobody is asking maintainers to do that - we're talking about maintainers going out of their way to break out of tree code.<br>
+<p>
+<a href="https://lkml.org/lkml/2024/4/3/850">https://lkml.org/lkml/2024/4/3/850</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045738/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046226"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Removing EXPORT_SYMBOLs not used by in-tree code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 19:09 UTC (Wed)
+                               by <b>tim-day-387</b> (subscriber, #171751)
+                              [<a href="/Articles/1046226/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tim-day-387" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046226" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the fullness of time, I don't think any EXPORT_SYMBOL() symbol will be available to non-GPL out-of-tree modules. I think that's inevitable. I'm skeptical that out-of-tree modules will be able to use EXPORT_SYMBOL() symbols at all (except for trivial modules) with the addition of symbol namespaces [1]. Unless these mechanisms get reworked (doubtful), I think out-of-tree projects have to accept this future and plan around it.<br>
+<p>
+If these restrictions were implemented all at once, distros would likely patch the kernel to relax enforcement. So it'll likely happen slowly over the coming years, during the course of normal code changes.<br>
+<p>
+[1] <a href="https://www.kernel.org/doc/html/latest/core-api/symbol-namespaces.html">https://www.kernel.org/doc/html/latest/core-api/symbol-na...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046226/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046232"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Removing EXPORT_SYMBOLs not used by in-tree code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 19:32 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046232/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046232" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That would completely destroy any GPL-enforcement legal arguments. Imagine being the judge in a case like that - "You were making a distinction before between symbols that would make a user a derived work and generic symbols, and now you're trying to claim any user is automatically a derived work?"<br>
+<p>
+It'd get laughed out of the courtroom.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046232/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1045465"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 5:33 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1045465/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045465" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  But in the meantime, the list of features ZFS has is entirely immaterial to the question of "cooperation".</span><br>
+<p>
+Why?<br>
+<p>
+<span class="QuotedText">&gt; ZFS can't ever be in the Linux kernel until someone writes a clean-room implementation under a compatible license.</span><br>
+<p>
+The comment you're replying to already explains that "cooperation" does not entail putting ZFS "in the Linux kernel," so this is a non sequitur.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045465/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1045682"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 19:49 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1045682/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045682" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Which would be a useful argument, if Linux had an alternative that would fill that niche.</span><br>
+<p>
+For a long time I struggled to understand the value of "new generation" filesystems like COW, built-in volume management, etc. Then I struggled to "sell" it to others. Eventually I found this excellent documentation:<br>
+<p>
+<a href="https://illumos.org/books/zfs-admin/gbcik.html#gbcik">https://illumos.org/books/zfs-admin/gbcik.html#gbcik</a><br>
+<span class="QuotedText">&gt; This chapter discusses some significant differences between ZFS and traditional file systems. Understanding these key differences can help reduce confusion when using traditional tools to interact with ZFS</span><br>
+<p>
+I'm guessing most of the new concepts explained there are very similar to the ones in other modern filesystems like btrfs, bcachefs, etc.<br>
+<p>
+(Eventually I bookmarked that page because search engines struggled to find it for some unknown reason)<br>
+<p>
+It would be fantastic if FUSE can in the future provide not just better security and crash isolation but also better "licence isolation", release cadence isolation, temper isolation, better support for Conway's law, etc. Modularity is not just good for security, very far from it.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045682/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045992"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2025 23:41 UTC (Mon)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1045992/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045992" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think there's no reason why userspace filesystems can't be as fast as in kernel, but it's going to take a lot of work to get there. <br>
+<p>
+The iomap approach is not useful for any filesystem that does integrity, replication, compression - any of the interesting things modern filesystems do.<br>
+<p>
+We need zero copy to/from the pagecache, conceptually not unlike how IOMMUs are used - but done with temporary per-cpu mappings (thus your filesystem server threads are pinned to each core).<br>
+<p>
+A key insight is that it's not syscalls or even context switches that are expensive these days (tagged TLBs have been around awhile), it's the IPI from a cross core context switch - this stuff can be made fast. <br>
+<p>
+The hardest part will be direct IO - to make that fast you need userspace programs talking to the fileserver directly with L4 style IPC, which is a combination of ring buffers and directly context switching to the server, bypassing the scheduler - Linux never got switch_to().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045992/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1046094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 11, 2025 23:04 UTC (Tue)
+                               by <b>jmalcolm</b> (subscriber, #8876)
+                              [<a href="/Articles/1046094/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jmalcolm" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046094" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It is a huge problem on the Linux end too, because up until today there is literally no first-class filesystem that combines modern features in a stable way.</span><br>
+<p>
+Are we not going to talk about the bcachefs situation. Becasue that was clearly the answer to having a true ZFS competitor in Linux. Sad Kent got it pulled.<br>
+<p>
+bcachefs is at least license compatible though. So, you at least have the option of shipping it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2025 1:52 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1046099/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046099" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could we get our facts straight?<br>
+<p>
+There's was a total lack of engineering standards, drama, even over such basic matters as shipping bugfixes and supporting users. <br>
+<p>
+bcachefs as DKMS may not be ideal, but it's better than the previous situation and means I'm no longer losing my last grasp on sanity. <br>
+<p>
+I get that everyone here as attached to the prestige of the kernel and sees it as a failure for it to not be in - and it is - but all I care about is getting users something reliable and shipping solid code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1045470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">We get it!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 7:47 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/1045470/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smurf" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045470" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could we please not go off on a GPL-vs-CDDL and who's-the-bad-guy-here tangents?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1045496"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2025 11:33 UTC (Fri)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1045496/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045496" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Without rehashing previous discussions around this in prior stories, as a matter of factual accuracy and for clarity, the ZFS is compatible with the GPL. I.e., there is no infringement of the ZFS if you link ZFS code with GPL code. It is the GPL which - many say - does not allow ZFS code to be linked with GPL code (unless the GPL copyright holders do not object).<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045496/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 8, 2025 9:14 UTC (Sat)
+                               by <b>dottedmag</b> (subscriber, #18590)
+                              [<a href="/Articles/1045698/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dottedmag" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045698" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have no idea about the GPL/CDDL compatibility (sorry, I fell asleep reading about it back when the issue just appeared), however I see a logic error in this argument. Taken to the extreme it says that if my license says that you must sacrifice a kitten every morning to continue using the software then it's a failure of GPL that the GPL code can't be combined with my code.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045818"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2025 11:32 UTC (Mon)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1045818/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045818" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't see any value in that analogy. There are no additional, onerous conditions in the CDDL. There are conditions to create a sort of "patent MAD" - dealing with patent trolls being something the GPLv2 doesn't really tackle, and an issue that the later GPLv3 also tries to address (though, with less clarity, IMH and NAL Opinion). Note that Sun had been the target of patent shake-downs a number of times in its history - from IBM in early days, to Kodak in 2004 - and defending against patent trolls was, I suspect, a fairly major concern of legal in Sin.<br>
+<p>
+To simplify the point here, the CDDL is generally more permissive than the GPLv2. The bits that cause issues for GPLv2 code are not unreasonable of themselves.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045818/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045830"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2025 13:44 UTC (Mon)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1045830/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045830" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm wondering why we spend so much time talking about licenses at all.<br>
+<p>
+ZFS isn't getting included in the kernel repository absent some form of release from Oracle, and that's unlikely to ever happen; but it's still an open source, community based project with a lot of usage - and that's what we all want, right?<br>
+<p>
+There are ways we could be working better together even despite the license incompatibilities.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045830/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2025 16:00 UTC (Mon)
+                               by <b>amacater</b> (subscriber, #790)
+                              [<a href="/Articles/1045953/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="amacater" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045953" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would be really helpful if Oracle would consider relicensing ZFS in its entirety (and some other products like Virtualbox) or transferring them properly to another foundation under a FLOSS licence. <br>
+<p>
+[And no, OpenOffice transfer to Apache doesn't count - if Oracle had effectively transferred the whole thing to LibreOffice the world might have been better - this was asked for at the time].<br>
+<p>
+Oracle shares some of its letters with ogre :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045968"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2025 16:24 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1045968/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045968" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The OpenOffice transfer to Apache DOES count, apart from the terrible side-effects of causing a load of make-work for LibreOffice to rebase onto the Apache version, and for the horror story that is the ongoing security disaster of an almost unmaintained "Genuine OpenOffice".<br>
+<p>
+The difference between the current world and the world we would have had - as far as LibreOffice is concerned - is pretty much nil.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045968/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1045998"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDLv2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 11, 2025 8:40 UTC (Tue)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/1045998/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pabs" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045998" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oracle can't solve this problem entirely. They could get very close if they released a GPL-compatible CDDLv2. Then the original ZFS code and older OpenZFS versions would be compatible. Newer OpenZFS versions contain code that is not copyright by Oracle and is licensed CDDLv1-only. I guess that OpenZFS wouldn't be willing to remove that code in order to become GPL-compatible either.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045998/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046043"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDLv2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 11, 2025 14:49 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1046043/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046043" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The CDDL includes an upgrade clause: <br>
+<p>
+<span class="QuotedText">&gt; 4.2. Effect of New Versions.You may always continue to use, distribute or otherwise make the Covered Software available under the terms of the version of the License under which You originally received the Covered Software. If the Initial Developer includes a notice in the Original Software prohibiting it from being distributed or otherwise made available under any subsequent version of the License, You must distribute and make the Covered Software available under the terms of the version of the License under which You originally received the Covered Software. Otherwise, You may also choose to use, distribute or otherwise make the Covered Software available under the terms of any subsequent version of the License published by the license steward.</span><br>
+<p>
+Did OpenZFS include code that explicitly *prohibits* the use of subsequent versions of the license? If not, a CDDLv2 could completely solve the problem. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046043/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1046093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDLv2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 11, 2025 22:02 UTC (Tue)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/1046093/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pabs" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046093" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, prohibiting upgrades is what I meant by CDDLv1-only.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1047158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDLv2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2025 12:16 UTC (Thu)
+                               by <b>Conan_Kudo</b> (subscriber, #103240)
+                              [<a href="/Articles/1047158/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Conan_Kudo" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1047158" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Who the heck did that and where?!
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1047158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1045973"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2025 17:48 UTC (Mon)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1045973/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045973" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is a terrible tragedy that ZFS was not licensed under a GPL compatible license. <br>
+<p>
+I've made this comment many many times before, but this wasn't cause Sun wanted that outcome, rather because of disagreement over exactly which GPL compatible licence to go with between Sun management and Solaris senior engineers. The tragedy of the compromise - which was no one's preferred outcome AFAIK - was they had Sun legal draught a new licence (which fulfilled a goal Sun legal had I think, as they would have been banging on about patent risks to management and wanting to address that). No one got what they really wanted, not in Sun, not outside Sun.<br>
+<p>
+It's a real tragedy. But it's never going to be undone by Oracle I would think.<br>
+<p>
+So.. Linux needs it owns next-gen, self-checking-and-self-correcting file-system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045973/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045991"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">incredibly nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2025 23:22 UTC (Mon)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/1045991/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="koverstreet" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1045991" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+but does the kernel want it? :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045991/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1046097"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Redoxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 11, 2025 23:08 UTC (Tue)
+                               by <b>jmalcolm</b> (subscriber, #8876)
+                              [<a href="/Articles/1046097/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jmalcolm" />
+                <input type="hidden" name="return" value="/Articles/1044432/#CommAnchor1046097" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would love to see the possibility of using Redoxfs on Linux with reasonable performance. It has been designed to be a usermode filesystem even on its host OS. It works with FUSE today but that of course means that it is very slow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1046097/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

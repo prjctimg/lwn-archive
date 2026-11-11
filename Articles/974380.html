@@ -1,0 +1,273 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Memory-allocation profiling for the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Memory-allocation profiling for the kernel">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Optimizing the kernel's memory use is made much easier if developers have an accurate idea of h [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/973889/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Memory-allocation profiling for the kernel</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 21, 2024</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2024/">LSFMM+BPF</a>
+</div>
+Optimizing the kernel's memory use is made much easier if developers have
+an accurate idea of how memory is being used, but the kernel's
+instrumentation is not as good as it could be.  When Suren Baghdasaryan and
+Kent Overstreet <a href="932402.html">presented</a> their
+memory-allocation profiling work, which is meant to address this
+shortcoming, at the 2023 Linux Storage, Filesystem, Memory Management, and
+BPF Summit, their objective was uncontroversial but the proposed solution
+ran into opposition that played out at length on the mailing lists (<a
+href="/ml/linux-kernel/20240212213922.783301-1-surenb@google.com/">example</a>)
+over the last year.  So it may be a bit surprising that, when the two
+returned to the memory-management track in the <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">2024 gathering</a>, the
+controversy was gone and the discussion focused on improving details of the
+implementation.
+<p>
+As a review: the allocation-profiling work tracks all allocations of memory
+in the kernel and maps them back to the code that performed the allocation.
+It can be used to see where memory is being used and to track down memory
+leaks.  The profiling, in turn, relies on <a href="906660.html">code
+tagging</a>, which inserts special structures into the code allowing
+locations to be identified.  Both features are new to the mainline kernel.
+
+<p>
+<a href="/Articles/974382/"><img
+src="../_static/images/conf/2024/lsfmm/SurenBaghdasaryan-sm.png" alt="[Suren
+Baghdasaryan]" title="Suren Baghdasaryan" class="rthumb"></a>
+
+Baghdasaryan started by saying that the patch set had been accepted into
+the mm-stable tree and was poised to go upstream into the mainline (that
+has since happened in the 6.10 merge window).  The discussion on whether
+this code should be merged was over, so it was time to talk about what
+comes next.
+<p>
+The main topic was reducing the memory and performance overhead of the
+profiling mechanism.  If it is enabled, it consumes about 0.2% of the
+system's total memory — enough to be concerned about.  It turns out that
+almost all of that overhead is in the <a
+href="https://elixir.bootlin.com/linux/v6.9.1/source/include/linux/page_ext.h#L45"><tt>page_ext</tt>
+structures</a> used to hold the back pointer from a page of memory to the
+tag identifying the code where it was allocated.  That pointer is used to
+decrement the associated counters when the page is freed.  On the
+performance side, allocation profiling makes page allocations 40% slower,
+and has a smaller, 7%&nbsp;impact on slab allocations.
+<p>
+One way of reducing that overhead would be to pack the code-tag references,
+of which there are 4-5,000 in the kernel.  With some care, there is no need
+to use a 64-bit pointer for each.  Instead, the references could be made
+smaller and, possibly, packed into the page flags, eliminating the need for
+the <tt>page_ext</tt> structure and reducing the allocation overhead.  On
+the other hand, this approach would introduce complications with loadable
+modules, Baghdasaryan said.  The group then spent a while discussing
+possible linker tricks to solve that problem without reaching any specific
+conclusions.
+<p>
+Assuming the loadable-module problem can be solved, the
+allocation-profiling code would store 16-bit references rather than 64-bit
+ones, resulting in a 75% reduction in the memory used — for page
+allocations.  The overhead for <i>slab</i> allocations actually increases
+to 9.5%, though, suggesting that perhaps those references should not be
+packed.  But if that 16-bit reference can be crammed into the page flags,
+then the memory overhead goes away completely and the performance overhead
+at allocation time goes from 40% to&nbsp;7%.  Without this additional step,
+he said, the packed references are not worth the extra complexity cost.
+<p>
+John Hubbard was the one to ask a question that was likely on the mind of
+many of the developers in the room: is it really possible to find
+16&nbsp;free page flags to use for this purpose?  Page flags have <a
+href="/Articles/787338/">long been in short supply</a>, and developers have
+<a href="/Articles/335768/">had to fight hard</a> to use even a single one
+of them.  There was not a clear answer to that question.  Pasha Tatashin
+suggested that perhaps fewer than 16&nbsp;bits would suffice for 5,000
+references.  There followed a winding discussion on the kernel
+configurations used by various distributions, their effect on the
+availability of page flags, and whether any of them could be changed, that
+did not reach any specific conclusions
+<p>
+
+<a href="/Articles/974384/"><img
+src="../_static/images/conf/2024/lsfmm/KentOverstreet-sm.png" alt="[Kent
+Overstreet]" title="Kent Overstreet" class="rthumb"></a>
+
+
+Tatashin said that it would be nice to have the ability to selectively
+enable and disable tags to, for example, avoid slowing down a critical
+network driver while profiling allocations in an unrelated subsystem.  He
+would also like to separate accounted and unaccounted allocations; the
+latter, which are not charged to any specific process, represent pure
+overhead imposed by the kernel.  Overstreet answered that the profiling
+could show the allocation flags used along with other information, but also
+asked whether it might not be better to just turn on accounting for all
+allocations.  He acknowledged that accounting would have to be made cheaper
+for that to be an option.
+<p>
+The allocation-profiling subsystem's path into the kernel was eased by the
+dropping of a number of features that it had initially included.  Now the
+developers would like to bring some of those back, Baghdasaryan said.
+These include capturing more information about allocation context and
+dynamic fault injection (which wasn't discussed in the session; this
+feature allows allocation failures to be injected into specific code paths
+to test error handling).  Some sort
+of selection mechanism, as requested by Tatashin earlier, is also on the
+list.  Overstreet closed the session by saying that interest in allocation
+profiling (and code tags) is increasing, and that some interesting
+uses that he had never thought of were emerging.  <br clear="all"><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development tools/Kernel tracing</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2024</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/974380/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor974513"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tagging with no per-block space cost</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 20:55 UTC (Tue)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/974513/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/974380/#CommAnchor974513" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Was there any mention of off-line tagging with no per-block space cost, perhaps like <a href="https://milianw.de/tag/heaptrack">heaptrack</a> does for malloc+free in user mode?  Send the address, size, timestamp, and traceback identifier into a pipe for later (or concurrent) analysis.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974513/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor974519"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tagging with no per-block space cost</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 22:42 UTC (Tue)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/974519/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vbabka" />
+                <input type="hidden" name="return" value="/Articles/974380/#CommAnchor974519" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Should be already possible with tracepoints and ftrace collection for offline analysis of BPF for concurrent.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974519/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor974660"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory-allocation profiling for the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 23, 2024 1:17 UTC (Thu)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/974660/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Paf" />
+                <input type="hidden" name="return" value="/Articles/974380/#CommAnchor974660" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Very nice work!  Should be extremely useful for a lot of real cases - sorting out who allocated what is currently a terrible pain.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974660/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,317 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Rewiring x86 system-call dispatch [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Rewiring x86 system-call dispatch">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Each kernel development cycle includes a vast number of changes that are not intended to change [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/752301/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Rewiring x86 system-call dispatch</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 23, 2018</br>
+           </div>
+Each kernel development cycle includes a vast number of changes that are
+not intended to change visible behavior and which, as a result, go
+unnoticed by most users and developers.  One such change in 4.17 is a
+rewiring of how system-call implementations are invoked within the kernel.
+The change is interesting, though, and provides an opportunity to look at
+the macro magic that handles system-call definitions.
+<p>
+In user space, system calls look like ordinary functions, albeit with the
+strange convention of returning error codes in the global <tt>errno</tt>
+variable.  Those functions are indeed just that, in that they are generally
+wrapper functions defined in the C&nbsp;library (or some other
+language-specific implementation).  Those wrappers are responsible for
+organizing the system-call arguments properly (placing them into a set of
+registers defined by the architecture ABI) and triggering a trap into the
+kernel, where the real work gets done.
+<p>
+Imagine that the application is calling <tt>read()</tt>.  In the 4.16
+kernel, <a
+href="https://elixir.bootlin.com/linux/v4.16.3/source/fs/read_write.c#L565">the
+implementation of this system call</a> is: 
+<p>
+<pre>
+    SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+    {
+	struct fd f = fdget_pos(fd);
+	ssize_t ret = -EBADF;
+
+	if (f.file) {
+	    loff_t pos = file_pos_read(f.file);
+	    ret = vfs_read(f.file, buf, count, &amp;pos);
+	    if (ret &gt;= 0)
+		file_pos_write(f.file, pos);
+	    fdput_pos(f);
+	}
+	return ret;
+    }
+</pre>
+<p>
+
+The <tt>SYSCALL_DEFINE3()</tt> macro at the beginning declares an
+implementation for the <tt>read()</tt> system call with three arguments.
+This is clearly not a normal function definition; one of the first things that
+jumps out is that the actual declaration of those arguments is done a little 
+strangely.  The names of the arguments and their types are separated in
+this way so that <tt>SYSCALL_DEFINE3()</tt> can
+perform whatever impedance-matching is required to map those arguments from
+the system-call ABI into what a normal C function expects.  On the x86
+architecture, after quite a bit of macro substitution, the
+<tt>SYSCALL_DEFINE3()</tt> line turns into something like:
+<p>
+<pre>
+    asmlinkage long sys_read(int fd, char __user *buf, size_t count) \
+        __attribute__((alias(__stringify(SyS_read))));
+    asmlinkage long SyS_read(long fd, long buf, long count)
+    {
+        long ret = SYSC_read((int) fd, (char __user *) buf, (size_t) count);
+	return ret;
+    }
+    static inline SYSC_read(int fd, char __user *buf, size_t count)
+    /* SYSCALL_DEFINE3() expansion ends here, function body follows */
+</pre>
+<p>
+As can be seen, two different functions (and one alias) are declared here.
+<tt>SyS_read()</tt> is declared with the <tt>asmlinkage</tt> attribute (so
+that it expects all
+arguments on the stack rather than in registers), and with all arguments
+declared as having the
+<tt>long</tt> type, which is how they are passed from user space.  This
+function casts the arguments into the expected 
+types, then calls <tt>SYSC_read()</tt>, which is the name of the function
+that ends up containing the actual code implementing the system call.
+Note that it is declared <tt>static inline</tt>, so it will
+be substituted directly into <tt>SyS_read()</tt>.
+<p>
+A pointer to the <tt>SyS_read()</tt> version is placed in the appropriate
+location in the <tt>sys_call_table</tt> array.  Then, when the kernel
+handles a trap for an incoming system call, it comes down to <a
+href="https://elixir.bootlin.com/linux/v4.16.3/source/arch/x86/entry/common.c#L268">this
+bit of code in <tt>do_syscall_64()</tt></a> (again, on x86):
+<p>
+<pre>
+    if (likely((nr &amp; __SYSCALL_MASK) &lt; NR_syscalls)) {
+	nr = array_index_nospec(nr &amp; __SYSCALL_MASK, NR_syscalls);
+	regs-&gt;ax = sys_call_table[nr](
+		regs-&gt;di, regs-&gt;si, regs-&gt;dx,
+		regs-&gt;r10, regs-&gt;r8, regs-&gt;r9);
+    }
+</pre>
+<p>
+(The use of <tt>array_index_nospec()</tt> prevents the processor from
+executing this call speculatively, thus blocking any attempts to create a
+speculative call to an address outside of <tt>sys_call_table</tt>).
+Since all of the entries in <tt>sys_call_table</tt> are declared
+<tt>asmlinkage</tt>, the arguments will be copied from registers onto the
+stack before the call is made.  Note that six registers are pushed onto the
+stack regardless of the number of arguments that the system call expects;
+the unneeded values will simply be ignored.  This code reflects the maximum
+of six arguments that any system call may have.
+<p>
+In 4.17, this mechanism has changed on the x86-64 architecture, thanks to
+some <a href="/Articles/752426/">work done by Dominik Brodowski</a>.  The
+new convention makes use of the fact that the <tt>pt_regs</tt> structure,
+created on any trap into the kernel, contains the register state of the
+user-space process, so it will contain the system-call arguments too.
+Rather than push all six registers onto the stack, <a
+href="https://elixir.bootlin.com/linux/v4.17-rc1/source/arch/x86/entry/common.c#L267">the
+relevant line in <tt>do_syscall_64()</tt></a> now looks like:
+<p>
+<pre>
+    if (likely(nr &lt; NR_syscalls)) {
+	nr = array_index_nospec(nr, NR_syscalls);
+	regs-&gt;ax = sys_call_table[nr](regs);
+    }
+</pre>
+<p>
+The wrapper for the system-call implementation needs to change, since the
+calling convention has changed.  In 4.17, the boilerplate for
+<tt>read()</tt>, after macro substitution, looks something like:
+<p>
+<pre>
+    asmlinkage long __x64_sys_read(const struct pg_regs *regs)
+    {
+        return __se_sys_read(regs-&gt;di, regs-&gt;si, regs-&gt;dx);
+    }
+    static long __se_sys_read(long fd, long buf, long count)
+    {
+        long ret = __do_sys_read((int) fd, (char __user *) buf, (size_t) count);
+	return ret;
+    }
+    static inline long __do_sys_read(int fd, char __user *buf, size_t count)
+</pre>
+<p>
+The <tt>__x64_sys_read()</tt> version goes into <tt>sys_call_table</tt>;
+its job is to unpack the arguments from the <tt>pt_regs</tt> structure
+before calling <tt>__se_sys_read()</tt>, which will cast those
+arguments into the proper type and call the real implementation (now named
+<tt>__do_sys_read()</tt>). 
+<p>
+Getting to this point required quite a bit of work, including passing over
+the entire kernel to find and fix every direct call into the old
+system-call entry points.  One might well ask why this effort was made.
+The new implementation is somewhat cleaner in general, but it also keeps
+unused, caller-supplied data from ending up on the stack.  In current
+kernels, an attacker could call <tt>read()</tt> with six arguments; the
+final three would just end up on the stack, unchecked in any way, where
+they could conceivably 
+turn out to be useful for any of a variety of exploits.  By controlling the
+environment in which system-call code runs a bit more strictly, the new
+calling convention makes the kernel just a bit harder to compromise.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">System calls</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/752422/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor752562"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rewiring x86 system-call dispatch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2018 18:26 UTC (Mon)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/752562/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="luto" />
+                <input type="hidden" name="return" value="/Articles/752422/#CommAnchor752562" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+asmlinkage does nothing on x86_64, so the arguments weren’t passed on the stack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752562/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor756562"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rewiring x86 system-call dispatch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2018 20:10 UTC (Mon)
+                               by <b>awww</b> (guest, #122021)
+                              [<a href="/Articles/756562/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="awww" />
+                <input type="hidden" name="return" value="/Articles/752422/#CommAnchor756562" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which begs the question: is asmlinkage even needed anywhere still?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/756562/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor754503"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rewiring arm64 system-call dispatch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2018 16:46 UTC (Tue)
+                               by <b>brodo</b> (subscriber, #4049)
+                              [<a href="/Articles/754503/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="brodo" />
+                <input type="hidden" name="return" value="/Articles/752422/#CommAnchor754503" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yesterday, Mark Rutland posted patches to lkml which implement a similar approach on arm64 "to minimize the propagation<br>
+of user-controlled register values into speculated code paths". See <a href="https://lkml.org/lkml/2018/5/14/498">https://lkml.org/lkml/2018/5/14/498</a> for further details.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/754503/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

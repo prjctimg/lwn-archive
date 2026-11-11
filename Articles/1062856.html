@@ -1,0 +1,1139 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A safer kmalloc() for 7.0 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A safer kmalloc() for 7.0">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="A pull request that touches over 8,000 files, changing over 20,000 lines of code in the process [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1062572/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A safer kmalloc() for 7.0</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 16, 2026</br>
+           </div>
+A pull request that touches over 8,000 files, changing over 20,000 lines of
+code in the process, is (fortunately) not something that happens every day.
+It did happen at the end of the 7.0 merge window, though, when Linus
+Torvalds <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=8934827db540">merged</a>
+an extensive set of changes by Kees Cook to the venerable <tt>kmalloc()</tt> API (and
+its users).  As a result of that work, though, the kernel has a new set of
+type-safe memory-allocation functions, with a last-minute bonus change to
+make the API a little easier to use.
+<p>
+<h4>Classic <tt>kmalloc()</tt></h4>
+<p>
+<tt>kmalloc()</tt> is a general-purpose interface to the slab allocator; its
+purpose is to allocate small (generally sub-page) chunks of memory for use
+within the kernel.  The first kernel release to contain <tt>kmalloc()</tt>
+was 0.98.4 from November 1992, though a similar function existed under the
+<tt>malloc()</tt> name since the 0.11 release at the end of 1991.  The
+0.98.4 version had a reasonably familiar prototype:
+<p>
+<pre>
+    void *kmalloc(unsigned int len, int priority);
+</pre>
+<p>
+The <tt>len</tt> parameter specifies how much memory is needed, while
+<tt>priority</tt> describes how the memory should be allocated; in 0.98.4 it
+could be one of <tt>GFP_BUFFER</tt>, <tt>GFP_ATOMIC</tt>,
+<tt>GFP_USER</tt>, or <tt>GFP_KERNEL</tt>.  The return value, if all goes
+well, is a pointer to the newly allocated chunk of memory.
+<p>
+In current kernels, instead, that prototype is:
+<p>
+<pre>
+    void *kmalloc(size_t size, gfp_t gfp);
+</pre>
+<p>
+The types of the arguments have shifted slightly, and the (now)
+<tt>gfp</tt> argument is an explicit bitmask, but otherwise it is
+essentially unchanged, more than 34&nbsp;years later.
+<p>
+The <tt>kmalloc()</tt> API clearly works, but it is also a 20th century C
+interface.  Its return value is untyped, and there is nothing ensuring that
+the size of the allocated chunk of memory is correct.  That leaves
+developers exposed to classic errors like this:
+<p>
+<pre>
+    struct foo *ptr;
+
+    ptr = kmalloc(sizeof(ptr), GFP_KERNEL);  /* Don't do this */
+</pre>
+<p>
+The code is valid C, but it will successfully allocate a block of memory
+that is almost certainly too small (the size of a pointer rather than to
+the pointed-to type).  Once developers start allocating arrays of objects
+the number of opportunities for mistakes that the compiler cannot detect
+grows even further; allocations of objects with flexible array members are
+more error-prone yet.  Unsurprisingly, such mistakes have been the source
+of numerous kernel bugs during the history of the project.  <!-- middle-ad
+-->
+<p>
+<h4>Safer memory allocation</h4>
+<p>
+Efforts have been made over the years to improve the safety of
+<tt>kmalloc()</tt>, with some success.  Furthering that work, the 7.0
+kernel release will include a relatively large change that
+is intended to make a lot of typical errors impossible.  The new functions
+(more precisely, macros) were added by <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=2932ba8d9c99">this
+commit</a>; they are:
+<p>
+<pre>
+    ptr = kmalloc_obj(*ptr, gfp);
+    ptr = kmalloc_objs(*ptr, count, gfp);
+    ptr = kzalloc_obj(*ptr, gfp);
+    ptr = kzalloc_objs(*ptr, count, gfp);
+</pre>
+<p>
+The simplest form is functionally identical to a basic <tt>kmalloc()</tt>
+call, but there is no need to use <tt>sizeof()</tt>, and the type of the
+return value from the macro will be a pointer type matching the first
+parameter.  So if a developer were to type:
+<p>
+<pre>
+    ptr = kmalloc_obj(ptr, GFP_KERNEL);  /* Argument should be "*ptr" */
+</pre>
+<p>
+The compiler will object with a complaint that the return value of
+<tt>kmalloc_obj()</tt> does not match the type of the pointer to which that
+value is being assigned.  This version, in other words, has a level of type
+safety that <tt>kmalloc()</tt> has always lacked.
+<p>
+Arrays of objects can be allocated with <tt>kmalloc_objs()</tt>,
+eliminating the need for the sort of arithmetic that has proved
+surprisingly difficult to get right over time.  The <tt>kzalloc_</tt>
+versions will zero the allocated memory before returning it.
+<p>
+Structures with <a href="908817.html">flexible array members</a> can
+be another source of allocation mistakes; developers will often get the
+calculation of the total structure size wrong.  There is a new allocator
+(added in <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=e4c8b46b924e">this
+commit</a>) that is designed to eliminate those mistakes:
+<p>
+<pre>
+    ptr = kmalloc_flex(*ptr, flex_member, count, gfp);
+</pre>
+<p>
+Here, <tt>*ptr</tt> is a structure with a flexible array member, the name
+of which is <tt>flex_member</tt>.  The number of elements that the flexible
+array should be sized for is given by <tt>count</tt>.  The returned object
+will be sized correctly to hold the requested number of elements in its
+flexible array.  As an added bonus, if the structure is defined using <a
+href="936728.html"><tt>__counted_by()</tt></a> to indicate which
+member holds the size of the flexible array, that field will be
+automatically initialized during the allocation — at least, on compilers
+that fully support <tt>__counted_by()</tt>.
+<p>
+With these new allocation functions in place, the stage was set to convert
+much of the existing kernel code base over to their use.  That was the
+purpose of <a href="https://git.kernel.org/linus/69050f8d6d07">the massive
+patch</a> mentioned in the introduction, as well as a number of <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=189f164e573e">followup
+patches</a> cleaning up the harder cases.
+<p>
+<h4>Implicit <tt>GFP_KERNEL</tt></h4>
+<p>
+The large-scale patching was not quite done yet, though.  As he pulled in
+Cook's changes, Torvalds <a
+href="/ml/all/CAHk-=wjOeEk1oFekLvEx081ZROBm3oHTeWzOg8W5AFyErsC57A@mail.gmail.com">observed</a>
+that almost all of the allocation calls use <tt>GFP_KERNEL</tt>; that
+result is unsurprising, since the more restrictive allocation options are
+only used when they are truly necessary.  He wondered if, by way of some
+macro magic, the <tt>gfp</tt> argument could be made optional, with a
+default of <tt>GFP_KERNEL</tt> when it is not supplied.  About nine hours
+later, he <a
+href="/ml/all/CAHk-=wh8Lc=OwB3QDssXWaEpntvYcEZH6GhmGZCewNctZo591Q@mail.gmail.com">reported</a>
+that he had implemented and applied that change.  As he pointed out, there
+was no better time to thrash that much code: "<q>those lines are all being
+modified anyway, so any merge conflict pain is not going to be made worse
+if I tweak the end result a bit more</q>".
+<p>
+That work resulted in <a
+href="https://git.kernel.org/linus/bf4afc53b77ae">another massive
+commit</a> removing the unneeded <tt>GFP_KERNEL</tt> argument from
+<tt>kmalloc_obj()</tt> calls, and <a
+href="https://git.kernel.org/linus/323bbfcf1ef88">a smaller one</a> for
+<tt>kmalloc_flex()</tt>.  He declared victory before fixing every single
+call, but stated that he was happy with the results: "<q>The code really
+does look better</q>".  After more than three decades, the kernel's core
+allocation mechanism for small objects finally looks a bit different, and
+is hopefully less susceptible to silly mistakes.  So developers will have
+something to celebrate, even as they grumble about having to fix the
+countless merge conflicts this change has surely created.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Slab allocators</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.0</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1062856/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1063105"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">does this make backports harder?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 15:40 UTC (Mon)
+                               by <b>fmoessbauer</b> (subscriber, #171204)
+                              [<a href="/Articles/1063105/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fmoessbauer" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063105" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm wondering if this change reduces the chance an automated backport of a fix can be applied correctly.<br>
+<p>
+Allocations are scattered across the whole codebase, so the chance of having a fix that uses the new API and needs to be backported to pre 7.0 is quite high. If automated backports no longer work in this case, a massive amount of manual work is needed in the future to backport patches across the boundary. This likely results in missing fixes in older kernel versions.<br>
+<p>
+Or is there already tooling in place to convert patches automatically when backporting?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063105/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063108"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">does this make backports harder?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 16:26 UTC (Mon)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/1063108/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hmh" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063108" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This specific changeset won't cause issues for backporting: you just backport the new macros along the first backport that needs them.<br>
+<p>
+But it would be easy to check whether they're defined (since they're macros), and provide your own where necessary, too.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063108/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063118"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">does this make backports harder?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 17:53 UTC (Mon)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/1063118/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063118" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Thanks for the succinct explanation.  As a kernel outsider, this seems like a really good insight into how backports work and how kernels with backported fixes differ from new kernel versions.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063118/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1063314"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">does this make backports harder?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 19:53 UTC (Tue)
+                               by <b>stevie-oh</b> (subscriber, #130795)
+                              [<a href="/Articles/1063314/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="stevie-oh" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063314" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; you just backport the new macros </span><br>
+<p>
+That covers the macros themselves.<br>
+<p>
+What about patches that don't touch kmalloc calls themselves, but include kmalloc calls in their diff context?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063314/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1064700"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">does this make backports harder?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2026 6:18 UTC (Thu)
+                               by <b>Hi-Angel</b> (guest, #110915)
+                              [<a href="/Articles/1064700/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Hi-Angel" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1064700" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's what hmh said — once you need a backport that requires kmalloc calls, you backport the macros too.<br>
+<p>
+Otherwise you would have no reason to backport macros — they won't do you any good if there's no code that uses them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1064700/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1064703"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">does this make backports harder?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2026 9:54 UTC (Thu)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/1064703/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geert" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1064703" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Context conflicts happen all the time. And if all else fails: "Stable-dep-of:", i.e. backport the new macros as a dependency ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1064703/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1063113"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">does this make backports harder?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 17:00 UTC (Mon)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1063113/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063113" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems like backporting the addition of the macros (without using them) should be safe, and then it would be relatively easy to recognize when a patch actually does apply and be able to use the "after" state.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063113/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1063123"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Safer APIs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2026 18:43 UTC (Mon)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1063123/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063123" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While these are an improvement over the status quo, they're still suboptimal in terms of type safety.<br>
+<p>
+&lt;<a href="https://lore.kernel.org/lkml/abhGS0n_RsUG97Ni@devuan/">https://lore.kernel.org/lkml/abhGS0n_RsUG97Ni@devuan/</a>&gt;<br>
+<p>
+I wrote some APIs that have stronger type safety guarantees, in shadow-utils:<br>
+<p>
+&lt;<a href="https://github.com/shadow-maint/shadow/blob/master/lib/alloc/malloc.h">https://github.com/shadow-maint/shadow/blob/master/lib/al...</a>&gt;<br>
+&lt;<a href="https://github.com/shadow-maint/shadow/blob/00ab1780769c555b367234f5491f4ea7dc63701c/lib/alloc/malloc.h#L18">https://github.com/shadow-maint/shadow/blob/00ab1780769c5...</a>&gt;<br>
+&lt;<a href="https://github.com/shadow-maint/shadow/blob/00ab1780769c555b367234f5491f4ea7dc63701c/lib/alloc/calloc.h#L18">https://github.com/shadow-maint/shadow/blob/00ab1780769c5...</a>&gt;<br>
+&lt;<a href="https://github.com/shadow-maint/shadow/blob/00ab1780769c555b367234f5491f4ea7dc63701c/lib/alloc/realloc.h#L18">https://github.com/shadow-maint/shadow/blob/00ab1780769c5...</a>&gt;<br>
+&lt;<a href="https://github.com/shadow-maint/shadow/blob/00ab1780769c555b367234f5491f4ea7dc63701c/lib/alloc/reallocf.h#L18">https://github.com/shadow-maint/shadow/blob/00ab1780769c5...</a>&gt;<br>
+&lt;<a href="https://github.com/shadow-maint/shadow/blob/00ab1780769c555b367234f5491f4ea7dc63701c/lib/sizeof.h#L18">https://github.com/shadow-maint/shadow/blob/00ab1780769c5...</a>&gt;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063123/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063190"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Safer APIs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 12:06 UTC (Tue)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/1063190/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hmh" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063190" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+These look really nice, I will adopt them for my userland code!  Thank you!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063190/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063293"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Safer APIs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 16:44 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1063293/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063293" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're welcome!<br>
+<p>
+It's an honor to see these APIs spread around.  :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063293/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1063296"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Safer APIs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 17:03 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1063296/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063296" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You may want to take an improvement to those APIs from this patch, which I haven't yet merged:<br>
+<p>
+&lt;<a href="https://github.com/shadow-maint/shadow/pull/1491">https://github.com/shadow-maint/shadow/pull/1491</a>&gt;<br>
+<p>
+It improves portability, and also slightly robustness, although it increases the amount of lines of code slightly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063296/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1063280"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about devm_kmalloc()/devm_kzalloc() ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 14:07 UTC (Tue)
+                               by <b>amw</b> (subscriber, #29081)
+                              [<a href="/Articles/1063280/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="amw" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063280" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is anyone going to provide the equivalent<br>
+<p>
+    ptr = devm_kmalloc_obj(*ptr, gfp);<br>
+    ptr = devm_kmalloc_objs(*ptr, count, gfp);<br>
+    ptr = devm_kzalloc_obj(*ptr, gfp);<br>
+    ptr = devm_kzalloc_objs(*ptr, count, gfp);<br>
+    ptr = devm_kmalloc_flex(*ptr, flex_member, count, gfp);<br>
+<p>
+macros?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063280/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063289"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about devm_kmalloc()/devm_kzalloc() ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 15:42 UTC (Tue)
+                               by <b>amw</b> (subscriber, #29081)
+                              [<a href="/Articles/1063289/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="amw" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063289" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All of the above should of course have been with an initial *dev argument.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063289/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1063295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">__set_flex_counter() and __flex_counter()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 16:56 UTC (Tue)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/1063295/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geert" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063295" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; As an added bonus, if the structure is defined using __counted_by() to indicate which member holds the size of the flexible array, that field will be automatically initialized during the allocation — at least, on compilers that fully support __counted_by().</span><br>
+<p>
+What if the compiler does not support __counted_by()? I assume then the member won't be initialized, and the caller has to take care of initializing it itself?<br>
+Won't this lead to subtle bugs, like "if (i &lt; foo-&gt;counter)" doing different things, depending on the compiler version, when the caller forgot to initialize the counter explicitly?<br>
+<p>
+<a href="https://elixir.bootlin.com/linux/v7.0-rc4/source/include/linux/overflow.h#L575">https://elixir.bootlin.com/linux/v7.0-rc4/source/include/...</a><br>
+<a href="https://elixir.bootlin.com/linux/v7.0-rc4/source/include/linux/compiler_types.h#L558">https://elixir.bootlin.com/linux/v7.0-rc4/source/include/...</a><br>
+<a href="https://elixir.bootlin.com/linux/v7.0-rc4/source/include/linux/slab.h#L996">https://elixir.bootlin.com/linux/v7.0-rc4/source/include/...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063299"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">__set_flex_counter() and __flex_counter()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2026 17:47 UTC (Tue)
+                               by <b>gf2p8affineqb</b> (subscriber, #124723)
+                              [<a href="/Articles/1063299/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gf2p8affineqb" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063299" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah. That seems like a bad idea to me<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063299/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1064902"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">__set_flex_counter() and __flex_counter()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 27, 2026 0:57 UTC (Fri)
+                               by <b>nytpu</b> (guest, #181939)
+                              [<a href="/Articles/1064902/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nytpu" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1064902" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>The article shouldn't have said that as a benefit IMO.  AFAICT from <a rel="nofollow" href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=e4c8b46b924e">the commit</a>, it was set to prevent a category of errors <em>introduced by</em> <code>__counted_by</code>, because compilers implementing <code>__counted_by</code> require that the array field is strictly accessed only after the counter field is initialized and that it is ≤the capacity of the array field.  But when sanitizers are disabled or when using a compiler without support, the required access patterns on the counter field are naturally more lax (minus undefined behavior and best practice considerations). </p>
+
+<p>As such (and given the commit message comments), the change was definitely intended to ensure that when using <code>__counted_by</code> the stricter requirements are upheld without needing to change too much of the code that later touches the counter (although some restructuring is still needed to uphold the "counter value always ≤ flexible array member actual size" requirement); definitely not as a "you don't need to manually initialize this anymore!" feature. Although I agree it is a source of bugs because it seems like you now need to run the code, with sanitizers enabled, both with and without <code>__counted_by</code> enabled.</p>
+
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1064902/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1073544"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">__set_flex_counter() and __flex_counter()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2026 13:57 UTC (Tue)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/1073544/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geert" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1073544" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just encountered the opposite case, where we need the counter to stay at zero:<br>
+<a href="https://lore.kernel.org/20260519133025.618255-1-prabhakar.mahadev-lad.rj@bp.renesas.com/">https://lore.kernel.org/20260519133025.618255-1-prabhakar...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073544/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1063356"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 10:24 UTC (Wed)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1063356/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063356" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you typo "kmalloc_obj(ptr, count)" when you really meant kmalloc_objs(ptr, count), the compiler won't tell you and your count becomes a GFP flag. Which aren't strictly enough typedeffed. Linus' great idea was a mistake.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063356/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063455"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 15:34 UTC (Wed)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1063455/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063455" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yup.<br>
+<p>
+This is a bad design pattern the kernel is using: default parameters are implemented as variadic macros.<br>
+<p>
+I had a discussion with Linus a few months ago, that this should be done instead with empty parameters, which is safe.  However, he complained that he found it unreadable.<br>
+<p>
+IMO, the default parameters should work this way: "kmalloc_objs(ptr, count, )".  So that if you type "kmalloc_obj(ptr, count, )" instead, the number of arguments doesn't match, and compilation fails.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063455/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063458"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 15:48 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1063458/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063458" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The danger isn't in the blank/default parameters - the danger is in the fact that the arguments move!<br>
+<p>
+If gfp stayed in second place it wouldn't be a problem. Shame C doesn't do named parameters ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063458/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063460"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 16:03 UTC (Wed)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1063460/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063460" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Named parameters are way less readable.<br>
+<p>
+Having a fixed number of arguments solves the problem by making it less likely to write a mistake that will silently compile, since the two APIs have different numbers of parameter.<br>
+<p>
+Admittedly, you could still accidentally swap the count and the gfp parameters, but everyone knows gfp is the last parameter, whatever is its position, so this is highly unlikely.<br>
+<p>
+Another thing that would improve would be to make the gfp be a struct type, which would make it incompatible with int.  That is doable already, and combined with a fixed number of arguments would entirely solve this issue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063460/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1063463"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 16:45 UTC (Wed)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1063463/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063463" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Shame C doesn't do named parameters</span><br>
+<p>
+The real problem is that C doesn't have a sensible type system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063463/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 17:05 UTC (Wed)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1063478/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063478" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+lol.<br>
+<p>
+C has a quite good type system.  It's not perfect, but it's good<br>
+<p>
+These macros are not representative of state-of-the-art C code.  In fact, they are quite bad, after Linus's patch.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063527"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 18:58 UTC (Wed)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1063527/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063527" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In fact, C has the best type system of all C languages.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063527/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1063464"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 16:54 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1063464/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063464" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Shame C doesn't do named parameters ...</span><br>
+<p>
+typedef struct foo_extra_args {<br>
+  bar_t *x;<br>
+  int y;<br>
+  bool z;<br>
+} foo_extra_args_t;<br>
+<p>
+void foo (/* mandatory args */ blah_t *a, size_t n, foo_extra_args_t extra_args);<br>
+<p>
+.<br>
+.<br>
+.<br>
+<p>
+   foo(whateverblah, blahcount, (foo_extra_args_t) { .x = somebar, z = false });<br>
+<p>
+(I have forgotten how to make code format nicely in LWN comments, if there is an easy way).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063464/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1063743"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">New problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2026 19:52 UTC (Thu)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/1063743/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="vbabka" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1063743" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems at least sparse is able to catch this thanks to gfp_t being __bitwise. Might still be annoying for someone making a change who will debug their code behaving weirdly without running sparse first.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063743/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1064698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Even simpler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2026 5:57 UTC (Thu)
+                               by <b>Gonsolo</b> (guest, #138409)
+                              [<a href="/Articles/1064698/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Gonsolo" />
+                <input type="hidden" name="return" value="/Articles/1062856/#CommAnchor1064698" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+aper = kmalloc_obj(*aper);<br>
+<p>
+Could this be simplified to:<br>
+<p>
+kmalloc_obj2(&amp;aper);<br>
+<p>
+Having aper twice in a line seems unnecessary.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1064698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

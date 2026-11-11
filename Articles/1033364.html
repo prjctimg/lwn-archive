@@ -1,0 +1,476 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Kexec handover and the live update orchestrator [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Kexec handover and the live update orchestrator">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Rebooting a computer ordinarily brings an abrupt end to any state built up by the old system; t [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1033741/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Kexec handover and the live update orchestrator</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 18, 2025</br>
+           </div>
+Rebooting a computer ordinarily brings an abrupt end to any state built up
+by the old system; the new kernel starts from scratch.  There are, however,
+people who would like to be able to reboot their systems without
+disrupting the workloads running therein.  Various developers are currently
+partway through the project of adding this capability, in the form of
+"kexec handover" and the "live update orchestrator", to the kernel.
+<p>
+Normally, rebooting a computer is done out of the desire to start fresh,
+but sometimes the real objective is to refresh only some layers of the
+system.  Consider a large machine running deep within some cloud provider's
+data center.  A serious security or performance issue may bring about a
+need to update the kernel on that machine, but the kernel is not the only
+thing running there.  The user-space layers are busily generating LLM
+hallucinations and deep-fake videos, and the owner of the machine would
+much rather avoid interrupting that flow of valuable content.  If the
+kernel could be rebooted without disturbing the workload, there would be
+great rejoicing.
+<p>
+Preserving a workload across a reboot requires somehow saving all of its
+state, from user-space memory to device-level information within the
+kernel.  Simply identifying all of that state can be a challenge,
+preserving it even more so, as a look at the long effort behind the <a
+href="https://criu.org/Main_Page">Checkpoint/Restore in Userspace
+project</a> will make clear.  All of that state must then be properly
+restored after the kernel is swapped out from underneath the workload.  All
+told, it is a daunting challenge.
+<p>
+The problem becomes a little easier, though, in the case of a system
+running virtualized guests.  The state of the guests themselves is
+well encapsulated within the virtual machines, and there is
+relatively little hardware state to preserve.  So it is not surprising that
+this is the type of workload that is being targeted for the planned
+kernel-switcheroo functionality.
+<p>
+<h4>Preserving state across a reboot</h4>
+<p>
+The first piece of the solution, kexec handover (KHO), was <a
+href="/Articles/1008321/">posted</a> by Mike Rapoport earlier this year and
+merged for the 6.16 kernel release.  Rapoport <a
+href="1015997.html">discussed this work</a> at the 2025 Linux
+Storage, Filesystem, Memory Management, and BPF Summit.  KHO offers <a
+href="https://docs.kernel.org/core-api/kho/concepts.html">a deceptively
+simple API</a> to any subsystem that needs to save data across a reboot;
+for example, a call to <a
+href="https://elixir.bootlin.com/linux/v6.16/source/kernel/kexec_handover.c#L648"><tt>kho_preserve_folio()</tt></a>
+will save the contents of a folio.  After the new kernel boots, that folio
+can be restored with <a
+href="https://elixir.bootlin.com/linux/v6.16/source/kernel/kexec_handover.c#L184"><tt>kho_restore_folio()</tt></a>.
+A subsystem can use these primitives to ensure that the data it needs will
+survive a reboot and be available to the new kernel.
+<p>
+Underneath the hood, KHO prepares the memory for preservation by coalescing
+it into specific regions.  A data structure describing all of the
+preserved memory is created as a type of <a
+href="https://devicetree-specification.readthedocs.io/en/stable/flattened-format.html">flattened
+devicetree</a> that is passed through to the new kernel.  Also described in
+that devicetree are the "scratch areas" of memory — the portions of memory
+that do <i>not</i> contain preserved data and which, consequently, are
+available for the new kernel to use during the initialization process.
+Once the bootstrap is complete and kernel subsystems have reclaimed the
+memory that was preserved, the system operates as usual, with the workload
+not even noticing that the foundation of the system was changed out from
+underneath it.
+<p>
+Every subsystem that will participate in KHO must necessarily be
+supplemented with the code that identifies the state to preserve and
+manages the transition.  For the virtualization use case, much of that work
+can be done inside KVM, which contains most of the information about the
+virtual machines that are running.  With support added to a few device
+drivers, it should be possible to save (and restore) everything that is
+needed.  What is missing in current kernels, though, is the overall logic that
+tells each subsystem <i>when</i> it should prepare for the change and when
+to recover.
+<p>
+<h4>The live update orchestrator</h4>
+<p>
+The <a
+href="/ml/all/20250723144649.1696299-1-pasha.tatashin@soleen.com">live
+update orchestrator (LUO) patches</a> are the work of Pasha Tatashin; the
+series is currently in its second version.  LUO is the control layer that
+makes the whole live-update process work as expected.  To that end, it
+handles transitions between four defined system states:
+<p>
+<ul class="spacylist">
+<li> <b>Normal</b>: the ordinary operating state of the system.
+<li> <b>Prepared</b>: once the decision has been made to perform a reboot,
+     all LHO-aware subsystems are informed of a <tt>LIVEUPDATE_PREPARE</tt>
+     event by way of a callback (described below), instructing them to
+     serialize and preserve their state for a reboot.  If this preparation
+     is successful across the system, it will enter the prepared state,
+     ready for the final acts of the outgoing kernel.  The workload is
+     still running at this time, so subsystems have to be prepared for
+     their preserved state to change.
+<li> <b>Frozen</b>: brought about by a <tt>LIVEUPDATE_FREEZE</tt> event
+     just prior to the reboot.  At this point, the workload is suspended,
+     and subsystems should finalize the data to be preserved.
+<li> <b>Updated</b>: the new kernel is booted and running; a
+     <tt>LIVEUPDATE_FINISH</tt> event will be sent, instructing each
+     subsystem to restore its preserved state and return to normal
+     operation.
+</ul>
+<p>
+To handle these events, every subsystem that will participate in the
+live-update process must create a set of callbacks to implement the
+transition between system states:
+<p>
+<pre>
+    struct liveupdate_subsystem_ops {
+	int (*prepare)(void *arg, u64 *data);  /* normal → prepared */
+	int (*freeze)(void *arg, u64 *data);   /* prepared → frozen */
+	void (*cancel)(void *arg, u64 data);   /* back to normal w/o reboot */
+	void (*finish)(void *arg, u64 data);   /* updated → normal */
+    };
+</pre>
+<p>
+Those callbacks are then registered with the LUO core:
+<p>
+<pre>
+    struct liveupdate_subsystem {
+	const struct liveupdate_subsystem_ops *ops;
+	const char *name;
+	void *arg;
+	struct list_head list;
+	u64 private_data;
+    };
+
+    int liveupdate_register_subsystem(struct liveupdate_subsystem *subsys);
+</pre>
+<p>
+The <tt>arg</tt> value in this structure reappears as the <tt>arg</tt>
+parameter to each of the registered callbacks (though this behavior <a
+href="/ml/all/CA+CK2bBEX6C6v63DrK-Fx2sE7fvLTZM=HX0y_j4aVDYcfrCXOg@mail.gmail.com/">seems
+likely to change</a> in future versions of the series).  The <tt>prepare()</tt>
+callback can store a data handle in the space pointed to by <tt>data</tt>;
+that handle will then be passed to the other callbacks.  Each callback
+returns the usual "zero or negative error code" value indicating whether it
+was successful.
+<p>
+There is a separate in-kernel infrastructure for the preservation of file
+descriptors across a reboot; the set of callbacks (defined in <a
+href="/ml/all/20250723144649.1696299-15-pasha.tatashin@soleen.com">this
+patch</a>) looks similar to those above with a couple of additions.  For
+example, the <tt>can_preserve()</tt> callback returns an indication of
+whether a given file can be preserved at all.  Support
+will need to be added to every filesystem that will host files that may be
+preserved across a reboot.
+<p>
+LUO provides an interface to user space, both to control the update process
+and to enable the preservation of data across an update.  For the control
+side, there is a new device file (<tt>/dev/liveupdate</tt>) supporting a
+set of <a
+href="https://man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>
+operations to initiate state transitions; the
+<tt>LIVEUPDATE_IOCTL_PREPARE</tt> command, for example, will attempt to
+move the system into the "prepared" state.  The current state can be
+queried at any time, and the whole process aborted before the reboot if
+need be.  The patch series includes a program called <a
+href="/ml/all/20250723144649.1696299-32-pasha.tatashin@soleen.com"><tt>luoctl</tt></a>
+that can be used to initiate transitions from the command line.
+<p>
+The preservation of specific files across a reboot can be requested with
+the <tt>LIVEUPDATE_IOCTL_FD_PRESERVE</tt> <tt>ioctl()</tt> command.  The
+most common anticipated use of this functionality would appear to preserve
+the contents of <a
+href="https://man7.org/linux/man-pages/man2/memfd_create.2.html">memfd</a>
+files, which are often used to provide the backing memory for virtual
+machines.  There is a <a
+href="/ml/all/20250723144649.1696299-30-pasha.tatashin@soleen.com">separate
+document</a> describing how memfd preservation works that gives some
+insights into the limitations of file preservation.  For example, the
+close-on-exec and sealed status of a memfd will not be preserved, but its
+contents will.  In the prepared phase, reading from and writing to the
+memfd are still supported, but it is not possible to grow or shrink the
+memfd.  So reboot-aware code probably needs to be prepared for certain
+operations to be unavailable during the (presumably short) prepared phase.
+
+<p>
+This series has received a number of review comments and seems likely to go
+through a number of changes before it is deemed ready for inclusion.  There
+does not, however, seem to be any opposition to the objective or core
+design of this work.  Once the details are taken care of, LUO seems likely
+to join KHO in the kernel and make kernel updates easier for certain
+classes of Linux users.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Kexec handover</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.19</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Virtualization</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1033364/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1034308"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2025 19:58 UTC (Mon)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1034308/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1033364/#CommAnchor1034308" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's so nice to see this work take shape, this is such an important feature for cloud providers, great job everyone involved<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034308/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035539"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 28, 2025 22:45 UTC (Thu)
+                               by <b>yanjun.zhu</b> (guest, #173290)
+                              [<a href="/Articles/1035539/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="yanjun.zhu" />
+                <input type="hidden" name="return" value="/Articles/1033364/#CommAnchor1035539" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Great and interesting job.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035539/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1035540"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 28, 2025 22:56 UTC (Thu)
+                               by <b>yanjun.zhu</b> (guest, #173290)
+                              [<a href="/Articles/1035540/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="yanjun.zhu" />
+                <input type="hidden" name="return" value="/Articles/1033364/#CommAnchor1035540" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The latest LUO is version 3.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1035540/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1034721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Accelerating and simplifying booting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2025 6:09 UTC (Fri)
+                               by <b>pmolloy</b> (guest, #113754)
+                              [<a href="/Articles/1034721/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pmolloy" />
+                <input type="hidden" name="return" value="/Articles/1033364/#CommAnchor1034721" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is also a really interesting feature for LinuxBoot, the idea of using a minimal kernel/initramfs as a boot loader to load and execute a runtime kernel or other operating system. Why load a chain of software that has to reinitialize from scratch at every stage when some state could be saved between stages? This is also a point of pain in current systems where boot loaders and runtime operating systems need to be carefully coordinated and leads to significant system complexity.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Accelerating and simplifying booting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2025 6:17 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1034722/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1033364/#CommAnchor1034722" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Why load a chain of software that has to reinitialize from scratch at every stage when some state could be saved between stages? </span><br>
+<p>
+I think the consensus at this point is that UEFI can just boot Linux directly, with a small bootloader written using the UEFI API.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1034723"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Accelerating and simplifying booting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2025 6:28 UTC (Fri)
+                               by <b>pmolloy</b> (guest, #113754)
+                              [<a href="/Articles/1034723/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pmolloy" />
+                <input type="hidden" name="return" value="/Articles/1033364/#CommAnchor1034723" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In my experience in computing consensus doesn't mean there aren't better options worth advocating for. But that's definitely off topic. Happy to discuss the topic further in the linuxboot.org community.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1034723/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1036845"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Accelerating and simplifying booting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2025 3:08 UTC (Fri)
+                               by <b>FluffyFox</b> (guest, #162692)
+                              [<a href="/Articles/1036845/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="FluffyFox" />
+                <input type="hidden" name="return" value="/Articles/1033364/#CommAnchor1036845" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Linux does already support booting that way, through CONFIG_EFI_STUB and pair with CONFIG_CMDLINE, you can have a kernel know what to do when nothing gives it command line.<br>
+<p>
+That is most simplest and favourite setup of booting kernel where the kernel has all compiled modules to use entire system and compiled in command line to know how to boot without relying on additional parameter given by other thing just tuck kernel bzImage into /EFI/Boot/bootx64.efi (or other name depends on architecture) with single cp and kernel is updated.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1036845/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

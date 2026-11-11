@@ -1,0 +1,580 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Namespace reference counting and listns() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Namespace reference counting and listns()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel's namespaces feature is, among other things, a key part of the implementation of con [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1044228/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Namespace reference counting and listns()</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 3, 2025</br>
+           </div>
+The kernel's <a href="531114.html">namespaces feature</a> is, among
+other things, a key part of the implementation of containers.  Like much in
+the kernel, though, the namespace API evolved over time; there was no
+design at the outset.  As a result, this API has some rough edges and
+missing features.  Christian Brauner is working to straighten out the
+namespace situation somewhat with <a
+href="/ml/all/20251029-work-namespace-nstree-listns-v4-0-2e6f823ebdc0@kernel.org">this
+daunting 72-part patch series</a> that, among other things, adds a new
+system call to allow user space to query the namespaces present on the
+system.
+<p>
+The original namespace type, now called <a href="/Articles/689856/">mount
+namespaces</a>, was <a
+href="https://lore.kernel.org/lkml/Pine.GSO.4.21.0102242253460.24312-100000@weyl.math.psu.edu/">introduced
+by Al Viro</a> as just "namespaces" in 2001 (they were <a
+href="/2001/0301/kernel.php3">briefly covered in LWN</a> at the time).  UTS
+namespaces (which provide a different view of the system's host name),
+process-ID namespaces (managing the visibility of processes), and IPC
+namespaces (controlling the view of the System&nbsp;V inter-process
+communication features) followed as part of the 2.6.19 release in 2006.
+Each namespace type was added when the need arose and somebody was moved to
+implement it.  As the use of namespaces has grown, though, some of the
+problems in their implementation have become more apparent.
+<p>
+<h4>Reference counts</h4>
+<p>
+For example, namespaces have complicated lifecycle requirements.  A namespace
+must obviously continue to exist as long as there are any processes that
+are running within it.  For many years, a namespace would automatically be
+deleted once the last process running within it exited.  Over time, the
+ability to keep an empty namespace around (by opening a file descriptor
+referencing it or bind-mounting it into the filesystem) was added.  Some
+namespaces (<a href="/Articles/532593/">user namespaces</a>, for example)
+are hierarchical; if a hierarchical namespace contains children, that
+namespace will, once again, remain within the system.
+<p>
+The kernel uses a reference count on each namespace to know when it is no
+longer in use.  C&nbsp;is not an object-oriented language, so there is no
+class hierarchy for namespaces; each namespace type is a different
+structure.  There is a "superclass", of sorts, in the <tt>ns_common</tt>
+structure, which all of the other namespace structure types include; it was
+first <a href="https://git.kernel.org/linus/435d5f4bb2cc">added by Viro</a>
+to the 3.19 release in 2014.  The reference count was <a
+href="https://git.kernel.org/linus/2024f91e965f">moved into <tt>struct
+ns_common</tt></a> by Brauner for 5.9 in 2020.  That structure went through
+some significant changes in the 6.18 merge window to reach <a
+href="https://elixir.bootlin.com/linux/v6.18-rc3/source/include/linux/ns_common.h#L40">its
+current form</a>, which includes a reference count now named <tt>__ns_ref</tt>.
+<p>
+This count tracks <i>all</i> references to a given namespace; that includes
+all of the types listed above, but there are others as well.  The kernel
+will often create internal references to namespaces that can cause them to
+persist for a period after they are no longer used and, in theory, no
+longer visible to user space.  There is an interesting interaction with a
+different feature <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=3ab378cfa793">added
+for 6.18</a>, though: the ability to refer to namespaces with file handles.
+A file handle is an opaque binary cookie that can be used to open an object
+without locating it in the filesystem; see <a
+href="https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html">the
+<tt>open_by_handle_at()</tt> man page</a> for details.
+<p>
+Since a file handle is not contained within a filesystem, it can outlive
+the object to which it refers.  Or, in the case of a namespace, it can
+outlive the <i>visibility</i> of the object to which it refers.  A
+namespace may have gone completely out of use and exist only because of
+internal kernel references that will, presumably, go away soon; normally,
+user space would not be able to open this namespace.  But that changes if
+user space has a file handle referring to the namespace; opening that file
+handle will result in "resurrecting" the namespace when it was otherwise on
+its way out.
+<p>
+That is the sort of API quirk that nobody asked for and nobody intended to
+implement.  If, however, it is allowed to continue to exist, somebody —
+attackers if nobody else — will surely find a way to depend on it.
+Eliminating this quirk is the first objective of Brauner's series.
+<p>
+Normally, a reference-counted structure contains a <i>single</i> reference
+count; these patches go against that practice by adding a second count,
+called <tt>__ns_ref_active</tt>, to <tt>struct ns_common</tt>.  This count
+tracks the number of "active" references, which are essentially the
+references visible to user space.  It can be thought of as a subset of
+<tt>__ns_ref</tt>, in that any change to <tt>__ns_ref_active</tt> should be
+accompanied by an equal change to <tt>__ns_ref</tt>.  Internal references
+created by the kernel, though, will only increment <tt>__ns_ref</tt>.  In
+the end, <tt>__ns_ref</tt> still manages the lifetime of the namespace,
+while <tt>__ns_ref_active</tt> manages its visibility to user space.
+<p>
+So, for example, an attempt to open a namespace with
+<tt>open_by_handle_at()</tt> will fail if <tt>__ns_ref_active</tt> is zero,
+even if the namespace itself still exists within the kernel.  It will no
+longer be possible to use file handles to bring namespaces back from the
+dead.
+
+<p>
+<h4>Listing namespaces</h4>
+<p>
+As kernel developers added namespaces over the last 24 years, none of them
+ever quite got around to implementing a way to see which namespaces are
+active in the system.  In current kernels, the only way to get a complete
+list of namespaces is to go rummaging through the <tt>/proc/<i>PID</i>/ns</tt>
+directories for every process in the system.  Needless to say, that is less
+than optimally efficient.  It also still doesn't get a full list, since any
+namespaces that are empty but which are kept around with, for example, a
+bind mount, are not present in any process's <tt>/proc</tt> directory and
+will consequently be missed.
+<p>
+The obvious answer is to add a new system call that allows iterating
+through the active namespaces; in this series, that is <tt>listns()</tt>:
+<p>
+<pre>
+    struct ns_id_req {
+        __u32 size;         /* sizeof(struct ns_id_req) */
+        __u32 spare;        /* Reserved, must be 0 */
+        __u64 ns_id;        /* Last seen namespace ID (for pagination) */
+        __u32 ns_type;      /* Filter by namespace type(s) */
+        __u32 spare2;       /* Reserved, must be 0 */
+        __u64 user_ns_id;   /* Filter by owning user namespace */
+    };
+
+    ssize_t listns(const struct ns_id_req *req, u64 *ns_ids,
+                   size_t nr_ns_ids, unsigned int flags);
+</pre>
+<p>
+A caller starts by filling in an <tt>ns_id_req</tt> structure describing
+the information request.  The <tt>size</tt> field is the size of the
+structure itself, allowing for expansion in the future if need be.  The
+<tt>ns_type</tt> field is a bitmask of the namespace types of interest;
+<tt>MNT_NS</tt> for mount namespaces, for example, or <tt>NET_NS</tt> for
+network namespaces.  If only children of a given namespace are of interest,
+the parent's namespace ID can be put into <tt>user_ns_id</tt>.  The
+<tt>ns_id</tt> field should be zero for the first call.
+<p>
+The actual <tt>listns()</tt> call takes a pointer to that structure, an
+array (<tt>ns_ids</tt>) to store the returned namespace IDs, and the length
+of that array (<tt>nr_ns_ids</tt>).  The <tt>flags</tt> field must be zero
+in the current implementation.  This call will fill in the <tt>ns_ids</tt>
+array with matching namespace IDs, returning the number of IDs that were
+put there.  If the number of matching namespaces is too large to fit in the
+provided array, a subsequent <tt>listns()</tt> call can pick up where this
+one left off by placing the final ID returned by the previous call in the
+<tt>ns_id</tt> field of the <tt>ns_id_req</tt> structure.
+<p>
+Needless to say, <tt>listns()</tt> will only return namespaces that have an
+<tt>__ns_ref_active</tt> count greater than zero.  For the curious, there
+are several examples of how <tt>listns()</tt> can be used in the
+above-linked cover letter.  It is also worth noting that, while this patch
+series is long, patches&nbsp;22 through&nbsp;72 are all tests for the new
+functionality; they also provide examples of how it is expected to be used.
+<p>
+This series is in its fourth revision; the rate of change so far suggests
+that there might be another round or two in store before it is ready to go,
+but there do not appear to be any fundamental objections to this work.
+While Brauner has not indicated when he plans to send these changes
+upstream, it seems reasonable to expect to see them during the 6.19 merge
+window.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Namespaces</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.19</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">System calls/listns()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1043824/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1044832"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Pagination in syscalls?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 3, 2025 16:34 UTC (Mon)
+                               by <b>hDF</b> (subscriber, #121224)
+                              [<a href="/Articles/1044832/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hDF" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1044832" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not an expert, but I haven't seen pagination in syscalls before. What happens when the list of namespaces changes in between the `listns()` calls?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044832/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1044833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Pagination in syscalls?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 3, 2025 16:44 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1044833/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1044833" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <a href="https://man7.org/linux/man-pages/man2/getdents.2.html"><tt>getdents()</tt></a> has had pagination since forever; it's pretty much necessary for any interface that could return an arbitrary amount of data.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1044834"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Pagination in syscalls?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 3, 2025 16:55 UTC (Mon)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1044834/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1044834" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Every netlink dump also has pagination.<br>
+<p>
+In netlink, to solve this, a "generation" number is included in each partial dump (and updated by other code if the list changes.) If it changed anywhere while you were dumping, you know the list might be incomplete or list stale objects. In many cases, this doesn't really matter since an object might as well disappear just _after_ you created the list, etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044834/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1044857"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give the man a medal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 3, 2025 21:19 UTC (Mon)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/1044857/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smurf" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1044857" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<p>
+<span class="QuotedText">&gt; patches 22 through 72 are all tests</span><br>
+<p>
+If only everybody was that diligent.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044857/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1044870"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Give the man a medal</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 4, 2025 3:58 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1044870/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1044870" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is commendable. If reviewers were more…discerning about such things, maybe more would do so. Same goes for the "rigorously undocumented" features noted in the merge window roundups here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044870/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1044879"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Namespace namespace </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 4, 2025 8:24 UTC (Tue)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/1044879/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Fowl" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1044879" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Beginning my count down until we get a namespace for namespaces ;p<br>
+<p>
+(I guess figuring that out was part of why this wasn’t a /dev file or directory)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1044879/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1045020"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Finally!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2025 8:41 UTC (Wed)
+                               by <b>SPYFF</b> (guest, #131114)
+                              [<a href="/Articles/1045020/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="SPYFF" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1045020" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm glad someone is walking the walk and introducing a simple yet powerful API for listing namespaces. Christian is doing great work, and this will be a game changer for many hacky applications. Time to time, I have to list network namespaces, but iproute2's ip netns only lists the ones it created with ip, not the ones created with, for example, unshare -n.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045020/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1045032"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How is this an API quirk? It's normal and expected behaviour with file-handles in Unix.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2025 11:19 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1045032/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1045032" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That is the sort of API quirk that nobody asked for and nobody intended to implement.</span><br>
+<p>
+Isn't it entirely the expected and long-standing behaviour of filehandles? A user-space programme can acquire a file-handle for something, the object itself can be removed from any indexes that make it visible (e.g., where the file-handle references a file, the programme itself or another can delete the file-name entr{y,ies} from the filesystem), and the programme could if it wishes make the referred to object visible again (adding a file-name in the filesystem again for the file-handle).<br>
+<p>
+This is entirely normal, expected behaviour with file-handles, the referenced object, and whatever generally queryable indices there may be of such objects (e.g. filesystems).<br>
+<p>
+I think, at best, the author means this *normal behaviour* is - for some reason - not desired for namespaces. And the reason why namespaces are special, compared to other objects, should then have been explained.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045032/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045039"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How is this an API quirk? It's normal and expected behaviour with file-handles in Unix.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2025 13:55 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1045039/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1045039" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Please, do not confuse file <i>handles</i> with file <i>descriptors</i>.  A file handle is best thought of, perhaps, as an alternative name for the file.  Just as the possession of a file's name does not cause its persistence, holding a file handle doesn't keep a file around.  
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045039/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How is this an API quirk? It's normal and expected behaviour with file-handles in Unix.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2025 15:26 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1045141/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1045141" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I stand corrected. So these are a new class of handles, distinct from file descriptors, as per open_by_handle_at, and with a separate struct in the kernel it appears. I didn't realise. Thanks.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1045145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How is this an API quirk? It's normal and expected behaviour with file-handles in Unix.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2025 15:46 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1045145/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1043824/#CommAnchor1045145" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      They are new with regard to namespaces, but file handles are a fairly old concept; I <i>think</i> they had their origin with NFS many years ago.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1045145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

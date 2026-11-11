@@ -1,0 +1,348 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Multipath support in the device mapper [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Multipath support in the device mapper">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Multipath connectivity is a feature of high-end storage systems.  A storage box packed with dis [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/123948/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Multipath support in the device mapper</h1>
+<div class="Byline">[Posted February 23, 2005 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Multipath connectivity is a feature of high-end storage systems.  A storage box
+packed with disks will be connected to multiple transport paths, any one
+of which can be used to submit I/O requests.  A computer will be connected
+to more than one of these transport interconnects, and can choose among
+them when it has an I/O request for the storage server.  This sort of
+arrangement is expensive, but it provides for higher reliability (things
+continue to work if an interconnect fails) and better performance.
+<p>
+
+Support for multipath in Linux has traditionally been spotty, at best.
+Some low-level block drivers have included support for their specific
+devices, but support at that level leads to duplicated functionality and
+difficulties for administrators.  Some thought has gone into how multipath
+is best supported: does that logic belong at the driver layer, the SCSI
+mid-layer, the block layer, or somewhere else?  The conclusion that was
+reached at last year's Kernel Summit was that the device mapper was the
+best place for multipath support.  
+<p>
+
+That support has now been coded up and <a
+href="/Articles/123132/">posted</a> for review; it was added to the
+2.6.11-rc4-mm1 kernel.  When used with the user-space <a
+href="http://christophe.varoqui.free.fr/">multipath tools</a> distribution,
+the device mapper can now provide proper multipath support - for some
+hardware, at least.
+<p>
+
+Internally, the multipath code creates a data structure, attached to a
+device mapper target, which looks like this:
+<p>
+<center>
+<img src="../_static/images/ns/kernel/multipath.png" width=548 height=310
+ alt="[Cheezy multipath diagram]" border=0>
+</center>
+<p>
+
+When time comes to transfer blocks to or from a device mapper target
+representing a multipath device, the code goes to the first priority group
+in the list.  Each group represents a set of paths to the device, each of
+which is considered equal to the others; the preferred paths (being the
+fastest and/or most reliable) should be contained in the first group in the
+list.  Priority groups include a path selector - a function which
+determines which path should be used for each I/O request.  The current
+patches include a <a href="/Articles/123133/">round-robin selector</a>
+which simply rotates through the paths to balance the load across them.
+Should situations arise which require more complicated policies, it should
+not be tremendously difficult to create an appropriate path selector.
+<p>
+
+If a given path starts to generate errors, it is marked as failed and the
+path selector will pass over it.  Should all paths in a priority group
+fail, the next group in the list (if it exists) will be used.  The
+multipath tools include a management daemon which is informed of failed
+paths; its job is to scream for help and retry the failed paths.  If a path
+starts to work again, the daemon will inform the device mapper, which will
+resume using that path.
+<p>
+
+There may be times when no paths are available; this can happen, for
+example, when a new priority group has been selected and is in the process
+of initializing itself.  In this situation, the multipath target will
+maintain a queue of pending BIO structures.  Once a path becomes available,
+a special worker thread works through the pending I/O list and sees to it
+that all requests are executed.
+<p>
+
+At the lower level, the multipath code includes <a
+href="/Articles/123134/">a set of hardware hooks</a> for dealing with
+hardware-specific events.  These hooks include a status function, an
+initialization function, and an error handler.  The patch set includes <a
+href="/Articles/123135/">a hardware handler</a> for EMC CLARiiON devices. 
+<p>
+
+Comments on the patches have been relatively few, and have dealt mostly
+with trivial issues.  The multipath patches are unintrusive; they add new
+functionality, but do not make significant changes to existing code.  So
+chances are good that they could find their way into the 2.6.12 kernel.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Device mapper</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Multipath I/O</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/124703/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor125010"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Multipath support in the device mapper</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2005 17:15 UTC (Thu)
+                               by <b>James</b> (guest, #4884)
+                              [<a href="/Articles/125010/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="James" />
+                <input type="hidden" name="return" value="/Articles/124703/#CommAnchor125010" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      This has also been tested against IBM San Virtual Controller (SVC), where 8 data paths are <br>
+available to each LUN. Each (Linux) host has two physical fibre HBAs in them, each HBA <br>
+connecting to a separate fibre switch. Each switch in turn is connected to two (or more) nodes of <br>
+the IBM SVC solution. The SVC product virtualises real storage; it partitions the fibre network into <br>
+two parts (kind of like two vlans on an IP switch). In one side, we have a SAN controller, or several <br>
+SAN controllers (eg, IBM DS4100, or other manufacturers). On the other, we have the hosts. All <br>
+hosts talk to the SVC for access to the storage. SVC controls what goes where. It can stripe <br>
+across multiple SANs, and do on-line migration of data between SANs, replication, etc. Plus <br>
+online growth of LUNs. It also has gigs of memory to cache the I/O operations, so it is really fast <br>
+(all battery backed by its own required UPS). The SVC nodes themseleves are just 1U rackmount <br>
+boxes with loads of HBAs and these large UPS' attached.<br>
+<p>
+We're quite happy with IBM SATA disk controllers (DS4100), expanded with EXP100 units. Each <br>
+chassis is 3.5T raw, and lots cheaper than SCSI. Using the SAN controller, create RAID1 or RAID5 <br>
+arrays, which makes real LUNs (managed disks or mdisks in SVC lingo). SVN then takes those <br>
+LUNs, and stripes them up. You can then create virtual LUNs (vdisks) that the hosts see across <br>
+the 8 I/O paths that multipath here uses. So you then have large, expandable, on-line movable, <br>
+snapshottable (at multiple levels - LVM and within the SVC), HA disk.<br>
+<p>
+Oh, and each 1U SVC host is running some form of Linux, supposedly. <br>
+<p>
+Huge thanks to Alisdair et al. for their time on this code. Its way cool.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/125010/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor125186"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">LUNs and LUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2005 17:44 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/125186/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/124703/#CommAnchor125186" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      In most cases, it's just intellectually irritating when people call SCSI logical units LUNs (LUN = logical unit number).  But when you're talking about a complex network like this with multiple paths, it's downright confusing.  If there are 8 paths to a LU, the LU could have 8 different LUNs.
+<p>
+People started counting storage equipment by counting LUNs because it solved the ambiguity of what you consider one unit.  Like counting spindles of disk or heads of sheep (even though you aren't actually interested in the spindles or heads themselves).  Now, it doesn't solve any ambiguity and using a LUN as a metaphor for the function of a logical unit is just wrong.
+<p>
+Speaking of identifying units, I notice that you plug your fibre channel cables into a "solution."  I wonder if that's something technical people would know better by an older name, such as "subsystem" or "network."
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/125186/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor125216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">``Solution''s eating the heart out of technical discussion</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2005 20:15 UTC (Fri)
+                               by <b>Max.Hyre</b> (subscriber, #1054)
+                              [<a href="/Articles/125216/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Max.Hyre" />
+                <input type="hidden" name="return" value="/Articles/124703/#CommAnchor125216" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Sadly, I saw this in actio earlier today.  A colleague, a
+mostly-techno type, was describing a test setup to me.  He really
+said, ``The client bridge can plug into both wireless and wired
+solutions''.  When I asked whether he was trying to describe wireless
+and wired networks (it's even a syllable shorter), he allowed as how
+he was.  :-(
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/125216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor125219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">`actio' --&gt; `action'</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2005 20:19 UTC (Fri)
+                               by <b>Max.Hyre</b> (subscriber, #1054)
+                              [<a href="/Articles/125219/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Max.Hyre" />
+                <input type="hidden" name="return" value="/Articles/124703/#CommAnchor125219" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>It seemed to be so simple a comment that I didn't really proofread it.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/125219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor125286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">LUNs and LUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2005 18:22 UTC (Sat)
+                               by <b>lutchann</b> (subscriber, #8872)
+                              [<a href="/Articles/125286/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="lutchann" />
+                <input type="hidden" name="return" value="/Articles/124703/#CommAnchor125286" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I tend to think of "solution" as just a pretentious term for "thingy".  Doing that word substitution in my head makes IT marketing literature somewhat more tolerable.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/125286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor158889"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Multipath support in the device mapper</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2005 13:04 UTC (Mon)
+                               by <b>maddy</b> (guest, #33674)
+                              [<a href="/Articles/158889/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="maddy" />
+                <input type="hidden" name="return" value="/Articles/124703/#CommAnchor158889" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      what is device mapper ? how it works ? why we need it ?<br>
+  if any one knows kindly help me<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/158889/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2005, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

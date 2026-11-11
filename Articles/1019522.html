@@ -1,0 +1,224 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improving FUSE writeback performance [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Improving FUSE writeback performance">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="In a combined filesystem and memory-management session at  the 2025 Linux Storage, Filesystem,  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1019558/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improving FUSE writeback performance</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>May 6, 2025</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+In a combined filesystem and memory-management session at 
+the 2025 Linux Storage, Filesystem, Memory
+Management, and BPF Summit (LSFMM+BPF), Joanne Koong led a discussion on
+improving the writeback performance for the <a
+href="https://github.com/libfuse/libfuse?tab=readme-ov-file#libfuse">Filesystem in
+Userspace</a> (FUSE) layer.  Writeback is how data that is written to the
+filesystem is actually flushed to the disk; it is the process of writing
+dirty pages from the page cache to storage.  The current FUSE
+implementation allocates unmovable memory, then copies the dirty data to it
+before initiating writeback, which is slow; Koong wanted to change that
+behavior.  Since the session, she has <a
+href="/ml/all/20250414222210.3995795-1-joannelkoong@gmail.com/">posted a
+patch set</a> that has been <a
+href="/ml/all/CAJfpegveOFoL-XzDKQZZ4U6UF_AetNwTUDbfmf7rdJasRFm3xA@mail.gmail.com/">applied</a>
+by FUSE maintainer Miklos Szeredi.
+</p>
+
+<p>
+Koong started the session with a description of the current FUSE writeback
+operation.  A temporary page is allocated in the unmovable memory zone for
+each dirty page and the data is copied to the temporary page.  After that,
+writeback is initiated on the temporary pages and the original pages can
+immediately have their writeback state cleared.  That extra allocation and
+copying work is expensive, but is needed so that the pages do not move
+while the writeback operation is underway.
+</p>
+
+<p>
+Benchmarks have shown around 45% improvement in throughput for writes
+without the temporary pages, she said.  Beyond that, eliminating the copy simplifies the
+internals of FUSE.  There is currently a red-black tree tracking the
+temporary pages that could be eliminated.  It also makes the conversion of FUSE to
+use large folios much cleaner.
+</p>
+
+<p>
+Back in November, she sent a <a
+href="/ml/all/20241122232359.429647-1-joannelkoong%40gmail.com/">proposed
+solution</a> that removes the temporary pages, which means that the
+writeback state will not be cleared immediately anymore.   In order to
+avoid deadlocks, the patch set
+added a new mapping flag
+<tt>AS_WRITEBACK_INDETERMINATE</tt> that filesystems can set on inode
+mappings to say that writeback may take an indeterminate amount of time to
+complete; FUSE will set the flag on its mappings, which can be used to
+avoid deadlocks in the writeback machinery.
+</p>
+
+<a href="/Articles/1020167/">
+<img src="../_static/images/2025/lsfmb-koong-sm.png" border=0 hspace=5 align="left"
+alt="[Joanne Koong]" title="Joanne Koong" width=217 height=280>
+</a>
+
+<p>
+That patch set was rejected, Koong said, primarily because it would allow
+buggy or malicious FUSE servers to hold up migration indefinitely by not
+ever completing the writeback of some pages.  That would increase memory
+fragmentation and thwart attempts to allocate contiguous memory.
+Allocating the temporary pages can also fragment memory, but those are made
+in unmovable memory, which is less problematic to fragment than movable
+memory.  Other parts of FUSE already have this problem, including readahead
+and writethrough splicing (using <a
+href="https://www.man7.org/linux/man-pages/man2/splice.2.html"><tt>splice()</tt></a>),
+but "<q>we shouldn't try to add more of this, we should try to eliminate it if
+we can</q>".
+</p>
+
+<p>
+Several options were discussed in the thread, but the most promising idea,
+providing a mechanism to cancel writeback if pages need to migrate, does
+not work.  The problem is that pages can be spliced, she said, and the
+writeback cannot be canceled for those pages.  Another viable possibility
+is to have a dedicated area in the movable zone for pages that may be
+unmovable for indeterminate amounts of time.  That would reduce the impact
+of the fragmentation to only that area of memory.  Alternatively,
+unprivileged FUSE servers that behave badly, by not completing writeback in
+a timely fashion or by having too many pages under writeback, could just be
+killed. 
+</p>
+
+<p>
+David Hildenbrand said that there was some discussion of disallowing
+splicing for unprivileged FUSE servers; "<q>you're not trustworthy enough
+to let you do that</q>".  That would allow canceling writeback, but Koong
+was not sure that was the right path forward.  What followed was some
+fast-moving, hard-to-follow discussion on various possibilities for
+avoiding the edge cases that can lead to deadlock.
+</p>
+
+<p>
+Omar Sandoval asked about the feasibility  of just killing the misbehaving
+unprivileged servers as was suggested.  Koong said that it was a
+reasonable solution, though it may not be backward compatible because
+existing servers are not expecting it.  But she thinks that something
+along those lines should already have been done as a protection mechanism.
+</p>
+
+<p>
+Sandoval asked what a reasonable timeout value should
+be. There is a balance to be struck; "<q>if you're a FUSE server
+and you've gone out to lunch for 30 minutes, I don't care about your
+backwards compatibility, you already broke everything</q>". Hildenbrand said
+that is a difficult problem to solve; any timeout chosen will sometimes be
+too large or too small.  Sometimes the data will be valuable enough that a
+long wait is acceptable, but, say, 30 seconds may already be too long to
+hold off an allocation.
+</p>
+
+<p>
+It would be his wish to find some easy way to handle the common cases where
+the pages can just be migrated, which might mean prohibiting the use of
+<tt>splice()</tt>.  He wondered what the implication of that prohibition
+would be.  Koong said that the FUSE servers could be audited for the use
+of <tt>splice()</tt> and the problem could be discussed with the
+developers.  Josef Bacik said that the kernel could just fall back to doing
+an internal copy when <tt>splice()</tt> is requested from an unprivileged
+server. 
+</p>
+
+<p>
+The crux of the problem seems to be the unmovable nature of the memory that
+is under writeback, he continued; if some new way could be found to use movable memory
+without doing a copy, that would be ideal.  "<q>We love <tt>splice()</tt>
+because it's faster, but it sounds like we need to invent a new zero-copy
+mechanism that uses movable memory</q>".
+</p>
+
+<p>
+The ability to mount FUSE
+filesystems as an unprivileged user makes them so problematic, Jeff Layton
+said; any random user can start a server that can grab a bunch of memory
+and not handle it properly.  That is what the system needs to guard
+against; doing so with "<q>draconian measures</q>" like killing the server
+is not unreasonable.  He suggested finding a way to maintain compatibility
+with the existing servers and to provide a zero-copy mechanism for new
+ones; in his mind, it is not out of the question to rewrite some of the old
+FUSE servers to take advantage of newer features.  Koong agreed, but said
+that it would be Szeredi's call on what should be done in that regard; she
+was not clear on what his thinking is.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/In user space</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Writeback</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1019522/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
