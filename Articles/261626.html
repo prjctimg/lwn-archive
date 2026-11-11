@@ -1,0 +1,177 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Writeout throttling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Writeout throttling">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The avoidance of writeout deadlocks is a topic which occasionally pops up on the mailing lists. [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/261092/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Writeout throttling</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 11, 2007</br>
+           </div>
+The avoidance of writeout deadlocks is a topic which occasionally pops up
+on the mailing lists.  Most Linux systems are able to handle the writeout
+of dirty pages to disk without a great deal of trouble.  Every now and
+then, however, the system can get itself into a state where it is is out of
+memory and it must write some pages to disk before any more memory can be
+allocated.  If the act of writing those pages, itself, requires memory
+allocations, the system can deadlock.  Systems with complicated block I/O
+setups - those using the device mapper, network-based storage, user-space
+filesystems, etc. - are
+the most susceptible to this problem.
+<p>
+
+There has been a steady stream of patches aimed at solving this problem;
+the <a href="245600.html">write throttling patch</a>
+discussed here last August is one of them.  The problem is inherently hard
+to solve, though; it looks like it may be with us for a long time.  Or
+maybe not, if Daniel Phillips's new and rather aggressively promoted <a
+href="http://lwn.net/Articles/261271/">writeout throttling patch</a> lives
+up to its hype.
+<p>
+
+Daniel's patch is quite simple at its core.  His approach for eliminating
+writeout-related deadlocks comes down to this:
+<p>
+<ul>
+<li> Establish a memory reserve from which (only) code performing writeout 
+     can allocate pages.  In fact, this reserve already exists, in that
+     some memory is reserved for the use of processes marked with the
+     <tt>PF_MEMALLOC</tt> flag.
+<p>
+<li> Place an upper limit on the amount of memory which can be used for writeout
+     to each device at any given time.
+</ul>
+<p>
+The patch does not try to directly track the amount of memory which will be
+used by each writeout request; instead, it tasks block-level drivers with
+accounting for the number of "units" which will be used.  To that end, it
+adds an <tt>atomic_t</tt> variable (called <tt>available</tt>) and a
+function pointer (<tt>metric()</tt>) to each
+request queue.  When an outgoing request finds its way to
+<tt>__generic_make_request()</tt>, it is passed to <tt>metric()</tt> to get
+an estimate of the amount of resource which will be required to handle that
+request.  If the estimated resource requirement exceeds the value of
+<tt>available</tt>, the process will simply block until a request completes
+and <tt>available</tt> is incremented to a sufficiently high level.
+<p>
+
+The <tt>metric()</tt> function is to be supplied by the highest-level block
+driver responsible for the request queue.  If that block driver is, itself,
+responsible for getting the data to the physical media, estimating the
+resource requirements will be relatively easy.  The deadlock problems,
+however, tend to come up when I/O requests have to go through multiple
+layers of drivers; imagine a RAID array built on top of network-based
+storage devices, for example.  In that case the top level will have to get
+resource requirement estimates from the lower levels, a problem which has
+not been addressed in this patch set.
+<p>
+
+Andrew Morton <a href="/Articles/261633/">suggested an alternative
+approach</a> wherein the actual memory use by each block device would be
+tracked.  A few hooks into the page allocation code would give a reasonable
+estimate of how much memory is dedicated to outstanding I/O requests at any
+given time; these
+hooks could also be used to make a guess at how much memory each new
+request can be expected to need.  Then, the block layer could use that
+guess and the current usage to ensure that the device does not exceed its
+maximum allowable memory usage.  Daniel eventually <a
+href="/Articles/261634/">rejected</a> this approach, saying that looking at
+current memory use is risky.  It may well be that a given device is
+committed to serving I/O requests which will, before they are done, require
+quite a bit more memory than has been allocated so far.  In that case,
+memory usage could eventually exceed the cap in a big way.  It's better,
+says Daniel, to do a conservative accounting at the beginning.
+<p>
+
+The patch does not address the memory reserve issue at all; instead, it
+relies on the current <tt>PF_MEMALLOC</tt> mechanism.  It was necessary,
+says Daniel, to give the <tt>PF_MEMALLOC</tt> "privilege" to some system
+processes which assist in the writeout process, but nothing more than that
+was needed.  He also claims that, for best results, much of the current
+code aimed at preventing writeout deadlocks needs to be removed from the
+kernel.  He concludes:
+<p>
+<div class="BigQuote">
+	Let me close with perhaps the most relevant remarks: the attached
+	code has been in heavy testing and in production for months now.
+	Thus there is nothing theoretical when I say it works, and the
+	patch speaks for itself in terms of obvious correctness.  What I
+	hope to add to this in the not too distant future is the news that
+	we have removed hundreds of lines of existing kernel code,
+	maintaining stability and improving performance.
+</div>
+<p>
+Since then, a couple of reviewers have pointed out problems in the code,
+dimming its aura of obvious correctness slightly.  But nobody has found
+serious fault with the core idea.  Determining its true effectiveness and
+making it work for a larger selection of storage configurations will take
+some time and effort.  But, if the idea pans out, it could herald the end
+of a perennial and unpleasant problem for the Linux kernel.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Writeout throttling</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Write throttling</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/261626/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
