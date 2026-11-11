@@ -1,0 +1,1346 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Restartable sequences, TCMalloc, and Hyrum's Law [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Restartable sequences, TCMalloc, and Hyrum's Law">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Hyrum's Law states that any observable behavior of a system will eventually be depended upon by [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1070467/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Restartable sequences, TCMalloc, and Hyrum's Law</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 30, 2026</br>
+           </div>
+<a href="https://www.hyrumslaw.com/">Hyrum's Law</a> states that any
+observable behavior of a system will eventually be depended upon by
+somebody.  The kernel community is currently contending with a clear
+demonstration of that principle.  The recent <a
+href="/Articles/1033955/">work to address some restartable-sequences
+performance problems</a> in the 6.19 release maintained the documented API
+in all respects, but that was not enough; Google's <a
+href="https://google.github.io/tcmalloc/overview.html">TCMalloc</a>
+library, as it turns out, violates the documented API, prevents other code
+from using restartable features, and breaks with 6.19.  But the kernel's
+no-regressions rule is forcing developers to find a way to accommodate
+TCMalloc's behavior.
+<p>
+As a quick reminder: the restartable sequences feature, accessed by way of
+the <a href="/Articles/1033957/"><tt>rseq()</tt>
+system call</a>, provides a mechanism for the execution of brief critical
+sections in user space.  A shared-memory segment is used to communicate to
+the kernel when a critical section is active, and the kernel can redirect
+execution if the running thread is preempted or migrated during that
+critical section.  There are a number of associated features, including the
+ability to quickly determine which CPU a thread is running on; the <a
+href="/Articles/1038235/">time-slice-extension feature</a> merged for the
+7.0 release is also tied to restartable sequences.  <!-- middle-ad -->
+<p>
+<h4>TCMalloc trouble</h4>
+<p>
+
+On April 22, Mathias Stearn <a
+href="/ml/all/CAHnCjA25b+nO2n5CeifknSKHssJpPrjnf+dtr7UgzRw4Zgu=oA@mail.gmail.com">reported
+two problems</a> with TCMalloc resulting from the 6.19 improvements to
+restartable sequences.  One of them turned out to be a simple bug in the
+64-bit Arm implementation, tied to the fact that the Arm architecture does
+not yet fully use the generic entry code.  This bug is uncontroversial and
+will be fixed like any other.  The second problem, though, has deeper
+origins.
+<p>
+The memory shared between the kernel and user space for restartable
+sequences includes an instance of <a
+href="https://elixir.bootlin.com/linux/v7.0.1/source/include/uapi/linux/rseq.h#L89"><tt>struct
+rseq</tt></a>; that structure contains a number of fields, one of which, in
+particular, is of interest for this discussion.  The 32-bit
+<tt>cpu_id_start</tt> field contains the number of the CPU on which the
+thread is running.  This value, which is maintained by the kernel, is
+explicitly defined as a read-only value for user space, and is guaranteed
+to always contain a valid CPU number, even if restartable sequences are not
+in use.
+<p>
+Prior to the 6.19 release, the kernel would update <tt>cpu_id_start</tt> on
+every return from the kernel to user space, regardless of whether the CPU
+number had changed or not.  Storing a single integer value does not seem
+like an expensive operation, but looks can be deceiving; many CPUs have
+features that prevent the kernel from randomly changing user-space memory.
+Turning off that protection (and re-enabling it after the store) <i>is</i>
+expensive.  Removing the redundant stores improved performance by 15% for
+many workloads without changing the restartable-sequences ABI in any way —
+or so it seemed.
+<p>
+The TCMalloc library makes extensive use of restartable sequences to
+improve performance.  Notably, while it does use this feature for critical
+sections, it also uses it to detect scheduling interruptions outside of
+critical sections.  The trick (to avoid more pejorative terms) used is
+described in detail in <a
+href="https://google.github.io/tcmalloc/rseq.html">this document</a>.  In
+short, TCMalloc's internal data structures are designed to overlay the
+shared <tt>struct rseq</tt> so that <tt>cpu_id_start</tt> becomes the upper
+four bytes of an internal cache pointer.  When TCMalloc stores this
+pointer, the result is to write zeroes into <tt>cpu_id_start</tt>; the
+topmost bit is set, though, to distinguish the contents of
+<tt>cpu_id_start</tt> from any valid CPU number. When the kernel stores
+into <tt>cpu_id_start</tt>, it will end up clearing that top bit, enabling
+TCMalloc to quickly detect the change and regenerate that pointer.
+<p>
+The key point is that TCMalloc needs that signal for any sort of
+interruption, even if the running thread did not move to a new CPU.
+Pre-6.19 kernels would always overwrite <tt>cpu_id_start</tt> — an
+undocumented but observable behavior — providing TCMalloc with that signal;
+as of 6.19, that overwriting only happens if the thread migrates to a new
+CPU.  As a result, TCMalloc, which has come to depend on that undocumented
+behavior, ends up leaving a smoking crater in the middle of any application
+that is trying to use it.
+<p>
+<h4>A regression?</h4>
+<p>
+The problematic nature of this behavior has been widely known for some
+years; the above-linked documentation advises that, since
+<tt>cpu_id_start</tt> can no longer be counted on to hold the current CPU
+number, "<q>this makes <tt>__rseq_abi.cpu_id_start</tt> unusable for its
+original purpose</q>".  In other words, no other code running within a
+TCMalloc-using thread can use restartable sequences and expect it to work.
+That is somewhat awkward, given that one other user of the feature is the
+GNU C Library (glibc), as of version 2.35.  Back in 2022, <a
+href="https://github.com/google/tcmalloc/issues/144">this problem was
+reported</a> in the TCMalloc issue tracker and a change of behavior was
+requested but, despite a fair amount of discussion, no change was ever
+made.  As a result, code using TCMalloc must be run with an environment
+variable set to prevent glibc from trying to use restartable sequences.
+<p>
+Kernel developers have had a dim view of this behavior for a while.
+Unsurprisingly, that view became rather dimmer yet when users started
+complaining that the 6.19 release broke TCMalloc entirely.  The behavior
+described above violates the documented restartable-sequences ABI and makes
+the feature unusable for anybody else.  It would have been detected by the
+kernel's debugging facilities, but those were clearly never used with
+TCMalloc, since they would have caused an immediate killing of the
+offending thread.  In the issue discussion, kernel developers had <a href="https://github.com/google/tcmalloc/issues/144#issuecomment-2306880781">offered an
+extension</a> to restartable sequences to let TCMalloc stop overwriting
+<tt>cpu_id_start</tt>, but that offer was not accepted.  The result, as
+Thomas Gleixner <a href="/ml/all/87cxzp1tn6.ffs@tglx">described it</a>, is
+"<q>everyone is in a hard place and up a creek without a paddle</q>".
+<p>
+Gleixner made it clear that he thought TCMalloc's difficulties should not
+be considered to be a kernel regression, since the documented ABI
+guarantees are still being upheld by the kernel and the debugging feature
+would have caught the problem years ago.  Linus Torvalds, though, was <a
+href="/ml/all/CAHk-=wjsEqWJxXArS-P5+ksSY2Apaox8u6FtUrtyWSBEOL4Q2Q@mail.gmail.com">just
+as clear</a> that the only thing that matters is that a once-working
+program stopped working as the result of a kernel change: "<q>This is not
+some kind of gray area. It clearly violates our regression rules</q>".
+<p>
+This response was clearly expected by Gleixner, though <a
+href="/ml/all/874il11jac.ffs@tglx">he still did not like it</a>: "<q>Feel
+free to enforce it, but be aware that you thereby set a precedence that a
+single abuser can then rightfully own a general shared interface of the
+kernel forever and force everybody else to give up</q>".  Glibc developer
+Florian Weimer <a
+href="/ml/all/lhuqzo051cq.fsf@oldenburg.str.redhat.com">was also
+unhappy</a>, pointing out that TCMalloc's use breaks the modular design of
+the restartable-sequences ABI.  Torvalds, though, <a
+href="/ml/all/CAHk-=wiLdmz92CCfu2+-9_UrGSn6Pu6sUVvLs5gjyhGaEov-BA@mail.gmail.com">was
+adamant</a> that a fix had to be found.
+<p>
+<h4>Now what?</h4>
+<p>
+Various options for fixes were discussed; Stearn had been <a
+href="/ml/all/CAHnCjA3aR1hLYK3DsXZV5AaLWe56+zLOS8ffpAMv9TBEkT-3nA@mail.gmail.com">working</a>
+on a simple, low-cost option that, seemingly, has not worked out.  Another
+option, of course, is to simply go back to always updating
+<tt>cpu_id_start</tt> and accepting the associated performance penalty;
+there are not many supporters of this approach in the kernel community.
+The most likely fix, as of this writing, is something based on <a
+href="/ml/all/87jyttz8cf.ffs@tglx">this patch from Gleixner</a>, which
+works without requiring changes to either TCMalloc or glibc, albeit with
+the performance penalty in some environments.
+<p>
+As is the pattern with many recent system calls, <tt>rseq()</tt> requires
+the caller to pass in both the pointer to <tt>struct rseq</tt> and the size
+of that structure.  In this way, future extensions can be made in
+compatible ways by increasing that size.  Gleixner proposes increasing it
+from the current 32&nbsp;bytes to 33&nbsp;bytes, which would also have the
+effect of forcing a 64-byte alignment of the structure.  Any caller
+presenting a 32-byte <tt>struct rseq</tt> or failing to align the structure
+properly would see the pre-6.19 behavior, with unconditional updating of
+<tt>cpu_id_start</tt>; more recent related features, such as time-slice
+extension, would also be unavailable.  If, instead, the caller provides a
+33-byte, 64-byte-aligned <tt>rseq</tt> structure, the kernel provides the
+6.19 behavior, with full performance.
+<p>
+The result should be a fully compatible change.  Existing TCMalloc
+installations will use the older structure size; the overlay trick used by
+the library also prevents a 64-byte alignment for the structure.  So
+TCMalloc will be given the older behavior that it depends on.  Newer glibc
+versions query the expected structure size (using <a
+href="https://man7.org/linux/man-pages/man3/getauxval.3.html"><tt>getauxval()</tt></a>)
+and will be rewarded with higher performance and full functionality, with
+no glibc update needed.
+<p>
+Older glibc versions (those prior to 2.41), though, will be stuck with the
+performance penalty; Weimer <a
+href="/ml/all/lhujyts4zr8.fsf@oldenburg.str.redhat.com">indicated</a> that
+updating those versions would not be an easy thing to do.  Mathieu
+Desnoyers <a
+href="/ml/all/7f8783a6-1a48-4c92-850c-d285a788b491@efficios.com">suggested</a>
+adding a flag that could be passed to <tt>rseq()</tt> as an "I'm not
+TCMalloc" indicator, resulting in the faster behavior.  Adding that flag
+would be a far easier backport to older glibc versions.  Gleixner, though,
+<a href="/ml/all/87bjf4yuym.ffs@tglx">dismissed that idea</a>, saying that
+it would lead to unnecessary complexity in the code and, in any case, would
+be problematic in cases where there are multiple users of restartable
+sequences within a single application.
+<p>
+This solution appears to have survived initial testing, and has been put
+together into <a href="/ml/all/20260428221058.149538293@kernel.org">a
+proper patch series</a>, along with some sharp words for the people who
+made it necessary:
+<p>
+<blockquote class="bq">
+	As Linus decreed the onus is on the lack of ABI compliance
+	enforcement in the original RSEQ kernel implementation and the
+	clever abuse is fine.  That's technically correct, but in the
+	context of the larger ecosystem a fundamentally flawed
+	decision. Though that's a completely different discussion to have
+	as it affects the long term sustainability of the Open Source
+	ecosystem in general and the ability to protect it against rogue
+	actors, which are thereby officially entitled to hold a whole
+	ecosystem hostage and force the people who provide them their
+	operational base to go out on a limb to make progress.
+</blockquote>
+<p>
+Grumpiness aside, it seems that the form of the solution to this particular
+demonstration of Hyrum's law has been worked out.  As long as there are no
+other users doing strange things, it should be possible to move forward,
+preserving all of the improvements that have been made, without breaking
+existing users.  The absence of other surprises seems fairly likely to be
+the case, since there are few users of restartable sequences.  In the end,
+things clearly could have been worse.
+<p>
+That said, this episode will surely not be reassuring to developers who
+fear exposing features that could end up creating similar compatibility
+problems in the future.  Many discussions about adding new interfaces have
+run aground on that point; see, for example, <a
+href="/ml/all/014f3c0a-7c6f-4f64-95cd-b7b69d804880@kernel.org">this
+response</a> by David Hildenbrand to the idea of allowing BPF programs to
+control more aspects of memory management. It is easy to see Hyrum lurking
+in the corner, just waiting to ossify some behavior inadvertently exposed
+by the kernel.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Development model/Regressions</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Restartable sequences</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1070072/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1070697"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">tcmalloc's weird hack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2026 19:39 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1070697/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070697" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When I implemented rseq support in rr to make tcmalloc work, I remember encountering this hack and getting very confused. The gift that keeps on giving!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070697/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070702"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2026 21:57 UTC (Thu)
+                               by <b>hailfinger</b> (subscriber, #76962)
+                              [<a href="/Articles/1070702/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hailfinger" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070702" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the kernel is has an exploitable interface and some large-scale user depends on it (think large malware campaign relying on a kernel bug), would Linus block fixing that bug as well because malware has come to depend on it? After all, Linus once famously wrote: "I personally consider security bugs to be just normal bugs".<br>
+<p>
+An equally interesting question is: Would the malicious actor have to prove that exploitation is widespread in order to get protected against the "regression" which is a security bugfix?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070702/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070708"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2026 22:19 UTC (Thu)
+                               by <b>Kamilion</b> (subscriber, #42576)
+                              [<a href="/Articles/1070708/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Kamilion" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070708" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We'll see, I guess, now that copy.fail is demonstrating an exploitable kernel interface, today.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070708/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070709"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2026 22:40 UTC (Thu)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1070709/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070709" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Leaving aside, of course, the "I know it when I see it" method, I think this is distinguishable: the functionality that TCMalloc is relying on does not violate any intended security properties of the kernel. TCMalloc isn't gaining access to info that it shouldn't be able to, and it's clear that some other mechanism for what they want would be fine and mergeable—the dispute is just whether this particular ABI should expose the functionality. If rseq had never worked this way, a request to add some kind of API would have been considered; a request to add an explicitly local-root API would not be considered. Similarly, the change in behavior wasn't because the old behavior was buggy and they wanted to fix it, but because there was a performance boost from taking a different approach, and that happened to cause different user-visible behavior as a side effect.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070709/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070740"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 8:36 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1070740/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070740" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Note that Linus's test is a judgement call - Linus rules that the userspace ABI is defined by kernel behaviour, and as long as you're a desirable user of the kernel ABI (ignoring whether you're using it as intended - just whether Linus wants you as a user of his kernel), regressions are not permitted.
+<p>Thus, in the malware case, Linus would probably consider the malware an undesirable user, and refuse to "fix" the regression because he'd like the malware authors to target a different kernel.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070740/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 19:35 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1070865/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070865" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Thus, in the malware case, Linus would probably consider the malware an undesirable user, and refuse to "fix" the regression because he'd like the malware authors to target a different kernel. </span><br>
+<p>
+Funny you said that: <a href="https://www.linux.com/news/torvalds-creates-patch-cross-platform-virus/">https://www.linux.com/news/torvalds-creates-patch-cross-p...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070992"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2026 7:39 UTC (Mon)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1070992/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070992" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interesting way to frame it. Someone discovers that the kernel is violating the syscall ABI by not restoring the EBX register in the old syscall interface. This happened to work most of the time because glibc saves the register beforehand. But Linus codes a patch to fix the issue anyway.<br>
+<p>
+And because it was found while researching an old virus, you can frame it as: Linus fixes bug so that old virus works again.<br>
+<p>
+Clickbait I suppose...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070992/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1071182"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2026 17:28 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1071182/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1071182" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I couldn't find the LKML message from Linus, but he said something like: "This code was stupid, but here, I fixed your virus".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1071182/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1070966"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Lack of enforcement&quot; and &quot;exploitable&quot; should be easier to tell apart</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2026 17:24 UTC (Sun)
+                               by <b>sionescu</b> (subscriber, #59410)
+                              [<a href="/Articles/1070966/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sionescu" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070966" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder when the companies that bankroll kernel development will realise that Linus is more of a liability than anything else. I hope we'll soon see an abdication or a hard fork. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070966/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1070705"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is an interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2026 22:11 UTC (Thu)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/1070705/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="magfr" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070705" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Despite what Linus says things have been removed.<br>
+CGroups v1 is just one of the things I can think of.<br>
+What is the difference here?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070705/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070710"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is an interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2026 22:49 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1070710/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070710" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+cgroups v1 are still supported by the kernel. They are being deprecated by user-space tools, but they are still supported.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070710/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070944"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is an interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2026 9:55 UTC (Sun)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/1070944/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="LtWorf" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070944" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have had failures because setting some flags on some type of descriptors was previously ignored but a later version decided to act on it instead.<br>
+<p>
+Not to mention /proc and /sys that are for some reason not considered kernel API and free to change at will.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070944/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1071200"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is an interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2026 7:43 UTC (Tue)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1071200/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1071200" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+i had a console ioctl removed out from underneath my shipping code =\.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1071200/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1071342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is an interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2026 15:35 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1071342/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1071342" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is no hard line between what is a user space breaking change and what is not. Even adding a new driver can be a breaking change, if your program depends on the absence of a kernel driver.<br>
+There is no solution to the spacebar heating problem.<br>
+<p>
+Whether interpreting previously unused bits or any other kernel change breaks user space is less of a technical question, because the technical answer is always: Yes, it can break something. It's a question of common sense and checking afterwards, if we broke something *important*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1071342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1070713"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is an interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 0:13 UTC (Fri)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/1070713/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiederm" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070713" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If someone makes the effort to update userspace so that the potential problem no longer exists in practice you can remove an interface.<br>
+<p>
+This is all about the very practical test.  Can a kernel be upgraded without having to change userspace.<br>
+<p>
+That makes tracking down other problems much easier.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070713/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070752"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is an interface?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 10:30 UTC (Fri)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1070752/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070752" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So your interpretation is that glibc is penalized for having accepted to add an environment variable for tcmalloc compatibility ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070752/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1070701"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not only a kernel problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2026 22:47 UTC (Thu)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1070701/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070701" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is not only a kernel problem. Whatever Linux decide, the glibc team could decide to stop supporting tcmalloc by removing support for the environment variable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070701/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070739"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 8:29 UTC (Fri)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/1070739/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070739" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would rseq be unnecessary if all important hardware implemented the instructions load_acquire and store_release (also known as load_locked and store_conditional)?  These instructions enhance a cache in order to provide enough accounting to detect actual collisions, and also potential future collisions that are enabled because of hardware interrupts and context switches.  Some background is in <a href="https://lwn.net/Articles/844224/.">https://lwn.net/Articles/844224/.</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070739/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070741"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 8:34 UTC (Fri)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/1070741/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Sesse" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070741" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+load_acquire and store_release (which exist in some form on nearly all modern CPUs) are used to guard access to shared data in a safe way. rseq is used to avoid having shared data in the first place.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070741/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 9:27 UTC (Fri)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/1070748/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbonzini" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070748" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Acquire/release is different from LL/SC. Acquire and release determine the synchronization point between threads, LL/SC delimit a "transaction" within a single thread.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 10:41 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1070749/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070749" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      All important hardware does implement those atomic instructions you name - but using them comes at a cost because you're no longer just accessing memory the cheap way, but also ensuring that all other cache agents will see the memory access in the "right" order according to the system's memory ordering rules.
+<p>However, if you don't care about other cache agents, you can avoid paying that price - and that's the point of rseq. With rseq, you know if you're preempted and moved to another CPU, and thus can use a cheap sequence when you're not pre-empted, and a more expensive sequence (with atomics) if you're moved to a new CPU.
+<p>For many reasons, the kernel tries hard to keep threads on the same CPU unless it has to move them, and so on a system that's not overloaded, you'll do the cheap option most of the time, and thus can afford for the "moved CPU" option to be quite a bit more expensive than just using atomics.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070854"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 15:43 UTC (Fri)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1070854/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070854" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Probably not. Even existing LL/SC implementations are probably too weak: only one or two adjacent cache lines and too many spurious conflicts. And rseq semantics are in some ways orthogonal. Maybe a stronger LL/SC with much more well-defined and guaranteed semantics, e.g. N disjoint cache lines per core that don't fail updates just because some other cache lines on another core associatively overlapped? (Or maybe instead of disjoint just a whole page?)<br>
+<p>
+Sun's Rock processor was supposed to offer this (billed as hardware transactional memory, but IIRC it was just strong'ish LL/SC like above), but it never got off the ground. I think strong LL/SC with a useful amount of operations/memory imposes too many hurdles in modern chips, or would cost too much silicon. rseq has a really good cost+benefit profile, and I had always wondered why it didn't exist 20+ years ago. But it would be nice to get stronger hardware primitives, rather than doubling the width of cmpxchg every other decade.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070854/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 17:04 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1070858/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070858" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The stronger LL/SC you're describing sounds a lot like Intel's Restricted Transactional Memory (part of the TSX extension). It's been removed from mobile and desktop processors, but not from Xeons. I suspect it's removed because it's a pain to validate, and thus bug-prone.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 18:41 UTC (Fri)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1070863/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070863" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, TSX was Intel's attempt to hack together something analogous to a less weak LL/SC into their ISA, but I think mostly implemented in microcode to leverage what cache coherency interfaces each particular microarchitecture could provide. But it was plagued by bugs and others issues, like side channel exploits, and even on chips that nominally support it, it's often disabled.<br>
+<p>
+To get a stronger, durable primitive (whether labelled LL/SC or not) probably requires a major redesign of cache coherency architectures, etc. And that would probably stall performance progression more generally for a generation or two, and even if it succeeded it would take a few years at least to see any significant usage. So it's a huge risk for AMD and Intel, especially. The story is more complicated for ARM and RISC. Some implementations provide wider and more reliable LL/SC than others, enough to really broaden the horizon of lock-free and wait-free algorithms, but the landscape is too fragmented and dynamic so few people would want to predicate their concurrency architecture on what the best implementations can provide.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1072352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rseq vs load_acquire then store_release</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2026 18:36 UTC (Mon)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1072352/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1072352" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      They certainly had their share of bugs in TSX instructions, but it makes no sense to leave them enabled in large Xeons if they have not fixed the bugs.
+
+<p>My guess is that TSX is disabled completely in the consumer and small Xeon CPUs because it provides a high-bandwidth speculative side channel attack opportunity.  For the larger Xeons, Intel did not completely disable it because SAP HANA uses it, but I expect that only Xeons that run only trusted users will have it enabled, and the others will disable it in the BIOS or so.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1072352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1070753"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">workaround is okay </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 10:30 UTC (Fri)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/1070753/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="meyert" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070753" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Given that the structure size act like a version of the API structure the workaround is okay I think.<br>
+Next step: deprecated old version and remove the hack, which is okay as it would not be a "regression" I think ;-)<br>
+What would be the earliest date for depreciation? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070753/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">workaround is okay </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 14:59 UTC (Fri)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/1070853/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hmh" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070853" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Deprecation can slow down new adoptions of the undesired behaviour, but they are not going to help much unless you can actually push the existing users away from the deprecated API.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070957"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">workaround is okay </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2026 16:07 UTC (Sun)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/1070957/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jthill" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070957" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      That's the part I don't get.
+
+Making decisions based on what you expect is in the cpu caches is a perfectly cromulent goal, why not make some form of the existing behavior selectable in the new interface? Even just conditionally updating the cpu id if it doesn't match sounds doable (he says, from the peanut gallery).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070957/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1073610"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">workaround is okay </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2026 7:30 UTC (Wed)
+                               by <b>daenzer</b> (subscriber, #7050)
+                              [<a href="/Articles/1073610/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daenzer" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1073610" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Even just conditionally updating the cpu id if it doesn't match sounds doable</span><br>
+<p>
+Wouldn't that still incur a performance penalty? Based on the assumption that "features that prevent the kernel from randomly changing user-space memory" make reading from user-space memory more expensive as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1073610/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1070860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apply some soft pressure on TCMalloc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2026 17:23 UTC (Fri)
+                               by <b>jbills</b> (subscriber, #161176)
+                              [<a href="/Articles/1070860/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jbills" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070860" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What about adding a small additional slowdown to those who use the legacy behavior? For example, mark the page with `cpu_id_start` as fault-on-write for every write. Their motivation is performance, and if their performance is deliberately killed maybe that will motivate them to fix their crap. This wouldn't be a breaking change, just a rude one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070882"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard on Google</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2026 5:17 UTC (Sat)
+                               by <b>CChittleborough</b> (subscriber, #60775)
+                              [<a href="/Articles/1070882/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="CChittleborough" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070882" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAICT, Google went to these extremes with TCMalloc because they use it on their gigantic fleets of machines. Penalizing TCMalloc might well cause a detectable increase in the energy use at Google's main (non-AI?) compute centers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070882/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070885"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard on Google</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2026 7:13 UTC (Sat)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1070885/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="joib" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070885" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sounds like an excellent way to motivate Google to fix their issue, then. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070885/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1070910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Apply some soft pressure on TCMalloc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2026 9:52 UTC (Sat)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1070910/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1070910" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The legacy behavior will already sacrifice the significant performance improvements that come with the newer code — and features like time-slice extension as well.  That, hopefully, should be enough to motivate change.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1071185"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Interesting.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2026 19:33 UTC (Mon)
+                               by <b>gmatht</b> (guest, #58961)
+                              [<a href="/Articles/1071185/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gmatht" />
+                <input type="hidden" name="return" value="/Articles/1070072/#CommAnchor1071185" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My instincts were telling me that the solution would be to do a quick check for the flag, hinting to the CPU that it is not expected to be set, and only do the expensive write only if  the flag was set.  A branch misprediction seems like a small price to pay to exploit this undocumented behaviour. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1071185/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
