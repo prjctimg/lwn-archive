@@ -1,0 +1,478 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Debugging information for inlined functions [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Debugging information for inlined functions">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" BPF programs use  BPF type format (BTF) debugging information in order to determine how to int [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1084316/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Debugging information for inlined functions</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>July 29, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+<p>
+BPF programs use
+<a href="https://docs.kernel.org/bpf/btf.html">
+BPF type format</a> (BTF) debugging information in order to
+determine how to interact with functions in the kernel. Specifically, tracing a
+kernel function involves finding its address in the kernel's BTF section — but
+that doesn't work for functions that have been inlined, and therefore don't have
+a single, specific address. Alan Maguire wants to add information about inlined
+functions to BTF in order to allow them to be traced, and led a session on that
+topic at the 2026
+<a href="https://events.linuxfoundation.org/lsfmmbpf/">
+Linux Storage, Filesystem, Memory-Management, and BPF Summit</a>.
+</p>
+
+<p>
+There are more than 100,000 inlined functions in the kernel, Maguire said,
+spread across five times as many locations. Worse, some of them are partially
+inlined: called normally in some places and inlined in others. That can lead to
+cases today where it appears that a function was traced successfully, but some
+invocations were not seen.
+</p>
+
+<p>
+The good news is that the rest of the infrastructure for tracing inlined
+functions is already in place to enable
+<a href="https://docs.kernel.org/trace/kprobes.html">
+kprobes</a>, which can be attached to arbitrary
+locations. It is just a matter of getting the data about where functions have
+been inlined into a usable format, Maguire stated. "<q>The story is actually
+pretty complete.</q>"
+</p>
+
+<p>
+So, what is needed to store this information in BTF? The
+<a href="https://dwarfstd.org/">
+DWARF
+debugging format</a> already has a way to indicate inlining information, but DWARF
+is also difficult to work with, and doesn't have a simple way to represent the
+common cases. A solution for BTF should be compact, and permit
+deduplication, to keep the memory overhead low, Maguire said. Ideally, inlining
+information could be stored in a separate section of the kernel binary, or even
+be distributed as a separate kernel module, so that it is not loaded until it is
+needed.
+</p>
+
+<p>
+Concretely, Maguire proposed three new pieces of information be added to BTF.
+The first was inline-site-specific information about which function was inlined at
+each call site
+and how it would have been called if it had not been inlined, called the
+"location section". That data can't be
+easily deduplicated because it's specific to a given call site, so as much as
+possible the information should consist of pointers to data that can be
+deduplicated. 
+</p>
+
+<p>
+The second and third pieces of information he wants to add would be the
+pointed-to data: a "location prototype" and "location parameter".
+The location prototype specifies how the inlined function's arguments are
+represented at the call site, as a list of pointers to location parameters,
+which each store how to access a single function argument.
+In theory, the compiler could store a given function parameter at a different
+location for every inlined call site (of which there are 538,090);
+in practice, there are a limited number of
+ways that the compiler will transform parameters, and many functions
+have compatible signatures that result in the compiler making the same choices.
+In the current kernel, deduplicating location prototypes results in just 57,141
+distinct entries referencing only 17,535 location parameter entries in total.
+</p>
+
+<p>
+This means that the location sections take up most
+of the added data. Overall, the additions to BTF that Maguire proposes would come to
+approximately 11MB of additional data, or about 21 bytes per inlined call
+site. When pulled out into a separate kernel module and compressed, the total
+amount of data goes down to 3.5MB.
+</p>
+
+<p>
+Maguire then went through an example of how information about a specific
+function would be stored. Consider this function:
+</p>
+
+<pre>
+    int foo(int a, void *b, bool c);
+</pre>
+
+<p>
+If the compiler chose to inline <tt>foo()</tt> in a way that eliminates
+<tt>a</tt> as unused, promotes <tt>b</tt> to be passed in a
+register, and determines that <tt>c</tt> is a constant, the BTF representation
+would be a single location section entry storing the BTF type ID of
+<tt>foo()</tt>, the offset of the call site from the kernel's base address in memory, and a pointer to the
+location-prototype entry. That entry becomes a length-tagged
+array of references to location-parameter entries. The first entry is null,
+indicating that <tt>a</tt> cannot be recovered. The second points to a location
+parameter entry with a flag that indicates the value is contained in a register,
+and then the specific register number of <tt>b</tt>. The last location-parameter
+entry has a different flag specifying that it is a constant, and then the value
+of the constant.
+</p>
+
+<p>
+Alexei Starovoitov asked what order the location-section entries would be stored
+in, since the kernel will have to search through them to find the right
+entry when setting up tracing. At first, Maguire thought that sorting by the
+address of the call site would be best, but after looking at how the data would
+be used, he decided to sort the entries by function name, instead. That way,
+tracers that are looking for information on a particular function can find it
+quickly with a binary search.
+</p>
+
+<p>
+There were two prerequisite problems with adding inlining information to BTF
+that Maguire covered. For one thing, the number of location-section entries
+required increasing the size of the length field of the containing structure to
+24 bits. More seriously, some of the existing tooling for processing BTF did not
+cope well with the presence of new tags that it doesn't know how to read. That
+is a problem that comes up any time BTF is extended with new kinds of
+information, and part of how DWARF ended up becoming so brittle. To address
+that, Maguire added information on how to parse BTF into BTF itself. Now, any
+tool that can read that meta-information can correctly skip past any new tags
+that it does not understand.
+</p>
+
+<p>
+Maguire also had to update the
+<a href="/Articles/335942/">
+poke-a-hole (pahole) utility</a> to handle
+properly sorting the new kinds of BTF tags. That ended up being a bit
+complicated, but it should be working for normal kernel builds. Andrii Nakryiko
+asked about how it would handle out-of-tree modules. Those modules would need
+<a href="/Articles/978317/">
+resilient module BTF</a> that could be explicitly relocated when loaded into a
+running kernel, Maguire explained. His design allows that, but it complicates
+the build somewhat. There was a bit of back-and-forth about the changes that
+would be needed to support out-of-tree modules elegantly, but ultimately no
+changes were agreed upon.
+</p>
+
+<p>
+At the time of writing, Maguire's
+<a href="https://lwn.net/ml/bpf/20251008173512.731801-1-alan.maguire@oracle.com/">
+patch set</a> has not been merged. It is clearly useful to be able to
+trace inlined and partially inlined functions; the question is whether it is
+worth the complexity and memory overhead. Time will tell.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1083985/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1086091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There should be a name for this syndrome</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 29, 2026 19:59 UTC (Wed)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1086091/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086091" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That is a problem that comes up any time BTF is extended with new kinds of information, and part of how DWARF ended up becoming so brittle.</span><br>
+<p>
+Feels like another case where the kernel developers look at the existing solution, decide it's overkill for their needs, implement something new that addresses just the use-cases they care about, then gradually over time that set of use-cases grows and they incrementally extend their solution, reintroducing many of the problems that caused them to reject that existing solution in the first place, until they reach a point where they have their own alternative solution which is better than the original solution in some ways but worse in others. And everyone who's writing tools or dealing with the ecosystem has to understand and handle both of the solutions and maybe convert between them.<br>
+<p>
+See also: BPF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There should be a name for this syndrome</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 29, 2026 20:14 UTC (Wed)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1086093/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086093" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't necessarily disagree. But that's practically traditional for the entire open-source ecosystem, really. I mean, this is all being done in the context of the Linux kernel, which also followed that trajectory — starting as a small, scratch-my-own-itch alternative to existing systems, and then growing well beyond that, gaining users, and spawning its own alternatives.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086385"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There should be a name for this syndrome</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2026 7:08 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1086385/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086385" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's not traditional for the open source ecosystem in general. That's why DWARF is universal, except, for the reasons OP describes, in the Linux kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086385/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1086115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There should be a name for this syndrome</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 7:22 UTC (Thu)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1086115/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086115" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is more or less just Greenspun's Tenth Rule in action.<br>
+<p>
+<span class="QuotedText">&gt; Any sufficiently complicated C or Fortran program contains an ad hoc, informally-specified, bug-ridden, slow implementation of half of</span><br>
+Common Lisp.<br>
+<p>
+Obviously with some modern technologies instead of the ones back then but same basic principle.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1086728"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There should be a name for this syndrome</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2026 2:47 UTC (Mon)
+                               by <b>kkdwvd</b> (subscriber, #179603)
+                              [<a href="/Articles/1086728/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kkdwvd" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086728" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I understood you correctly, your position is that implementing a full blown DWARF parser in the kernel would have been a better outcome?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086728/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1086092"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Please add support for location expressions describing the *return values* of inline functions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 29, 2026 20:00 UTC (Wed)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1086092/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086092" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+DWARF doesn't support this, which is a huge missing feature. Tracing features will want to make use of this.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086092/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Please add support for location expressions describing the *return values* of inline functions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 7:05 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1086112/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086112" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAIU, DWARF does support this, and supporting parameter value extraction for inlined calls is one reason for DWARF's state machine design. See this related article on BTF and inlining from last year: <a href="https://lwn.net/Articles/1018475/">https://lwn.net/Articles/1018475/</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1086121"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Please add support for location expressions describing the *return values* of inline functions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2026 9:04 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1086121/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/1083985/#CommAnchor1086121" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think DWARF supports this, because this extension proposal is still open: <a href="https://dwarfstd.org/issues/221105.1-r4.html">https://dwarfstd.org/issues/221105.1-r4.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1086121/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

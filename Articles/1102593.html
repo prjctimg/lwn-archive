@@ -1,0 +1,1129 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Containers as a recognized kernel object [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Containers as a recognized kernel object">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The foundation of the design for containers in the kernel is that there isn't one; there is no  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Containers as a recognized kernel object&quot;" href="https://lwn.net/headlines/1102593/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<link rel="stylesheet" href="/CSS/subonly">
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1103481/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Containers as a recognized kernel object</h1>
+<h2>[LWN subscriber-only content]</h2>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 29, 2026</br>
+           </div>
+The foundation of the design for containers in the kernel is that there
+isn't one; there is no container abstraction that the kernel recognizes.
+Instead, the kernel provides a long list of components — namespaces,
+control groups, sandboxing mechanisms, and more — along with a note that
+says, in effect, "some assembly required".  There have been <a
+href="/Articles/723477/">attempts</a> (<a
+href="780364.html">repeatedly</a>) over the years to turn containers
+into first-class objects with kernel support, but they have never gotten
+far.  Now Josef Bacik is <a
+href="/ml/all/20261026-cells-rfc-v2-b41d7e0c95a3@toxicpanda.com">making a
+try</a> with a concept that he calls "cells".
+<p>
+Some years ago, the lack of any sort of kernel-supported container object
+was arguably the right approach; there was still a lot to be learned about
+how this concept should be integrated into Linux.  Some would surely argue
+that it is still a good idea.  But there are downsides as well, starting
+with the complexity of creating a container.  Beyond that, though, since
+the kernel has no notion of containers, it cannot enforce a container's
+properties and cannot even answer questions about which container a process
+might belong to.  Containers are created by walling off parts of the larger
+system.  Namespaces are created then entered, filesystems are unmounted or
+overmounted to make them inaccessible inside the container, and so on.
+This sequence means that any given process might be only partly inside a
+container, a situation that, according to Bacik, "<q>is where a depressing
+number of our bugs come from</q>".  The current approach to container
+creation also makes it easy to let unwanted resources leak into the
+container from the outside.
+<p>
+<!-- middle-ad -->
+<h4>Introducing cells</h4>
+<p>
+Bacik's proposal is an attempt to address these problems.  A container
+(called a "cell" in this series), when created, contains nothing at all.
+No processes or filesystems show up there by default.  Anything that the
+creator wants to exist in a cell must be explicitly put there.  Processes
+and other resources created within a cell are not allowed to to leave that
+cell.  In theory, cells should be easier to manage and easier to keep
+secure than containers as they exist in Linux now.
+<p>
+A cell's life starts with a call to <tt>cell_create()</tt>:
+<p>
+<pre>
+    int cell_create(int parent, unsigned int flags);
+</pre>
+<p>
+The <tt>parent</tt> parameter is seemingly meant to designate which process
+will be the parent of the new cell, but in the current implementation the
+only allowed value is <tt>CELL_SELF</tt>, meaning that the creator is the
+parent.  The <tt>flags</tt> argument must be zero.  The return value, if
+all goes well, is a "cellfd" — a file descriptor referring to this cell.
+The cellfd is special, in that it is the handle that is used to perform all
+other operations on the cell.  There is no way to create a duplicate cellfd
+that possesses the same capabilities.  Creating a cell is an unprivileged
+operation.
+<p>
+If the cellfd is closed, the cell (and anything contained within it) is
+immediately killed.  There is also a system call to kill a cell explicitly:
+<p>
+<pre>
+    int cell_kill(int cellfd, unsigned int flags);
+</pre>
+<p>
+Where <tt>cellfd</tt> identifies the cell to kill, and <tt>flags</tt> must
+be zero.
+<p>
+An empty cell is secure and bug-free, but it is also rather boring.  There
+is another system call that is used to set various properties of this cell to
+make it more interesting:
+<p>
+<pre>
+    int cell_configure(int cellfd, unsigned int cmd, const char *key,
+    		       const void *value, int aux);
+</pre>
+<p>
+This system call applies the given configuration <tt>cmd</tt> to the cell
+identified by <tt>cellfd</tt>; the <tt>key</tt> string identifies which
+property is to be changed.  The available commands are:
+<p>
+<blockquote>
+<dl class="spacylist">
+<dt><tt>CELL_SET_FLAG</tt></dt>
+<dd>Sets the flag named by <tt>key</tt>; there are no flags defined in the
+    current proposal, though.
+</dd>
+<dt><tt>CELL_SET_STRING</tt></dt>
+<dd>Sets the string value given by <tt>key</tt> to the given
+    <tt>value</tt>.  Two strings are supported in the initial patch set:
+    <tt>hostname</tt> to set the host name within the cell, and
+    <tt>net</tt>, which sets the network namespace for the cell.  By
+    default, the cell has no network access, and only <tt>AF_UNIX</tt>
+    sockets can be created within it.  Setting the <tt>net</tt> key to
+    <tt>new</tt> creates a new network namespace that the builder will
+    subsequently configure, while <tt>own</tt> creates a network namespace
+    owned by the cell itself and configured internally.  In the
+    <tt>new</tt> case, there is another new system call
+    (<tt>cell_open()</tt>) that  must be used to
+    obtain a file descriptor for the newly created namespace.  The network
+    namespace can also be explicitly set with <tt>CELL_SET_FD</tt>,
+    described below.
+</dd>
+<dt><tt>CELL_SET_BINARY</tt></dt>
+<dd>Sets the property identified by <tt>key</tt> to the provided binary data.  The only value
+    accepted is <tt>ids</tt>, which is used to define which user IDs will
+    be used within the cell.  There are only two allowed values.  Setting
+    it to one causes processes within the cell to run with the same user ID
+    as the creator; this mode is not allowed for the root user.
+    <p>
+    Otherwise, the <tt>ids</tt> key must be set to 65,536, which causes a
+    block of that many IDs to be allocated from the upper part of the
+    32-bit user-ID space.  These IDs will be unique on the running
+    system, and the cell creator has no control over what they will be.  It
+    is not possible to create files owned by those IDs in any filesystem
+    outside of the cell.  This part of the design has drawn some comments
+    and may change (perhaps by providing an entirely separate user-ID
+    space for cell inmates) in the future.
+</dd>
+<dt><tt>CELL_SET_FD</tt></dt>
+<dd>Sets a value requiring a file descriptor.  There are three of those
+    implemented in this patch set.  <tt>root</tt> is a filesystem namespace
+    that contains the root filesystem within the cell, <tt>net</tt> is a network
+    namespace to be used by the cell, and <tt>budget</tt> is a
+    control-group directory.  The <tt>budget</tt> is mandatory, and each
+    cell must have its own control group.
+</dd>
+<dt><tt>CELL_CMD_SEAL</tt></dt>
+<dd>Once the configuration of the cell is complete, this command must be
+    issued; it completes the initialization of the cell and prevents any
+    further configuration changes.
+</dd>
+</dl>
+</blockquote>
+<p>
+Once the cell is sealed, it is set up with a filesystem tree, control-group
+membership, and the rest of the namespaces that control its interactions
+with the rest of the system.  It is still otherwise empty, though, with no
+processes running within it.  In Bacik's design, there is no way for an
+existing process to enter a cell; <a
+href="https://man7.org/linux/man-pages/man2/setns.2.html"><tt>setns()</tt></a>
+cannot be used to enter its namespaces.  Instead, processes must be born
+within the cell from the beginning, and they can never exit the cell.
+<p>
+<h4>Creating inmate processes</h4>
+<p>
+Allowing the creation of processes with life sentences inside a cell
+involves yet another proposal for a process-builder API; the last such attempt
+was <a href="/Articles/1086330/">covered here</a> in August.  Here, the
+first step is to create the process within the cell with a variant of the
+<a
+href="https://man7.org/linux/man-pages/man2/pidfd_open.2.html"><tt>pidfd_open()</tt></a>
+system call.  Rather than passing a process ID to <tt>pidfd_open()</tt>,
+the cell creator passes the cellfd and the <tt>PIDFD_EMPTY</tt> flag.  The
+return value is a pidfd that does not, yet, refer to a running task; it is
+in the "embryo" state at this point.
+<p>
+Once the pidfd is created, it must be configured with another new system
+call before it can run anything useful:
+<p>
+<pre>
+    int pidfd_configure(int pidfd, unsigned int cmd, const char *key,
+    		        const void *value, int aux);
+</pre>
+<p>
+The interface looks much like that of <tt>cell_configure()</tt>, and it
+operates in mostly the same way.  The process to configure (which must be
+in the embryo state) is specified by <tt>pidfd</tt>; the <tt>cmd</tt> value
+is one of:
+<p>
+<blockquote>
+<dl class="spacylist">
+<dt><tt>PIDFD_SET_STRING</tt></dt>
+<dd>The only supported key is <tt>exec</tt>, which names the executable
+    file (within the cell's mount namespace) that the process will run.
+</dd>
+<dt><tt>PIDFD_SET_BINARY</tt></dt>
+<dd>Sets a key to binary data.  Recognized keys are <tt>argv</tt> to set
+    the processes argument vector, <tt>envp</tt> to set its environment
+    variables, and <tt>cred</tt>, which sets the process's user and group
+    IDs within the cell's user namespace.
+</dd>
+<dt><tt>PIDFD_SET_FD</tt></dt>
+<dd>Sets a file descriptor in the embryo process; the <tt>key</tt> is the
+    file-descriptor number (as a string), and the <tt>aux</tt> parameter is
+    an open file descriptor in the caller's file table.  The only open file
+    descriptors the process will have are those set up with
+    <tt>PIDFD_SET_FD</tt>, so there should be no problems with file
+    descriptors accidentally leaking into the cell.
+</dd>
+<dt><tt>PIDFD_CMD_START</tt></dt>
+<dd>This command sets the process running once all of the necessary
+    parameters have been configured.  After that, it is no longer an
+    embryo, and <tt>pidfd_configure()</tt> can no longer be used with it.
+</dd>
+</dl>
+</blockquote>
+<p>
+The first process to be started within the cell becomes the init process
+for the cell; if it dies, the cell dies with it.  It is possible to inject
+other processes into a running cell using this API, so the owner can, for example, start a
+shell within the cell if need be.  But that must be done by creating a new
+process; existing processes are forbidden from crossing that boundary.
+<p>
+<h4>Other details</h4>
+<p>
+A lot of other restrictions at the cell boundary exist as well.  Every
+process within the cell runs with <a
+href="https://docs.kernel.org/userspace-api/no_new_privs.html">the "no new
+privileges" flag</a> set, so it cannot gain new capabilities.  It is not
+possible to send open file descriptors across the boundary (in either
+direction) using Unix-domain sockets.  Cells cannot share a control group
+with any other processes.  And so on; the purpose is to make the
+containment of cells as tight and controlled as it can be.
+<p>
+There are a lot of details to this proposal that have not been covered
+here; it also contains a long list of open issues and shortcomings.  As
+Bacik noted, the purpose is not to provide a complete implementation;
+instead, it "<q>exists so that there is code to argue about</q>".  Readers
+wanting to know more should read through his entire proposal.  The code
+exists in <a href="https://github.com/josefbacik/linux/commits/cells/">a
+GitHub branch</a>; it contains <a
+href="https://github.com/josefbacik/linux/blob/cells/Documentation/userspace-api/cells.rst">a
+design document</a> that covers much of what was discussed here and more as well.
+<p>
+So far, there has been little discussion of this proposal, perhaps because
+it was only posted to the linux-fsdevel mailing list.  Nonetheless, it has
+evolved somewhat since <a
+href="/ml/all/20261019-cells-rfc-6f4c85415f29@toxicpanda.com">the first
+version</a> was posted in mid-October.  This is not a small proposal, and
+it is trying to make changes that have proved controversial in the past, so
+it is not hard to imagine that discussion will eventually happen.  At the
+far end of it, though, the kernel might just have the container abstraction
+that its community has resisted for so long.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Containers</a></td></tr>
+            </table><br clear="all">
+<div class="MakeALink">
+               <table align="right"><tr><td>
+               <form action="/SubscriberLink/MakeLink" method="post">
+               <input type="hidden" name="articleid" value="1102593">
+               <input type="submit" value="Send a free link"></form>
+               </td></tr></table>
+               </div>
+               <br clear="all">
+               <table align="right"><tr><td>
+           <form action="/Articles/1102593/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1103672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Cell&quot; vs. &quot;Jails&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 14:53 UTC (Thu)
+                               by <b>NightMonkey</b> (subscriber, #23051)
+                              [<a href="/Articles/1103672/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NightMonkey" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103672" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What is the metaphor behind the word 'cell'? A 'jail cell' or a 'biological cell'? And if it is the former, are we finally getting FreeBSD jails but in a very roundabout way? ;) Thanks for this article, and interesting to read about this idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103709"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Cell&quot; vs. &quot;Jails&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 18:41 UTC (Thu)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/1103709/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103709" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote>A 'jail cell' or a 'biological cell'?</blockquote>
+
+<p>Those aren't the only options, of course. Maybe it's a monk's cell, a battery cell, a mobile phone cell, or a Communist Party cell.  Etymologically, these all come from the same root, Latin "cella" meaning room, implying that the basic concept is encapsulation.  The goal is to wall an area of the OS off from everything else so it can only affect or be affected by the rest of the system through whatever openings you deliberately give it.  Maybe the goal is to contain a prisoner in solitary confinement, or maybe it's to protect the solitude of a monk who wants to engage in peaceful contemplation.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103709/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103720"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Cell&quot; vs. &quot;Jails&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 21:16 UTC (Thu)
+                               by <b>somlo</b> (subscriber, #92421)
+                              [<a href="/Articles/1103720/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="somlo" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103720" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  The goal is to wall an area of the OS off from everything else so it can only affect or be affected by the rest of the system through whatever openings you deliberately give it.</span><br>
+<p>
+Interestingly enough, that was what a *process* was for, back when "multitasking" became a thing in operating systems... :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103720/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103735"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Cell&quot; vs. &quot;Jails&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 7:09 UTC (Fri)
+                               by <b>lutchann</b> (subscriber, #8872)
+                              [<a href="/Articles/1103735/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="lutchann" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103735" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;&gt; The goal is to wall an area of the OS off from everything else so it can only affect or be affected by the rest of the system through whatever openings you deliberately give it.</span><br>
+<p>
+<span class="QuotedText">&gt; Interestingly enough, that was what a *process* was for, back when "multitasking" became a thing in operating systems... :)</span><br>
+<p>
+Sure, and then when processes needed to interact, we created users, and when that wasn't powerful enough, we created virtual machines... (Or in a different order of appearance depending on whether you learned computing in academia or the corporate world.) We keep building walls between execution contexts, then poking holes in those walls, then building new, more sophisticated walls.<br>
+<p>
+As always, there's an xkcd. <a href="https://xkcd.com/2044/">https://xkcd.com/2044/</a><br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103735/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103742"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Cell&quot; vs. &quot;Jails&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 8:48 UTC (Fri)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1103742/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="khim" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103742" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Sure, and then when processes needed to interact, we created users</p>
+</blockquote>
+<p>Users existed before there were any processes, though.</p>
+<blockquote class="bq"><p>and when that wasn't powerful enough, we created virtual machines…</p>
+</blockquote>
+<p>That's where it should have all stopped, but, of course, <a href="https://en.wikipedia.org/wiki/Popek_and_Goldberg_virtualization_requirements">the architectures where things work like that</a> lost and then we have started building <a href="https://en.wikipedia.org/wiki/Rube_Goldberg_machine">Goldberg machines</a> to compensate.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103742/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1103748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Cell&quot; vs. &quot;Jails&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 12:04 UTC (Fri)
+                               by <b>valadas</b> (subscriber, #183860)
+                              [<a href="/Articles/1103748/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="valadas" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103748" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it's fair to assume it comes from a jail cell because  it calls the processes in the cell "inmate" processes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1103691"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Mixed feelings</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 15:38 UTC (Thu)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1103691/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103691" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Whilst I am happy to see Linux growing up and gaining a FreeBSD jail-like abstraction rather than the DIY mishmash approach it has required for many years, I am disappointed to see that the design document is entirely slop in style.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103691/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1103698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Adopting APIs from elsewhere?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 16:09 UTC (Thu)
+                               by <b>calvin</b> (subscriber, #168398)
+                              [<a href="/Articles/1103698/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="calvin" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103698" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there a reason why they're doing their own API rather than cloning i.e. FreeBSD's jail APIs, or at least mentioning prior art? I haven't dug back in the archives to see why.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1103701"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 16:24 UTC (Thu)
+                               by <b>stefanha</b> (subscriber, #55072)
+                              [<a href="/Articles/1103701/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="stefanha" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103701" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The configure syscalls set one key/value pair at a time. That means a bunch of syscalls are required to set up a cell and pidfd. It would be nice to avoid this so that large numbers of processes and containers can be created without spending CPU cycles going back and forth between the kernel and userspace so often. <br>
+<p>
+It may not seem like a problem now, but an API design is hard to change later on. An array of KV pairs per configure syscall maybe?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103701/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103706"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 16:56 UTC (Thu)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1103706/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103706" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Something like io_uring, or dare I say it, BPF?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103706/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 21:57 UTC (Thu)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1103722/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103722" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At what point does Linux give up and rename io_uring as syscall2 in recognition of it being the new system call API that obsoletes the traditional one? :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103729"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 0:54 UTC (Fri)
+                               by <b>aviallon</b> (subscriber, #157205)
+                              [<a href="/Articles/1103729/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aviallon" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103729" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How about asyscall or syscall_ring. Or sys_ring even. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103729/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 10:34 UTC (Fri)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1103745/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103745" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or perhaps aioctl or ioctl_ring?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1104672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 2, 2026 9:07 UTC (Mon)
+                               by <b>aviallon</b> (subscriber, #157205)
+                              [<a href="/Articles/1104672/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aviallon" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1104672" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why restricting yourself to I/O only? Nothing would prevent adding other kinds of syscalls later, I believe? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1104672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1103715"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 20:34 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1103715/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103715" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Using string keys and value references doesn't sound like a great idea, especially if you care about not having to bounce between kernel and user memory when reading KV pairs. Also creates another gaping seccomp hole.<br>
+<p>
+String keys in particular doesn't buy you anything. It *feels* like a good abstraction, but it creates all the same kernel API and ABI dependencies; the only thing it buys you is complexity, opaqueness, and false sense of FFI simplicity. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103715/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103718"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System call heavy design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 21:09 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1103718/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103718" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; String keys in particular doesn't buy you anything. It *feels* like a good abstraction, but it creates all the same kernel API and ABI dependencies; the only thing it buys you is complexity, opaqueness, and false sense of FFI simplicity. </span><br>
+<p>
+Well said! This is a classic trap that people fall into over and over again when designing APIs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103718/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1103707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Bikeshedding</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 17:27 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1103707/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103707" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+CELL_SELF is -10005. That's kinda ugly, but I guess you'll need to support PIDFDs eventually for the `parent` argument.<br>
+<p>
+Maybe explicitly add the "whence" flags indicating what type of parent you're using?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1103712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NIH &amp; ugly as hell</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2026 19:46 UTC (Thu)
+                               by <b>rbranco</b> (subscriber, #129813)
+                              [<a href="/Articles/1103712/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rbranco" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103712" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just port FreeBSD Jails.  Podman runs fine on those.<br>
+<p>
+<a href="https://man.freebsd.org/cgi/man.cgi?sektion=2&amp;query=jail">https://man.freebsd.org/cgi/man.cgi?sektion=2&amp;query=jail</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1103733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I don’t see the point.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 2:59 UTC (Fri)
+                               by <b>eatnumber1</b> (subscriber, #136670)
+                              [<a href="/Articles/1103733/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="eatnumber1" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103733" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Unless the author intends to remove the lower level primitives that make up a cell from the kernel, I fail to see any value in this proposal. The bugs will remain and the kernel’s syscall interface only grows, not shrinks.<br>
+<p>
+Furthermore the implied assertion that each feature (namespaces, groups, etc) are not useful on their own is also obviously false.<br>
+<p>
+I fail to see why containers shouldn’t be a user space concept assembled by a well tested common library everyone uses.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103736"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I don’t see the point.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 7:11 UTC (Fri)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/1103736/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k3ninho" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103736" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>I fail to see why containers shouldn’t be a user space concept assembled by a well tested common library everyone uses.</p>
+</blockquote>
+<p>If the primitives subvert the library so that you can do an end-run around the 'safe defaults' tooling and undermine the security and task isolation of containers, I see a benefit to having one zones/jails/cells mechanism provided by the Kernel that shuts down this gap.</p>
+<p>Maybe the library or these <code>cells</code> should have containers marked &quot;managed by Kernel&quot; so that the existing tools refuse to interfere with them.</p>
+<p>K3n.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103736/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1103740"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cell in cell?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 8:38 UTC (Fri)
+                               by <b>cyperpunks</b> (subscriber, #39406)
+                              [<a href="/Articles/1103740/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyperpunks" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103740" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Will this design support nested cells?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103740/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1103749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cell in cell?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 12:51 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1103749/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1103749" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The current implementation does not support nesting; I suspect that would be necessary in the long run, though.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1103749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1104212"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cell in cell?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2026 16:58 UTC (Fri)
+                               by <b>josefbacik</b> (subscriber, #90083)
+                              [<a href="/Articles/1104212/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josefbacik" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1104212" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, it'll be a slot just like everything else. You can turn it on and create nested cells that cannot get anything more than the cell creating it. You can turn it off and then nesting is disallowed. I don't think I have it in the Git tree right now but it's in my local branch that I'm working on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1104212/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1104253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">lack of fd-passing seems very restrictive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2026 11:17 UTC (Sat)
+                               by <b>smcv</b> (subscriber, #53363)
+                              [<a href="/Articles/1104253/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smcv" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1104253" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It is not possible to send open file descriptors across the boundary (in either direction) using Unix-domain sockets</span><br>
+<p>
+This seems like a rather heavy restriction: fd-passing across the boundary isn't needed for the use-case where what you want is "a virtual machine, but cheaper", like a typical use of Docker or Incus; but in less-restrictive container use-cases like Flatpak, Toolbox or the sandboxed helpers used by e.g. web browsers, there are various protocols (Wayland, Pipewire, D-Bus services) that want to do capability-based security across the container boundary by fd-passing a memfd, or the end of a pipe, or some similar resource (with the presence/availability of the fd encapsulating permission to do whatever it represents). Having a way for the container manager to opt-in or opt-out from allowing fd-passing seems maybe better than having it hard-wired?<br>
+<p>
+One of the effects of the current piecemeal approach to containers is that it's difficult to look at a process and ask: is this in a container? if yes, which container technology, and which instance ID does it have? - so it doesn't seem ideal if this new unifying feature is only usable at the most-strongly-isolated end of the container spectrum, with less-strongly-isolated containers being officially "not actually a container" from its point of view.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1104253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1104273"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenVZ had it figured out in 2005</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2026 15:41 UTC (Sat)
+                               by <b>dowdle</b> (subscriber, #659)
+                              [<a href="/Articles/1104273/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dowdle" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1104273" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I remember using OpenVZ for more than 10 years.  It was fantastic.  Of course, they developed it entirely out-of-tree and it was a gigantic patch to primarily RHEL kernels... and there was no way that it would ever be accepted in the mainline kernel.  Unfortunately Docker came along in 2013 and kinda spoiled the scene and everyone seemed to think "application" containers were the way to go... and we've been off on that tangent ever since.  Virtuozzo has changed hands a few times I'm not sure who they are today but they are still plugging away at it.  Oh, can you tell?  I'm really opinionated about system containers being better... and yes I know you an do system containers with Docker (although I prefer podman)... but it just isn't the same.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1104273/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1104275"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OpenVZ had it figured out in 2005</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2026 16:11 UTC (Sat)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1104275/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1102593/#CommAnchor1104275" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>System containers require good supervision to be viable. When Docker came along, there was no good ubiquitous system-level supervisor, so Docker took on that role by association (which is only possible if you run application containers).</p>
+<p>Now that we have systemd in ubiquity, system-level containers in form of LXC/LXD/Incus/nspawn are absolutely sound, viable, and well-developed.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1104275/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,989 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>IPC medley: message-queue peeking, io_uring, and bus1 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="IPC medley: message-queue peeking, io_uring, and bus1">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The kernel provides a number of ways for processes to communicate with each other, but they nev [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1065980/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>IPC medley: message-queue peeking, io_uring, and bus1</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 2, 2026</br>
+           </div>
+The kernel provides a number of ways for processes to communicate with each
+other, but they never quite seem to fit the bill for many users.  There are
+currently a few proposals for interprocess communication (IPC) enhancements
+circulating on the mailing lists.  The most straightforward one adds a new
+system call for POSIX message queues that enables the addition of new
+features.  For those wanting an entirely new way to do interprocess
+communication, there is a proposal to add a new subsystem for that purpose
+to io_uring.  Finally, the bus1 proposal has made a return after ten years.
+<p>
+<h4>Peeking at message queues</h4>
+<p>
+The POSIX message-queue API is not heavily used, but there are users out
+there who care about how well it works.  Message queues are named objects that,
+by default, all share a global namespace, though IPC namespaces can be used
+to separate them.  There is a whole set of system calls for the creation,
+configuration, use, and destruction of message queues; see the <a
+href="https://man7.org/linux/man-pages/man7/mq_overview.7.html">mq_overview
+man page</a> for an introduction to this subsystem.
+<p>
+Of interest here is <a
+href="https://man7.org/linux/man-pages/man2/mq_timedreceive.2.html"><tt>mq_timedreceive()</tt></a>,
+which can be used to receive messages from a message queue:
+<p>
+<pre>
+    ssize_t mq_timedreceive(size_t msg_len;
+                            mqd_t mqdes, char  msg_ptr[msg_len],
+                            size_t msg_len, unsigned int *msg_prio,
+                            const struct timespec  abs_timeout);
+</pre>
+<p>
+This call will receive the highest-priority message pending in the queue
+described by <tt>mqdes</tt> (which is a file descriptor on Linux systems)
+into the buffer pointed to by <tt>msg_ptr</tt>, which must be at least
+<tt>msg_len</tt> bytes in length.  If <tt>abs_timeout</tt> is not null, it
+specifies how long the call should block before returning a timeout error.
+On successful receipt of a message, the location pointed to by
+<tt>msg_prio</tt> (if non-null) will be set to the priority of the received
+message.
+<p>
+That system call has a fair number of parameters, but Mathura Kumar would
+like to add some more.  Since <tt>mq_timedreceive()</tt> was not designed
+for extensibility, that means adding a new system call.  Thus, <a
+href="/ml/all/20260320052340.6696-1-academic1mathura@gmail.com">Kumar's
+patch set</a> adding <tt>mq_timedreceive2()</tt>. But there is an
+additional constraint here: there are architecture-imposed limits on the
+number of arguments that can be passed to system calls, and Kumar's plans
+would exceed those limits.  As a result, the new system call is defined as:
+<p>
+<pre>
+    struct mq_timedreceive2_args {
+        size_t         msg_len;
+        unsigned int  *msg_prio;
+        char          *msg_ptr;
+    };
+
+    ssize_t mq_timedreceive2(mqd_t mqdes,
+                             struct mq_timedreceive2_args *uargs,
+                             unsigned int flags,
+                             unsigned long index,
+                             const struct timespec *abs_timeout);
+</pre>
+<p>
+The <tt>msg_len</tt>, <tt>msg_prio</tt>, and <tt>msg_ptr</tt> arguments
+have been moved into the new <tt>mq_timedreceive2_args</tt> structure,
+freeing up two slots for new parameters to the system call.  That structure
+is passed by pointer, without using the common pattern of passing its
+length, which would make future additions easier; that may change if
+this patch series moves forward.
+<p>
+The new arguments are <tt>flags</tt> and <tt>index</tt>.  In this series,
+only one flag (<tt>MQ_PEEK</tt>) is defined; if it is present, the message
+will be returned as usual, but without removing it from the queue, meaning
+that it will still be there the next time a receive operation is
+performed.  The <tt>index</tt> argument indicates which message is of
+interest; a value of zero will return the highest-priority message, and
+higher values will return messages further back in the queue.
+<p>
+There are a few use cases for these features described in the patch cover
+letter.  One would be monitoring tools, which may want to look at the
+message traffic without interfering with it.  Another one is <a
+href="https://criu.org/Main_Page">Checkpoint/Restore in Userspace</a>,
+which can read a series of messages out of a queue, then restore them with
+the rest of the process at a future time.
+<p>
+The series as a whole has not received much attention so far, which is
+perhaps unsurprising given that few developers have much interest in POSIX
+message queues.  If this work is to proceed, it will need to attract some
+reviews, and probably go through some more rounds to address the problems
+that are found.
+
+<p>
+<h4>IPC in io_uring</h4>
+<p>
+Since its inception, the <a
+href="https://www.man7.org/linux/man-pages/man7/io_uring.7.html">io_uring
+subsystem</a> has steadily gained functionality.  After having started as
+the asynchronous I/O mechanism that Linux has long lacked, it has evolved
+into a separate system-call interface providing access to increasing
+amounts of kernel functionality.  While io_uring can be used for
+interprocess communication (by way of Unix-domain sockets, for example),
+it has not yet acquired its own IPC scheme.  <a
+href="/ml/all/20260313130739.23265-1-git@danielhodges.dev">This patch
+series</a> from Daniel Hodges seeks to change that situation, but it
+probably needs a fair amount of work to get there.
+<p>
+Hodges's goal is to provide a high-bandwidth IPC mechanism, similar to <a
+href="https://www.freedesktop.org/wiki/Software/dbus/">D-Bus</a>,  that
+will perform well on large systems.  By using shared ring buffers,
+processes should be able to communicate with minimal copying of data.
+It is worth noting
+that other developers have attempted to solve this problem over the years,
+generally without success; see, for example, <a
+href="/Articles/619068/">the sad story of kdbus</a>.  Hope springs eternal,
+though, and perhaps io_uring is the platform upon which a successful
+solution can be built.
+
+<p>
+There are facilities for direct and broadcast messages.  Communication is
+done through "channels"; it all starts when one process issues at least one
+<tt>IORING_REGISTER_IPC_CHANNEL_CREATE</tt> operation to establish an open
+channel.  Other processes can attach to existing channels if the
+permissions allow.  Two basic operations, <tt>IORING_OP_IPC_SEND</tt> and
+<tt>IORING_OP_IPC_RECV</tt>, are used to send and receive messages,
+respectively.  There is no documentation, naturally, but interested readers
+can look at <a
+href="/ml/all/20260313130739.23265-3-git@danielhodges.dev">this patch</a>
+containing a set of self-tests that exercise the new features.
+<p>
+The io_uring maintainer, Jens Axboe, quickly <a
+href="/ml/all/d6e64251-2025-438c-92d6-71b44927b437@kernel.dk/">noticed</a>
+that the patch showed signs of LLM-assisted creation, something that Hodges
+<a
+href="/ml/all/hzb3i37w6isn7gx7jqc223fmznxxjmqvlxke2rdb3lb43htifq@j45xx427nppc/">owned
+up to</a>.  He also noted that the series falls short of being a complete
+D-Bus replacement, lacking features like credential management.  Still
+Axboe <a
+href="/ml/all/54f95b7a-45de-4353-9308-12cd64dbe894@kernel.dk/">agreed</a>
+that an IPC feature for io_uring "<q>makes sense to do</q>" and seemed
+happy with the overall design of the code.  Some questions he asked though,
+went unanswered.  For this work to proceed, Hodges will need to return and
+do the hard work to bring a proof-of-concept patch up to the level needed
+for integration into a core subsystem like io_uring.
+<p>
+<h4>Bus1 returns</h4>
+<p>
+Back in 2016, David <a href="#note"><s>Herrmann</s></a> Rheinsberg proposed <a href="697191.html">a new
+kernel subsystem called "bus1"</a>, which would provide kernel-mediated
+interprocess communication along the lines of D-Bus. It allowed the passing
+of messages, but also of capabilities, represented by bus1 handles and open
+file descriptors.  The proposal attracted some attention, and brought some
+interesting ideas (see the above-linked article for details), but stalled
+fairly quickly and was never seriously considered for merging into the
+mainline kernel.
+<p>
+Ten years later, <a
+href="/ml/all/20260331190308.141622-1-david@readahead.eu">bus1 is back</a><s>,
+posted this time by David Rheinsberg</s>. The code has seen a few changes in
+the intervening decade:
+<p>
+<blockquote class="bq">
+	The biggest change is that we stripped everything down to the
+	basics and reimplemented the module in Rust. It is a delight not
+	having to worry about refcount ownership and object lifetimes, but
+	at the cost of a C&lt;-&gt;Rust bridge that brings some challenges.
+</blockquote>
+<p>
+The core features of bus1 remain similar to what was proposed in 2016.  For
+the time being, Rheinsberg is focusing on the Rust aspects of the work and
+requesting help from the Rust for Linux community to get that integration
+into better shape.
+<p>
+At some future time, presumably, the new bus1 implementation will be more
+widely exposed within the kernel community, at which point we will see if
+there is an appetite for this kind of in-kernel IPC mechanism or not.  For
+those who would like an early look, <a
+href="/ml/all/20260331190308.141622-8-david@readahead.eu">this patch</a>
+contains documentation on how the bus1 API will work, though with a number
+of details left unspecified.
+
+<p>[<a name="note"><em>Editor's note: we originally missed that David had changed his name. Apologies for the error.</em></a>]</p>
+
+<p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">bus1</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">io_uring</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Message passing</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1065490/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1066160"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Varieties of filesystems and schedulers, so why not for IPC mechanisms too?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2026 20:48 UTC (Thu)
+                               by <b>swilmet</b> (subscriber, #98424)
+                              [<a href="/Articles/1066160/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="swilmet" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066160" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are already lots of choices for filesystems and schedulers (there are maybe other examples). Maybe IPC mechanisms could be treated the same, so the kernel could include more ways of doing IPC over time.<br>
+<p>
+(I'm not a kernel developer, it's a real question).<br>
+<p>
+Maybe it's because IPC has a more direct impact on the kernel's external surface - the API provided to userspace. For each IPC system, a different API needs to be devised, while filesystems and schedulers have more common ground.<br>
+<p>
+Also, I wonder if with too many ways of doing IPC, it could create fragmentation among userspace programs. D-Bus is well-established, there is now Varlink (for semi-standard ways of well-integrating services together). The Linux kernel has an influence on the Linux userspace, so the kernel perhaps needs to move (more) wisely here than in other areas.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066160/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Varieties of filesystems and schedulers, so why not for IPC mechanisms too?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2026 16:03 UTC (Fri)
+                               by <b>richard_weinberger</b> (subscriber, #38938)
+                              [<a href="/Articles/1066250/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="richard_weinberger" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066250" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As soon as major Linux userspace such as systemd settles on one IPC, there is no choice anymore.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Varieties of filesystems and schedulers, so why not for IPC mechanisms too?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2026 17:12 UTC (Fri)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1066254/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066254" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  As soon as major Linux userspace such as systemd settles on one IPC, there is no choice anymore.</span><br>
+<p>
+I really wish they'd settle on a reasonable bus than this opaque non-discoverable varlink thing...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066381"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Varieties of filesystems and schedulers, so why not for IPC mechanisms too?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2026 15:57 UTC (Sun)
+                               by <b>bitreader</b> (subscriber, #182986)
+                              [<a href="/Articles/1066381/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bitreader" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066381" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Out of interest, could you elaborate?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066381/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069739"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Varieties of filesystems and schedulers, so why not for IPC mechanisms too?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2026 8:28 UTC (Mon)
+                               by <b>daenzer</b> (subscriber, #7050)
+                              [<a href="/Articles/1069739/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daenzer" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1069739" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The socket user.* xattr support landing in 7.1 seems useful for discoverability: <a href="https://lwn.net/ml/all/20260216-work-xattr-socket-v1-0-c2efa4f74cb7@kernel.org/">https://lwn.net/ml/all/20260216-work-xattr-socket-v1-0-c2...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069739/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1066256"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Varieties of filesystems and schedulers, so why not for IPC mechanisms too?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2026 18:51 UTC (Fri)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/1066256/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alison" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066256" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Also, I wonder if with too many ways of doing IPC, it could create fragmentation among userspace programs. D-Bus is well-established, there is now Varlink (for semi-standard ways of well-integrating services together). </span><br>
+<p>
+Perhaps desktop applications prefer D-Bus, but for system programming and embedded applications, passing protobuf or ZeroMQ via unix domain or IP sockets is more common.<br>
+<p>
+David Rheinsberg gave an excellent presentation about IPC at the All Systems Go Conference in 2025:<br>
+<p>
+<a href="https://cfp.all-systems-go.io/all-systems-go-2025/speaker/VFBWNK/">https://cfp.all-systems-go.io/all-systems-go-2025/speaker...</a><br>
+<p>
+Here is the video:<br>
+<p>
+<a href="https://media.ccc.de/v/all-systems-go-2025-347-linux-ipc-lost-between-threading-and-networking">https://media.ccc.de/v/all-systems-go-2025-347-linux-ipc-...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066256/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066260"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Varieties of filesystems and schedulers, so why not for IPC mechanisms too?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2026 18:53 UTC (Fri)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/1066260/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alison" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066260" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, the kernel also has binder, but I've never heard of anyone using it outside of Android.<br>
+<p>
+-- Alison<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066260/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1066347"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">real value in soft RT</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2026 22:01 UTC (Sat)
+                               by <b>dexjensen</b> (guest, #182120)
+                              [<a href="/Articles/1066347/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dexjensen" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066347" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+POSIX mqueues may be niche in general-purpose software, but they still have real value in soft real-time embedded Linux.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066347/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1066364"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What happened to kdbus?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2026 6:51 UTC (Sun)
+                               by <b>thomas.poulsen</b> (subscriber, #22480)
+                              [<a href="/Articles/1066364/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="thomas.poulsen" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066364" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Why was kdbus never merged? The linked article is relatively optimistic, but now 12 years later it seems abandoned. What happened?
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066364/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What happened to kdbus?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2026 9:54 UTC (Sun)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1066367/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066367" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because something along the lines of "it's completely wrong for IPC systems to be implemented in the kernel, they belong in userspace, things like these will never be merged" or so.<br>
+<p>
+Some time later Google showed up with Binder and that was merged because, er, reasons.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066407"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What happened to kdbus?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 6, 2026 2:40 UTC (Mon)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1066407/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066407" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How would you implement Binder in userspace without a broker? Keep in mind that Binder does just the one memcpy to a kernel-managed memory-mapped area in the recipient (no page-level fragmentation for mprotect!), that senders and recipients don't trust each other, and that priority inheritance likewise works across these untrusted process edges. It also properly tracks A-&gt;B-&gt;A-&gt;B-&gt;A callback causality and ensures that call-response chains are thread-local and don't migrate to other threads (causing all sorts of havoc) as the calls bounce back and forth.<br>
+<p>
+Binder really is a nice system, and it's one that solves a multitude of problems that the dbus crowd doesn't even realize it has. It's a shame people think of it as a "Google thing" despite its general utility.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066407/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What happened to kdbus?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2026 8:43 UTC (Thu)
+                               by <b>dvdhrm</b> (subscriber, #85474)
+                              [<a href="/Articles/1066910/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdhrm" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066910" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Binder really is a nice system, and it's one that solves a multitude of problems that the dbus crowd doesn't even realize it has. It's a shame people think of it as a "Google thing" despite its general utility.</span><br>
+<p>
+The "dbus crowd" works on "bus1", which is highly inspired by Binder, to solve longstanding issues in D-Bus. I wholeheartedly disagree with the sentiment of your comment.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1066369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What happened to kdbus?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2026 13:21 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1066369/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066369" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <a href="https://lwn.net/Articles/641275/">This article</a> describes what happened when the attempt was made to merge kdbus during the 4.1 cycle.  For those wanting more information about what happened both before and after, see <a href="../Kernel/Index/index.html">the kdbus entry</a> in the LWN kernel index.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1066395"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2026 17:50 UTC (Sun)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1066395/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066395" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Binder is already in the tree, already had a Rust implementation, and has been proven on billions of devices. Why are we pretending it doesn't exist and making new IPC subsystems from scratch? We don't need bus1.  We don't need an io_uring-based IPC mechanism. (At the most, we should just expose Binder's existing bulk-operation bytecodes through an io_uring gateway.)<br>
+<p>
+Binder already copies minimally, propagates security descriptors, sends and receives file descriptions, does priority inheritance, and integrates with LSMs. IPC is a solved problem. Let's focus on putting what we have in production instead of further fragmenting the infrastructure.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066395/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066401"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2026 20:46 UTC (Sun)
+                               by <b>lobachevsky</b> (subscriber, #121871)
+                              [<a href="/Articles/1066401/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="lobachevsky" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066401" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But it is a Google thing and nobody outside of Google wants to bet on the continued existence or direction of a Google thing. I find this quite understandable. Sure, the kernel has a don't break userspace policy, but if Google wanted to use binder in a way incompatible with other users' wishes, they would. If they wanted to use a different kernel, they could (they tried with Fuchsia) and almost all the billions of devices using binder on Linux would be gone and so would be the former maintainers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066401/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066404"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 6, 2026 0:46 UTC (Mon)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1066404/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066404" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If others used it, it would cease to be a "Google thing". It predates Android. It's originally from Be and Palm. It also does distributed object lifetime tracking in a way you seldom see done right elsewhere, and I think people proposing new IPC subsystems need to at *least* sit down and actually understand Binder, then Chesterton's fence style, explain why it won't work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066404/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1066402"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2026 21:11 UTC (Sun)
+                               by <b>kkdwvd</b> (subscriber, #179603)
+                              [<a href="/Articles/1066402/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kkdwvd" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066402" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think one of the main reasons D-Bus crew has been proposing bus1 (and kdbus before this) is the supposed need for total ordering guarantees. Unlike kdbus, bus1 (the last time I looked at the code) used Lamport clocks, and broke ties in a way that was consistent across all participants such that a total ordering could be established. User space D-Bus daemons already provide global ordering, since everything bounces through the daemon, so layering them on top of bus1 will be easier, I guess. Even if not layering conventional D-Bus on top, semantically, operating D-Bus APIs on top of bus1 will probably be less surprising.<br>
+<p>
+Apart from that, I do agree that there doesn't seem to be any strong motivation to choose one over the other, except non-technical reasons. I also feel the importance of total ordering is just a relic from the D-Bus days, and you don't actually need it for most cases. systemd has been adopting Varlink which is just JSON marshalled over UDS, where no such guarantee is provided. What I gather to be the real motivation, is that it's probably a PITA to bootstrap an IPC daemon PID 1 itself depends on, creating all kinds of circular dependencies combined with lazy activation, such that having the message bus in the kernel would be more convenient.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066402/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066913"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2026 9:15 UTC (Thu)
+                               by <b>dvdhrm</b> (subscriber, #85474)
+                              [<a href="/Articles/1066913/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdhrm" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066913" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You are correct about the ordering. I have to admit, the new RFC replaced the total order with a partial order, where only causal relationships are upheld. This improves performance, because multicasts can be transmitted in a single pass, without any risk of priority-inversion or waiting for locks.<br>
+<p>
+D-Bus provides a total order, but we will try to get away with just causal ordering. Effectively, it means independent broadcasts might be received by different users in a different order (we usually refer to this as breaking "multicast stability"). The upside is that bus1 extends causal ordering to side-channels, which D-Bus cannot provide. And we believe causal ordering is the much more interesting property to provide than multicast stability.<br>
+<p>
+But if we look at the bigger picture, bus1 is highly inspired by Binder. It has a similar node/ref model, it has lifetime notifications, and used to have a similar memory-pool implementation (which is where `memfd_create(2)` originated). The reason Binder is not considered an option is:<br>
+<p>
+1) Binder backs Android, and it is completely unclear what we should do when upstream submissions are rejected by Google. #ifdef everything? Let Google use downstream patches? Let Google decide what gets merged? We created memfds as replacement for ashmem, and I think we can do something similar to Binder.<br>
+2) Binder uses a UAPI that differs from classic Linux UAPIs a lot. Metadata is transmitted _inline_ in the payload, requiring payload patching to transmit FDs or refs. File-descriptors are injected into remote processes, instead of passed along integrated into the unix-gc. File resources a pinned to a task and break when moving file descriptors around.<br>
+3) Binder does not account resource usage. bus1 puts a lot of effort into a quota system that prevents resource exhausting for cross-domain communication.<br>
+4) Binder has no ordered multicasts (doesn't even have multicasts at all). This cannot be used as transport for D-Bus.<br>
+<p>
+Yes, technically Binder can be adapted and modified to do what bus1 does. It has great features that we would love to see adapted elsewhere (e.g., scheduler integration of back-and-forth communication). And its limitations aren't structural, even though it breaks some of the assumptions of classic Linux user-space (e.g., FD injection breaks the assumption that the FD namespace is purely local). But no distribution ships Binder, the politics behind it are not appealing, and there seems to be little downside in having both separate.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066913/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066917"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2026 10:30 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1066917/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066917" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Memfd got adopted after becoming mostly superior to ashmem --- although if its authors had more insight into real use cases, they'd have had F_SEAL_FUTURE_WRITE, and if they'd had a bit more taste, they'd have implemented more of it in system calls instead of yet more fcntl multiplexing.<br>
+<p>
+Is bus1 superior to binder? It has no mappable memory pool, so out of the gate it involves at least double the copies of Binder, making the Rust version of bus1 somehow a regression from even the low level of C bus1, which, for its flaws, had a kernel managed memory poo. Bus1 has no thread scheduling guarantees. No one-way/two-way message tracking. No callee ID. No refcount. No weak references.<br>
+<p>
+Why does it need to exist? Because we're all supposed not to like the company currently funding most Binder development? Because we hate performance and security?<br>
+<p>
+I see no evidence of understanding of why the way they are in Binder, not even a nod to Chesterton's fence, but merely an assertion that Binder is unsuitable --- so unsuitable, in fact, that it's the most successful IPC capability system in the history of planet Earth.<br>
+<p>
+Yeah, okay: the Binder people, *they're* the ones doing it wrong. We should instead listen to the people who couldn't get bus1 into the kernel last time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066917/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1066921"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2026 11:31 UTC (Thu)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1066921/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bluca" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066921" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Why does it need to exist? Because we're all supposed not to like the company currently funding most Binder development? Because we hate performance and security?</span><br>
+<p>
+Because the company that controls it is very well-known for not playing well with others, arbitrarily rejecting (or merging and then later silently reverting) changes that do not benefit directly their own products, and for outright killing things left and right with no warnings <a href="https://killedbygoogle.com/">https://killedbygoogle.com/</a><br>
+<p>
+The technical merits or demerits don't matter one bit, it's simply not a stable political foundation to build upon, it would be like building a house on quicksands.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066921/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1066920"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Binder</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2026 11:56 UTC (Thu)
+                               by <b>dvdhrm</b> (subscriber, #85474)
+                              [<a href="/Articles/1066920/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dvdhrm" />
+                <input type="hidden" name="return" value="/Articles/1065490/#CommAnchor1066920" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Memfd got adopted after becoming mostly superior to ashmem --- although if its authors had more insight into real use cases, they'd have had F_SEAL_FUTURE_WRITE, and if they'd had a bit more taste, they'd have implemented more of it in system calls instead of yet more fcntl multiplexing.</span><br>
+<p>
+I went through a lengthy review process on LKML with many kernel developers, and memfd_create(2) is the result. It is a shame it is not to your satisfaction.<br>
+<p>
+<span class="QuotedText">&gt; Is bus1 superior to binder?</span><br>
+<p>
+No. It is different.<br>
+<p>
+<span class="QuotedText">&gt; It has no mappable memory pool, so out of the gate it involves at least double the copies of Binder, making the Rust version of bus1 somehow a regression from even the low level of C bus1, which, for its flaws, had a kernel managed memory pool.</span><br>
+<p>
+In the previous submission, Andy Lutomirski asked for bus1 to be submitted without memory pool. It makes review easier, reduces the amount of new features, and can be easily added later on. The memory pool API significantly differs from the classic iovec-copy API, and thus might introduce unexpected accounting difficulties with kmemcg. No specific issues were raised or found, but I can relate to the concern.<br>
+<p>
+Not sure why I wouldn't comply with Andy's wish. Seems reasonable. Sorry to hear that you disagree.<br>
+<p>
+<span class="QuotedText">&gt; Bus1 has no thread scheduling guarantees.</span><br>
+<p>
+Sure it has. Bus1 promotes one peer per thread, rather than sharing a peer. This is required if you need causal ordering, otherwise dequeuing would lose all ordering information.<br>
+<p>
+The cover-letter mentions "anycast nodes" as a future improvement, but we did not want it in the RFC.<br>
+<p>
+<span class="QuotedText">&gt; No one-way/two-way message tracking.</span><br>
+<p>
+Not sure what exactly this refers to.<br>
+<p>
+<span class="QuotedText">&gt; No callee ID.</span><br>
+<p>
+No idea what a "callee ID" is meant to refer to. Bus1 obviously tells you the callee node ID, otherwise you wouldn't know where a message was sent to.<br>
+<p>
+<span class="QuotedText">&gt; No refcount.</span><br>
+<p>
+What? The entire point of handles is to represent a reference count.<br>
+<p>
+<span class="QuotedText">&gt; No weak references.</span><br>
+<p>
+Yes! Binder never made use of this in the upper layers (did this change?), so we decided to strip it from the initial submission. If Android did not see an immediate use, we feel like adding it as an extension later on is preferable.<br>
+<p>
+<span class="QuotedText">&gt; Why does it need to exist? Because we're all supposed not to like the company currently funding most Binder development? Because we hate performance and security?</span><br>
+<span class="QuotedText">&gt;</span><br>
+<span class="QuotedText">&gt; I see no evidence of understanding of why the way they are in Binder, not even a nod to Chesterton's fence, but merely an assertion that Binder is unsuitable --- so unsuitable, in fact, that it's the most successful IPC capability system in the history of planet Earth.</span><br>
+<span class="QuotedText">&gt;</span><br>
+<span class="QuotedText">&gt; Yeah, okay: the Binder people, *they're* the ones doing it wrong. We should instead listen to the people who couldn't get bus1 into the kernel last time.</span><br>
+<p>
+"bus1 is highly inspired by Binder"<br>
+"[Binder] has great features that we would love to see adapted elsewhere"<br>
+<p>
+Hey I am merely sharing my solution for a problem I face. You seem to be quite agitated by that. I am really not sure why.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1066920/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

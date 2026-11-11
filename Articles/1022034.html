@@ -1,0 +1,367 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Allowing BPF programs more access to the network [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Allowing BPF programs more access to the network">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Mahé Tardy led two sessions about some of the challenges that he, Kornilios Kourtis, and John  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1022135/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Allowing BPF programs more access to the network</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>May 28, 2025</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+Mahé Tardy led two sessions about some of the challenges that he, Kornilios Kourtis,
+and John Fastabend have run into in their work on
+<a href="https://tetragon.io/">
+Tetragon</a> (Apache-licensed BPF-based security monitoring software)
+at the Linux Storage, Filesystem, Memory Management, and BPF Summit. The session
+prompted discussion about the feasibility of letting BPF programs
+send data over the network, as well as potential new kfuncs to let BPF firewalls
+send TCP reset packets. Tardy presented several possible ways that these could
+be accomplished.
+</p>
+
+<h4>Sending data</h4>
+
+<p>
+Tetragon has two general jobs: enforcing security policies and collecting
+statistics and other information for observability. The way that the latter
+currently works, Tardy explained, introduces unnecessary copies. BPF
+programs will create records of events and place them into a ring buffer. Then
+Tetragon's user-space component reads the events and eventually writes them to
+a file, a pipe, or a network socket in order to centralize and store them.
+</p>
+
+<a href="/Articles/1022398">
+<img src="../_static/images/2025/mahe-tardy-lsfsmmbpf-small.png" class="rthumb"
+alt="[Mahé Tardy]" title="Mahé Tardy" />
+</a>
+
+<p>
+That requires a minimum of two copies between the kernel and user
+space. While exploring alternatives, Tardy realized that this situation
+could be avoided if BPF programs were allowed to call
+<a href="https://www.man7.org/linux/man-pages/man2/vmsplice.2.html">
+<tt>vmsplice()</tt></a>.
+The user-space agent could give the BPF program a file descriptor, and let BPF
+call <tt>vmsplice()</tt> to forward the information. Eventually, it might be
+possible to remove the user-space agent altogether.
+</p>
+
+<p>
+An alternative to <tt>vmsplice()</tt> would be to use io_uring to perform the
+same operations. Tardy clarified that for his use case, he
+really mostly cares about being able to send data over the network. Generally,
+Tetragon sends two types of data: alerts and periodic reports. The periodic
+reports are created in a timer callback, which may cause additional
+complications since he isn't sure whether those are called in a sleepable context.
+</p>
+
+<p>
+Andrii Nakryiko thought that a synchronous send operation — which could block for a long time —
+would be a bad fit for BPF. Tardy agreed, saying that an asynchronous send operation
+would be fine. Nakryiko thought this was a lot of effort to avoid a small number
+of copies. Alexei Starovoitov pointed out that there is such a thing as a
+<a href="https://www.kernel.org/doc/html/latest/networking/kapi.html#c.sock_create_kern">
+kernel TCP socket</a>, so this is technically possible. Also, workqueues call their
+tasks in a sleepable context, so the operation could be run as a workqueue item and
+that would work. He agreed that it seemed like a lot of effort to avoid
+user-space copies, though.
+</p>
+
+<p>
+Tardy explained that forwarding these reports
+is "<q>almost the last thing the agent is doing</q>". If it could be done in
+BPF, Tetragon would be close to being implemented in pure BPF. Although he
+didn't speak to why this would be desirable, an earlier session had raised the
+idea of making security software harder to tamper with by avoiding user-space
+components, so that may have been what he had in mind.
+</p>
+
+<p>
+Starovoitov pointed out that there is an ongoing effort
+to use
+<a href="https://www.kernel.org/doc/html/latest/networking/netconsole.html">
+netconsole</a> to send kernel log
+messages over TCP. So perhaps Tetragon's BPF programs could be made to print to
+the console, which is then sent over TCP. Daniel Borkmann asked whether
+netconsole could send arbitrary data; Starovoitov said that it could. Tardy
+suggested that they could start by prototyping something using netconsole's
+existing UDP-based messages.
+The session ended without coming to a firm conclusion, but Tardy left with a
+number of new directions to explore.
+</p>
+
+<h4>TCP reset</h4>
+
+<p>
+Currently, it is possible for BPF firewalls to drop packets, and
+therefore de-facto terminate a TCP connection. It would be friendlier, Tardy said in
+his second session,
+to send a TCP reset to immediately terminate the connection. This is already what
+other firewalls, like netfilter, do; Tardy wants to add a kfunc to let BPF
+programs do the same thing.
+</p>
+
+<p>
+One possible way to add that would be to extend the
+<a href="https://docs.ebpf.io/linux/kfuncs/bpf_sock_destroy/">
+<tt>bpf_sock_destroy()</tt></a>
+function that
+<a href="/Articles/926796/">
+Aditi Ghag added</a> in 2023. That function lets BPF programs
+close sockets in specific circumstances: while inside an iterator and holding
+the socket lock. The fact that it sends a TCP reset is really a side effect of
+its main operation, but it is somewhat related.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Borkmann pointed out that using <tt>bpf_sock_destroy()</tt> would only work if
+the socket existed on the machine in question; a firewall sitting between a
+client and a server would need a different way to send a reset. Another member
+of the audience suggested setting up an unroutable route, forwarding a packet
+from the TCP connection to that, and letting the existing networking stack handle
+the rest.
+</p>
+
+<p>
+There is already a kernel function that allows BPF programs to send TCP
+acknowledgment messages; in light of that, adding one for sending reset
+messages struck some people as not a big deal. Ultimately, this discussion
+didn't reach a conclusion either, but there was no real opposition to the idea
+of allowing BPF programs to cleanly terminate TCP connections.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1022034/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1022908"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Email when?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 28, 2025 17:32 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1022908/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1022034/#CommAnchor1022908" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So when are we getting an email client in the kernel? I think its time has come.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1022908/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1022910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Email when?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 28, 2025 17:41 UTC (Wed)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1022910/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1022034/#CommAnchor1022910" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So at first I was going to respond that this mechanism doesn't allow the BPF program to read data sent in response, but actually on reflection the program could intercept packets using existing kfuncs.<br>
+<p>
+If they do get the writing-to-a-TCP-socket-via-netconsole idea working, I think you actually could write an email client in BPF. You would need to create an output stream, send an EHLO message, and then intercept the response on arrival and decode it. (Assuming, of course, that the final version of the idea lets the BPF program open new sockets; as proposed in the session, user-space would hand the file descriptor for an existing socket to the BPF program, so that the kernel doesn't have to do name-resolution or anything like that.)<br>
+<p>
+That still leaves the problem of presenting that email to the user, however. But there's a simple solution to that as well: use the same technique to implement a webserver, and provide a webmail interface.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1022910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1022912"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Email when?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 28, 2025 17:46 UTC (Wed)
+                               by <b>adobriyan</b> (guest, #30858)
+                              [<a href="/Articles/1022912/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="adobriyan" />
+                <input type="hidden" name="return" value="/Articles/1022034/#CommAnchor1022912" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That still leaves the problem of presenting that email to the user, however.</span><br>
+<p>
+Easy-peasy -- just do what MCE code is doing. I jump every time some L3 cache line had recoverable error.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1022912/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1022942"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Email when?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2025 0:55 UTC (Thu)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/1022942/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gerdesj" />
+                <input type="hidden" name="return" value="/Articles/1022034/#CommAnchor1022942" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We used to have a web server and that was taken away.  <br>
+<p>
+I suspect that the same fate will await ksmtpd (email client - really!)  <br>
+<p>
+When MS contracted dev teams have got bored with delivering wanky Copilot integrations and have been tossed off and replaced with the nonsense du jour,  we will probably get to nod sagely at an intelligent email system running on a network card, with an entire rack of jolly expensive nvidia hardware plugged in via four Dupont pins.   <br>
+<p>
+------<br>
+PS I should probably explain "tossed off".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1022942/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1022923"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Email when?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2025 8:42 UTC (Thu)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1022923/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1022034/#CommAnchor1022923" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As soon as you finish your WASM to BPF converter!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1022923/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

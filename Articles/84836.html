@@ -1,0 +1,152 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Deleting timers quickly [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Deleting timers quickly">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Kernel timers are a mechanism which allows kernel code to request that a function be called, in [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/83794/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Deleting timers quickly</h1>
+<div class="Byline">[Posted May 12, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+Kernel timers are a mechanism which allows kernel code to request that a
+function be called, in software interrupt context, after a given period of
+time has passed.  They are heavily used for all sorts of delays and
+deferred actions within the kernel.  The timer interface has been
+relatively stable for some time; it has not changed greatly in 2.6.  <a
+href="http://www.xml.com/ldd/chapter/book/ch06.html#t5">Linux Device
+Drivers, Chapter&nbsp;6</a> covers the timer interface in some detail.
+<p>
+Often, kernel code which has queued a timer finds that it needs to delete
+that timer.  There are two functions which perform this task:
+<p>
+<pre>
+    int del_timer(struct timer_list *timer);
+    int del_timer_sync(struct timer_list *timer);
+</pre>
+<p>
+<tt>del_timer()</tt> ensures that the given timer is not queued to run
+anywhere in the system; it returns a non-zero value if the timer actually
+had to be dequeued.  <tt>del_timer_sync()</tt> performs the same function,
+but it also guarantees that the timer is not actually running on any
+processor in the system; it will block the current process if necessary
+while it waits for a running timer to complete.  The stronger guarantee is
+often needed; an unexpected timer running in the corner can create no end
+of unpleasant race conditions.
+
+<p>
+Geoff Gustafson recently <a href="/Articles/84839/">discovered</a> that
+<tt>del_timer_sync()</tt> was one of the biggest kernel CPU hogs on a
+32-processor NUMA system running "an enterprise database application."  The
+problem is that <tt>del_timer_sync()</tt> must query each processor to
+ensure that the given timer is not currently running there.  As the number
+of processors grows, this query loop takes longer to run.  The situation is
+even worse on NUMA systems, since the loop must look at non-local (read
+"slow") memory for each processor.
+
+<p>
+
+Geoff posted a patch which solved the problem by remembering where each
+timer last ran.  Since the kernel does not move timers across processors,
+the query loop in <tt>del_timer_sync()</tt> could then be reduced to
+looking at the single processor where the timer would have to be.  It was
+observed, however, that a simpler solution is possible:
+<p>
+<pre>
+    if (! del_timer(timer))
+        /* Do the full CPU query loop */
+</pre>
+<p>
+The idea here is that, if the timer was successfully deleted from the
+queue before it ran, there is no need to check to see if it is running
+anywhere.  The only problem with this idea is that it is wrong.  Timer
+functions can - and often do - resubmit themselves.  If the timer to be
+deleted has resubmitted itself, but is still running, the above code will
+fail.  If kernel code is deleting a timer, it really should first ensure
+that said timer will not resubmit itself, but the timer code cannot count on
+that behavior.
+<p>
+That said, some of the top callers of <tt>del_timer_sync()</tt> within the
+kernel are using timers which do not resubmit themselves.  There is no
+reason why that code should pay the overhead of a full system search when,
+if a timer has been deleted off the queue before running, it is already
+guaranteed that the timer will not be running on any processor.  For cases
+like this, a new function has been created:
+<p>
+<pre>
+    int del_singleshot_timer_sync(struct timer_list *timer);
+</pre>
+<p>
+Callers of this function must guarantee that the timer does not resubmit
+itself; in its current form, <tt>del_singleshot_timer_sync()</tt> will
+generate an oops if it detects a resubmitted timer.  This function has not
+yet found its way into the mainline, but, given that it can yield a
+performance improvement of 2-3 orders of magnitude on large NUMA systems,
+its addition seems likely.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">del_timer()</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Timers</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/84836/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

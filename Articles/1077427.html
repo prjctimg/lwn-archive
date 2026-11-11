@@ -1,0 +1,1048 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Progress in modernizing kernel cryptography [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Progress in modernizing kernel cryptography">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="At the 2026 Linux Security Summit North America, Eric Biggers spoke about some of the problems  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1080836/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Progress in modernizing kernel cryptography</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Joe Brockmeier</b><br>July 8, 2026</br>
+           <hr>
+<a href="../Archives/ConferenceByYear/index.html">LSS NA</a>
+</div>
+<p>At the 2026 <a href="https://events.linuxfoundation.org/linux-security-summit-north-america/">Linux Security Summit North America</a>, Eric Biggers spoke about
+some of the problems with the kernel's cryptography framework, as well
+as the recent progress in adding library APIs to allow developers to
+use cryptographic functions without using the traditional crypto
+API. He walked through a couple of examples to demonstrate the
+frailty of the original API and showed how the new library API made
+life easier for developers and kernel maintainers.</p>
+
+<p>Biggers began by introducing himself. He is a maintainer of the <a
+href="https://docs.kernel.org/crypto/libcrypto.html">crypto</a> and
+<a href="https://docs.kernel.org/core-api/kernel-api.html#crc-functions">cyclic redundancy check</a> (CRC) library code in the Linux kernel, as
+well as of the <a
+href="https://www.kernel.org/doc/html/latest/filesystems/fscrypt.html">fscrypt</a>
+library and <a
+href="https://docs.kernel.org/filesystems/fsverity.html">fs-verity</a>
+support layer. He
+said that he was grouping CRCs in with crypto because "<q>they are
+very similar from an implementation perspective</q>" and the code was
+for the kernel itself to use&mdash;user space has its own code. "<q>It's
+for all the kernel features that use these algorithms and need to
+execute them in kernel mode.</q>" The use cases, he said, range from storage or network
+encryption to generating random numbers, checking firmware integrity,
+protecting against denial-of-service attacks, and more.</p>
+
+<h4>Traditional API</h4>
+
+<p>The Linux kernel has had what Biggers called the traditional crypto API, found in the top-level <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/crypto"><tt>crypto</tt></a>
+directory in the kernel tree, <a
+href="https://lwn.net/Articles/14006/">since 2002</a>. It includes
+cryptographic algorithms as well as some non-cryptographic algorithms
+such as CRC. Unfortunately, he said, "<q>this traditional crypto
+API is not working well. It's complex, it's hard to use, and it's
+often quite slow</q>". That has always been true, he said, but it has
+gotten worse over time.</p>
+
+<p>The traditional API does not match what most kernel developers
+want, he said, and has not kept up with hardware: "<q>Specifically, it
+isn't well optimized for the CPU-based acceleration that modern
+systems use.</q>" He also said that the framework was outdated and that
+the API does not work well for newer algorithms and implementation
+strategies.</p>
+
+<p>To prove the point, he said he would show a couple of examples of
+using a crypto algorithm in the kernel and "<q>why the traditional
+crypto API isn't all that great</q>". He began with 
+computing a message authentication code (MAC) with a key and some data
+using HMAC-SHA256, "<q>one of the most common MAC algorithms</q>". The
+code is from on slides five and six in his <a
+href="https://hosted-files.sched.co/lssna2026/5e/Linux%20Security%20Summit_%20Modernizing%20Kernel%20Cryptography.pdf">presentation</a>.</p>
+
+<pre>
+    static int calc_hmac(const u8 *key, size_t keylen, const u8 *data, size_t datalen, u8 out[32])
+    {
+    	struct crypto_shash *tfm;
+    	int err;
+    
+    	tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
+    	if (IS_ERR(tfm)) {
+    	   pr_err("Failed to allocate hmac(sha256): %ld\n", PTR_ERR(tfm));
+    	   return PTR_ERR(tfm);
+    	}
+</pre>
+
+<p>To use the traditional crypto API to get the MAC value, he
+explained, the first thing to do is to dynamically allocate a
+<tt>crypto_shash</tt> object for HMAC-SHA256 by passing the name of
+the algorithm as a string. Then, one has to check
+for errors, "<q>since this step can and often does fail</q>".</p>
+
+<pre>
+	err = crypto_shash_setkey(tfm, key, keylen);
+	if (!err) {
+	        SHASH_DESC_ON_STACK(desc, tfm);
+
+		desc-&gt;tfm = tfm;
+		err = crypto_shash_digest(desc, data, datalen, out);
+		shash_desc_zero(desc);
+	}
+	if (err)
+		pr_err("Failed to calculate HMAC-SHA256 value: %d\n", err);
+	crypto_free_shash(tfm);
+	return err;
+</pre>
+
+<a href="/Articles/1081206/#eric">
+<img src="../_static/images/2026/Eric_Biggers-sm.png" align="left" border="0"
+width="250" height="375"
+alt="[Eric Biggers speaking]"
+hspace="8"
+title="Eric Biggers speaking" border="0"/>
+</a>
+
+<p>The next step is to set the key on the <tt>crypto_shash</tt> object. That
+step can also fail, so more error-checking code is required. Then it
+is necessary to allocate a synchronous hash descriptor; he said
+that the easiest way to do that is to use the
+<tt>SHASH_DESC_ON_STACK()</tt> macro. After that, initialize the hash
+descriptor by setting the pointer to the <tt>crypto_shash</tt>. After all that,
+then it's time to call the function that actually computes the MAC
+value. Once that is done, clear sensitive data from the stack by
+<a href="https://en.wikipedia.org/wiki/Zeroisation">zeroizing</a> the
+hash descriptor, check for errors, and free the
+<tt>crypto_shash</tt>.</p>
+
+<p>Biggers said that this code "<q>sort of works</q>" but it is common
+for bugs to be found after such code is merged because allocating the
+<tt>crypto_shash</tt> fails on some systems. The fix for that is to make sure
+that <tt>CRYPTO_HMAC</tt> and <tt>CRYPTO_SHA256</tt> are enabled in
+the Kconfig options. "<q>This part is often overlooked because the
+algorithms are loaded by name, so there's no link-time dependency on
+them.</q>" The code builds fine, but fails at run time and
+only on some systems. And if a developer wants the code to run in an
+early init call? "<q>They're still out of luck; there's no way to do
+that with the traditional API because the crypto API has to initialize
+itself first.</q>"</p>
+
+<p>Performance suffers as well, he said. He had
+benchmarked the operation on an x86_64 system running the 6.12
+kernel, which predates some recent optimizations. "<q>It turns out
+only 38% of the time was spent actually doing the core SHA-256
+computation. Most of the time was actually spent on the overhead of
+the traditional crypto API</q>".</p>
+
+<p>The better way, he said, was to just add a library function that
+directly implements HMAC-SHA256 without going through the traditional
+API. "<q>It's much easier to use and much more efficient too.</q>" The
+example (from slide 11) is shown below:</p>
+
+<pre>
+    hmac_sha256_usingrawkey(key, key_len, data, data_len, out);
+</pre>
+
+<p>He said that he had <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=077833cd6009">added
+this function in the 6.17 kernel</a>, and that the new APIs were
+already being used in quite a few places in the kernel. The functions
+always succeed, he said, and callers don't need to handle
+errors. "<q>They also work in all contexts in the kernel, and they
+just use standard link-time dependencies so that they don't fail at
+run time.</q>" In addition, it's also faster, particularly with shorter
+inputs. About 2.5 times as fast as the same operation he
+had mentioned previously. "<q>I also added a FIPS-140 cryptographic
+algorithm self-test, so it should work fine with FIPS
+certifications</q>".</p>
+
+<p>This is not a new approach, he said; for example, crypto libraries
+were added in 2019 for the algorithms used by <a
+href="https://en.wikipedia.org/wiki/WireGuard">WireGuard</a>. Libraries
+have also been the norm outside the crypto subsystem; he used <a
+href="https://man7.org/linux/man-pages/man3/memcpy.3.html"><tt>memcpy()</tt></a>
+as an example. "<q>It's just a function that does the thing you want,
+you don't have to dynamically allocate a memory copier object by name
+and then call several additional functions</q>".</p> 
+
+<p>He briefly showed another example of encrypting data using <a
+href="https://en.wikipedia.org/wiki/ChaCha20-Poly1305">ChaCha20-Poly1305</a>,
+an authenticated encryption with associated data (AEAD) algorithm. It
+takes a key, a nonce, plain text, and associated data as input, and
+produces a ciphertext.</p>
+
+<p>Using the traditional crypto API, the caller has to start by
+allocating an AEAD transformation object and setting a key: "<q>as
+usual, both can fail, so you have to write error-handling code, and I
+hope you remember to test your error-handling code, too. I'm sure
+everyone does that</q>". He noted that it was also necessary to put
+data in scatter-gather lists instead of standard buffers; he displayed the
+example code (slide&nbsp;15) of setting up the scatter list:</p>
+
+<pre>
+    struct scatterlist src_sg[2], dst_sg[2];
+    sg_init_table(src_sg, ARRAY_SIZE(src_sg));
+    sg_init_table(dst_sg, ARRAY_SIZE(dst_sg));
+    // The below assumes that none of ad, src, and dst points to vmalloc memory
+    sg_set_buf(&amp;src_sg[0], ad, ad_len);
+    sg_set_buf(&amp;src_sg[1], src, data_len);
+    sg_set_buf(&amp;dst_sg[0], ad, ad_len);
+    sg_set_buf(&amp;dst_sg[1], dst, data_len + crypto_aead_authsize(tfm));
+</pre>
+
+<p>That was the simplest case where the input and output addresses
+were already in the kernel's direct mapping. "<q>However, if any of
+your data is in the stack or elsewhere in the <tt>vmalloc</tt> region,
+good luck: because in those cases you'd actually need much more
+complex code to set up the scatter lists correctly.</q>" Biggers said
+that he had yet to see a single case where someone actually submitted
+the correct code on the first try without needing fixes.</p>
+
+<p>He added that the request may complete asynchronously, so callers
+needed to ensure they waited to free their data after submitting the
+request to complete, lest they create a use-after-free
+vulnerability.</p>
+
+<p>The library example, once again, was a much simpler endeavor:</p>
+
+<pre>
+    chacha20poly1305_encrypt(dst, src, src_len, ad, ad_len, nonce, key);
+</pre>
+
+<p>All that is required is to call a function that directly implements
+the algorithm the caller wanted. "<q>As before, it's synchronous,
+returns <tt>void</tt>, and it works in any context.</q>" He noted that
+this function was added in 2019 to support WireGuard, so it was not
+new. His recent work has been focused on hashing and MACs instead, but
+this function provided a great example because it demonstrated that
+the traditional API suffered from a lot of complexity that was no
+longer needed.</p>
+
+<h4>Where we are today</h4>
+
+<p>As of the 7.1 kernel, the crypto and CRC libraries support a lot of
+algorithms, he said, and displayed a impressive list (slide&nbsp;19)
+that are now supported. Roughly half were added in the last year and a
+half. But there are still some important ones that are missing,
+such as the AES encryption modes. "<q>But I'm working on
+that.</q>"</p>
+
+<p>The libraries provide a separate set of functions for each
+algorithm, which allows them to provide a good API for each
+one: "<q>just whatever is simplest, easiest to use, and the most
+efficient</q>". That means that the library works best for in-kernel
+users who need a single algorithm, he said, which is the most
+common case. If a kernel feature needs support for multiple
+algorithms, "<q>you just dispatch to the different
+functions</q>". That might sound inconvenient, but it is still
+significantly better than the traditional API. But that API
+remains available, and has been reimplemented using the libraries
+where possible.</p>
+
+<p>In the last year and a half, Biggers said, he (along with
+co-maintainers Ard Biesheuvel and Jason Donenfeld) had adopted KUnit
+testing, added documentation, simplified how the
+architecture-optimized code is integrated, and enabled optimizations
+by default. He had migrated many algorithms into the libraries, and
+had re-implemented algorithms used by the traditional crypto API to
+use the libraries. "<q>All this has resulted in lots of negative
+diffs, both in the crypto subsystem and in code that uses the crypto
+code, as well as performance improvements and even some bugs fixed
+too.</q>"
+
+<p>He displayed a list of kernel code that is now using the libraries
+instead of the crypto API (slide 22) that included <tt>apparmor</tt>, <tt>btrfs</tt>,
+<tt>dm-verity</tt>, <tt>fscrypt</tt>, <tt>bluetooth</tt>, and many others.</p>
+
+<p>In addition, he said that some new features had been added to the
+crypto library that had not existed in the traditional API. For
+instance, he <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=64edccea594c">added</a>
+support for <a href="https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.204.pdf">ML-DSA</a>
+verification, along with a function for doing so. Support
+for SHAKE128 and SHAKE256 extendable-output functions (XOF) was <a
+href="https://lwn.net/ml/all/20250630143834.2748285-1-stefanb%40linux.ibm.com/">added</a>
+in 6.19. These did not fit into the traditional API, he said, because
+it assumes fixed-length values. "<q>In fact, I think the traditional
+crypto API actually predates cryptographers coming up with the concept
+of XOFs.</q>"</p>
+
+
+<p>Biggers said that he had <a
+href="https://lwn.net/ml/all/20250915160819.140019-1-ebiggers@kernel.org/">added
+support</a> for SHA-256 interleaved hashing to accelerate dm-verity
+and fs-verity. "<q>Again, that's something that didn't really fit into
+the traditional crypto API</q>". He mentioned a few other
+improvements, such as optimizing CRC for arm64, RISC-V, and x86_64; in
+one case, he said, "<q>I actually improved performance by
+12,400%</q>". The performance increase was for CRC64 throughput with
+16K messages on one of the latest AMD processors.</p>
+
+<p>With regard to testing and code quality, his priority is correctness.
+That should be pretty self explanatory, he
+said. "<q>Crypto code has to be correct, but even non-cryptographic
+algorithms like CRCs have to be correct too, since people rely on
+those for data integrity.</q>" He welcomed optimizations, but they had
+to be worthwhile and testable, and added that he had introduced
+18&nbsp;KUnit test suites for the crypto library and one for the CRC
+library in the 7.1&nbsp;kernel.</p>
+
+<p>One of the advantages of KUnit is that it's easier to
+run the tests now; the tests are already enabled in several
+continuous-integration (CI) systems, including <a
+href="https://kernelci.org/">KernelCI</a>. "<q>This wasn't easily
+possible before because the traditional crypto API uses a custom
+testing system.</q>" He would like to reach 100% code coverage; the library is already closer to reaching that goal than the traditional API.</p>
+
+<p>There is still work to do, however; architecture-optimized code
+poses a problem. He said he had been testing about 50 combinations in
+QEMU, and was requiring QEMU support for new code as well to ensure
+that it was actually tested. "<q>I know that Linux doesn't have this
+policy from most device drivers, but for crypto code, I do think it's
+the right policy.</q>"
+
+<h4>When?</h4>
+
+<p>So, when should those working on kernel code that uses crypto or
+CRC algorithms use the library functions? "<q>The answer is basically
+whenever you can. In most cases, I think you'll find the library
+functions are clearly better.</q>" There were two exceptions, Biggers
+said: the first was when the crypto library was missing a
+function that the traditional API has. He cited AES-GCM as an
+example. "<q>I'm working on that.</q>"</p>
+
+<p>The other exception was when a kernel feature allowed user space to
+specify an arbitrary algorithm from the traditional crypto API by
+name. "<q>These features generally have to keep using the traditional
+API for backwards compatibility.</q>"</p>
+
+<p>He advised that anyone adding new kernel features that use
+cryptography should choose a specific algorithm or, at most, support a small
+set of algorithms. Historically, he said, there has been a tendency to
+"<q>just support every algorithm by accepting an arbitrary string from
+user space and passing it to the traditional crypto API</q>". That was
+a problem, because it allowed use of algorithms that were insecure,
+obsolete, or make no sense for the feature in question. "<q>For
+example, MD5. And also MD4, just in case you thought MD5 was a bit too
+cutting edge.</q>"</p>
+
+<p>He called supporting every algorithm in every kernel feature "<q>a
+huge footgun for users and a maintenance burden for kernel
+developers</q>" that increases the attack surface and causes
+vulnerabilities. He strongly recommended being thoughtful and
+opinionated about choosing just one good algorithm for new
+features. "<q>Keep in mind that you can always add more later if ever
+needed. Also, if you need help choosing algorithms, you can reach out
+to the Linux crypto mailing list.</q>"</p>
+
+<h4 id="alf"><tt>AF_ALG</tt></h4>
+
+<p>He said that he wanted to call attention to "<q>yet another
+exciting problem</q>" with the traditional API: the algorithm address
+family, or <tt>AF_ALG</tt>. It was added 16 years ago, he said, "<q>and it was a
+mistake</q>". It exposes almost all of the traditional crypto API to
+user-space programs, in a bug-prone way, which has resulted in "<q>a
+continuous stream of security vulnerabilities</q>". What is worse,
+those vulnerabilities were becoming easier to find and exploit. He did
+not elaborate on why that was, but the obvious answer is the use of
+LLM tools to scan for security vulnerabilities.</p>
+
+<p>He said that the audience had probably heard of <a
+href="https://copy.fail/">Copy Fail</a>, but there were an additional
+four <tt>AF_ALG</tt> bugs in the past year with working privilege-escalation
+exploits. The good news, he said, was that <tt>AF_ALG</tt> had not been
+commonly used "<q>because it does not provide much that can't be done
+in user space</q>". That meant that it could be disabled by Linux
+distributions once a few programs were fixed to use
+user-space code.</p>
+
+<p>However, Biggers acknowledged that breaking a user-space API in
+Linux "<q>is kind of a big deal, and it needs to be a community
+effort</q>". He said he was issuing a call for action to help harden
+and deprecate <tt>AF_ALG</tt>; for example, people could help by migrating
+user-space programs away from <tt>AF_ALG</tt> or by turning it off on their systems
+and helping to fix anything that breaks when doing so. On that
+positive note, he said a bit wryly, it was the end of the talk.</p>
+
+<p>There was one question from the audience about how Biggers actually
+went about improving performance; did he do it on the assembly language
+level? He answered that most of the architecture-optimized code and
+CRC code was written in assembly language, but there were some cases
+where compiler intrinsics were used instead. With that, the session
+was out of time.</p>
+
+<p>[I would like to thank the Linux Foundation, LWN's travel sponsor, for
+supporting my trip to Minneapolis for the Linux Security Summit.]</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Cryptography</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Linux Security Summit North America/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1077427/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1081887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 0:14 UTC (Thu)
+                               by <b>jra</b> (subscriber, #55261)
+                              [<a href="/Articles/1081887/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jra" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081887" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I know upstream *really* doesn't care much about FIPS, but here's an example of the changes not being at all FIPS friendly. The function: hmac_sha256_usingrawkey(key, key_len, data, data_len, out) is defined as 'void' - meaning it can't return an error.<br>
+<p>
+Unfortunately in FIPS mode, if key_len &lt; 112 then FIPS has to have some way of signaling this is not approved. The operation can still complete, but in FIPS mode there has to be an indication this was a non-approved operation.<br>
+<p>
+If  hmac_sha256_usingrawkey() returned an error code, then callers could still ignore it, but the fact it returns an indication this is not approved in FIPS mode satisfies the certification. (NB. I never said FIPS had to make sense :-).<br>
+<p>
+Without a return value, *all* calls have to be changed to say:<br>
+<p>
+if (fips_enabled &amp;&amp; key_len &lt; 112)<br>
+    // some FIPS indication.<br>
+<p>
+*before* calling hmac_sha256_usingrawkey().<br>
+<p>
+This is a massive pain in the ass for vendors wanting to ship FIPS, which would have been easily avoided if Eric had allowed a status code return for these void() functions.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081893"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 1:30 UTC (Thu)
+                               by <b>neggles</b> (subscriber, #153254)
+                              [<a href="/Articles/1081893/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neggles" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081893" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I imagine they'd take a patch adding a `hmac_sha256_usingrawkey_fips` wrapper function or similar that can return an error<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081893/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081896"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 2:55 UTC (Thu)
+                               by <b>jra</b> (subscriber, #55261)
+                              [<a href="/Articles/1081896/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jra" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081896" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I imagine they'd take a patch adding a `hmac_sha256_usingrawkey_fips` wrapper function or similar that can return an error</span><br>
+<p>
+But then you have to change the callers to call that if FIPS is enabled, which is a much larger change (and similar to the change I already mentioned). Not sure if that would be acceptable.<br>
+<p>
+It's not just this function of course, there are many such that need a FIPS indicator.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081896/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081890"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 1:37 UTC (Thu)
+                               by <b>ebiggers</b> (subscriber, #130760)
+                              [<a href="/Articles/1081890/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiggers" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081890" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As far as I can tell the library is the wrong place for the keylen &lt; 112 check, as only the caller knows where the entropy is (in the key, or in the data as it is during entropy extraction for example) and whether the keylen &gt;= 112 requirement applies to it (often it doesn't, for example because what it's doing might not be considered a FIPS security function in the first place).  See also my response at <a href="https://lore.kernel.org/linux-crypto/20250918163347.GB1422@quark/">https://lore.kernel.org/linux-crypto/20250918163347.GB142...</a><br>
+<p>
+I'm also aware of FIPS 140-3 certified modules that implement HMAC without the key length check at all.  So it's hard to see how it's a required thing in practice.  Perhaps it depends on which lab is doing the certification?<br>
+<p>
+I think I've actually been going pretty far out of my way to keep things FIPS 140-3 friendly, with adding self-tests according to the FIPS 140-3 Implementation Guidance, and fixing various subsystems to do the right thing when fips_enabled=1.  The HMAC thing on the other hand is just not needed, as far as I can tell, or at the very least what is actually needed is not at all what is being requested in your comment.<br>
+<p>
+Anyone who's able to show otherwise is welcome to send a patch, which hasn't happened yet.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081890/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 2:46 UTC (Thu)
+                               by <b>jra</b> (subscriber, #55261)
+                              [<a href="/Articles/1081895/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jra" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081895" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah I already followed your response (and Ted's additional comments). You're "technically correct, the best kind of correct" :-).<br>
+<p>
+<span class="QuotedText">&gt; The HMAC thing on the other hand is just not needed, as far as I can tell, or at the very least what is actually needed is not at all what is being</span><br>
+<span class="QuotedText">&gt; requested in your comment.</span><br>
+<p>
+My lab says different I'm afraid, and I have to do what they say. <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1082033"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 13:23 UTC (Thu)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1082033/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1082033" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would it be sufficient for the library to log (once) that the nonconforming use happened?<br>
+<p>
+Returning an error probably won’t fly.  One of the crypto library’s advantages is that its functions never fail.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082033/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1082099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 14:12 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1082099/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1082099" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Never fail?  What if the raw_key_len is 2**50?<br>
+<p>
+I guess you mean that any failures which occur are outside the scope of the API, so they can't be reported back to the caller or recovered from.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1082103"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 14:34 UTC (Thu)
+                               by <b>ebiggers</b> (subscriber, #130760)
+                              [<a href="/Articles/1082103/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ebiggers" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1082103" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+HMAC supports keys up to the maximum message length of the underlying unkeyed hash function.  For SHA-256 for example, that is 2**61 - 1 bytes, i.e. unlimited for all practical purposes.  The kernel's HMAC code doesn't enforce a limit.  Of course, using such huge keys doesn't make sense, but there's no need for an artificial limit in the HMAC implementation itself.<br>
+<p>
+Now, perhaps you're considering the case where the caller passes in a huge length without a valid buffer, so the code crashes.  That is outside the scope of the API, is it not?  It's no different from e.g. calling memcpy(dst, src, 2**50) without valid buffers of length 2**50.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082103/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1082385"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately this isn't FIPS friendly :-(.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 11, 2026 7:26 UTC (Sat)
+                               by <b>riking</b> (subscriber, #95706)
+                              [<a href="/Articles/1082385/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="riking" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1082385" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the key is too short for the algorithm, that's a programming error and the kernel should WARN() and kill the calling process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082385/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081891"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why wasn’t the old code done this way?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 1:18 UTC (Thu)
+                               by <b>rfunk</b> (subscriber, #4054)
+                              [<a href="/Articles/1081891/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rfunk" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081891" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Most of this sounds great, although I tend to get suspicious about claims that code *can’t* fail.<br>
+But I’d be a lot more comfortable if there were some discussion of *why* the old code was implemented the way it was, rather than this simpler way, and what has changed in the intervening years (besides XOFs) to make this way more of an option.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081891/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081900"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why wasn’t the old code done this way?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 3:47 UTC (Thu)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1081900/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081900" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In 2002, CPUs did not ship with cryptography instructions. We had MMX and maybe SSE2 (Pentium 4 had it, but AMD didn't add it until 2003). PCLMULQDQ wasn't available until 2010.<br>
+<p>
+But that didn't mean that crypto acceleration hardware didn't exist! There were PCI devices which could do this for you! If you think about how such a beast would work, the crypto API makes perfect sense. But that's not the world we live in now; CPUs are capable of doing synchronous crypto at much lower overhead than asking a device to do it.<br>
+<p>
+So the world has changed, and there's no prospect that we'll go back to a world where some device is going to be faster at crypto than the CPU is. So we need to let go of the old API.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081900/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why wasn’t the old code done this way?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 8:07 UTC (Thu)
+                               by <b>amw</b> (subscriber, #29081)
+                              [<a href="/Articles/1081904/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="amw" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081904" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the helpful explanation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why wasn’t the old code done this way?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 12:14 UTC (Thu)
+                               by <b>muase</b> (subscriber, #178466)
+                              [<a href="/Articles/1081910/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="muase" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081910" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I’m not entirely sure this is universally true, because even today there are a devices that are special purpose or constrained, and would like to use dedicated hardware or special purpose instructions to run their crypto (be it for speed, battery life, or security reasons like dedicated HSMs and compliance).<br>
+<p>
+Nonetheless, I agree that in 2026, this should not be the default API to use; and if we want to dispatch to such devices, this could be done in a much more modern way and probably should also be abstracted behind similar API surfaces. Honestly, from what was outlined here, even PKCS#12 feels more suitable as an abstraction layer for hardware (and that one has its own fair share of problems).<br>
+<p>
+In an ideal world, the API would probably automatically dispatch to the appropriate implementation – hardware or software – without the caller even knowing; but I’m not sure how applicable that is IRL.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1082158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why wasn’t the old code done this way?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 10, 2026 9:45 UTC (Fri)
+                               by <b>linusw</b> (subscriber, #40300)
+                              [<a href="/Articles/1082158/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="linusw" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1082158" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In computer graphics there is a phenomenon called "the wheel of incarnation" which is the tendency for graphics acceleration to oscillate back and forth between specialized dedicated hardware (GPU, blitter etc) and just CPU rendering (when the CPU gets faster than accelerators).<br>
+<p>
+A similar wheel of incarnation seems to be happening with cryptography. The same seems to happen with machine learning. Etc.<br>
+<p>
+It'd be great if we could just engineer any heavy datapath to take this phenomenon into account.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1082397"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why wasn’t the old code done this way?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 11, 2026 12:46 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1082397/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1082397" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, I know about that wheel ;-) I even gave a talk on it spinning in storage at LCA 2018: <a href="https://youtu.be/GjJUgmn-9Do">https://youtu.be/GjJUgmn-9Do</a> (I can't find an LWN writeup of that talk, unfortunately). I cover ST506 -&gt; IDE -&gt; SATA -&gt; NVMe and then take a leap into the future by talking about pmem.<br>
+<p>
+But I don't see how the wheel spins with cryptography. Yes, special purpose hardware can always outperform general purpose hardware, but there's a setup latency. And these days there's reluctance to allow data to leave the CPU unencrypted.<br>
+<p>
+There's a trend to integrate more and more things onto the CPU. I can't think of too many examples where something got integrated into the CPU and then moved off again. Once there were separate FPUs, MMUs, Northbridges, etc.<br>
+<p>
+The trouble with "engineer any heavy datapath to take this phenomenon into account" is that it increases complexity and reduces performance on today's machines.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082397/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1082933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why wasn’t the old code done this way?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2026 6:50 UTC (Wed)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1082933/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1082933" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I was wondering about that myself, and from the article (towards the bottom), it seems to me that the idea in the old code was that you don't want to hard-code a specific crypto algorithm for a specific purpose in the kernel, but want to leave it to user space, providing a way to upgrade the crypto independently of the in-kernel client.
+
+<p>So what has changed is mainly that the new API has a completely different outlook on that, letting the in-kernel client choose and hard-code the crypto algorithm (and making the in-kernel client responsible for crypto upgrades).
+
+<p>Yes, the overhead of the old API now consumes relatively more CPU time (because the speedup from CPU improvements has been greater for the actual cryptography part than for the overheadthan the overhead).  And as a result, the speedup of the new API over the old API is bigger on recent CPUs.  But that is just an additional benefit that would not be relevant without the new outlook.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081894"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Migration is not that hard</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 2:22 UTC (Thu)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1081894/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081894" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As of version 3.57.0, Syd is going to use user-space crypto provided by libraries of the RustCrypto project, rather than relying on AF_ALG for binary verification and transparent encryption. API was relatively similar so most migration was changing boilerplate code. This also allowed us to take another critical look at transparent encryption and how it is designed in Syd. After various improvements, end result is one-less monitor thread with emulator threads spawning aes threads on their own, allowing CLONE_FILES to be unshared even in the presence of transparent encryption and ensuring EAGAIN return from open(2) family in case of aes thread spawn errors improving data safety. I learned a lot from this article and have a lot more ideas. I cannot express my appreciation with words. Kudos! Keep shining.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081894/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081899"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">XOF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2026 3:22 UTC (Thu)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1081899/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1077427/#CommAnchor1081899" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Apparently the new currency of the crypto layer is the West African Franc.<br>
+<p>
+Or maybe it's referring to <a href="https://en.wikipedia.org/wiki/Extendable-output_function">https://en.wikipedia.org/wiki/Extendable-output_function</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081899/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

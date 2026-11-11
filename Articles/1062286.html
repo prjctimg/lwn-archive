@@ -1,0 +1,479 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>BPF comes to io_uring at last [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="BPF comes to io_uring at last">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The kernel's asynchronous  io_uring interface maintains two shared ring buffers: a submission  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1062572/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>BPF comes to io_uring at last</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>March 18, 2026</br>
+           </div>
+<p>
+The kernel's asynchronous
+<a href="https://man7.org/linux/man-pages/man7/io_uring.7.html">
+io_uring interface</a> maintains two shared ring buffers:
+a submission queue for sending requests to the kernel, and a completion queue
+containing the results of those requests. Even with shared memory removing much
+of the overhead of communicating with user space, there is still some overhead
+whenever the kernel must switch to user space to give it the opportunity to
+process completion requests and
+queue up any subsequent work items. A
+<a href="https://lwn.net/ml/all/cover.1772109579.git.asml.silence@gmail.com/">
+patch set</a> from Pavel Begunkov minimizes this overhead by letting
+programmers extend the io_uring event loop with a BPF program that can enqueue
+additional work in response to completion events. The patch set has
+<a href="847951.html">been in development</a> for a long time, but has
+finally been accepted.
+</p>
+
+<p>
+To use io_uring, the programmer sets up appropriate shared buffers with
+<a href="https://man7.org/linux/man-pages/man2/io_uring_setup.2.html"><tt>io_uring_setup()</tt></a>
+and <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>
+before putting a number of
+<a href="https://elixir.bootlin.com/linux/v6.19.7/source/include/uapi/linux/io_uring.h#L28">
+<tt>io_uring_sqe</tt></a> (submission queue event)
+structures in the submission queue. The kernel can be notified of the presence
+of new events to process in two ways: by setting up a dedicated kernel thread to
+poll the queue, or by having user space call
+<a
+href="https://man7.org/linux/man-pages/man2/io_uring_enter.2.html"><tt>io_uring_enter()</tt></a>
+periodically.
+</p>
+
+<p>
+When user space calls <tt>io_uring_enter()</tt>, the kernel first dispatches all of
+the items in the submission queue. After that, it can wait for a certain number
+of events to complete, wait for a timeout, or return to user space immediately,
+depending on which flags the system call was invoked with. Over time, the
+interface has been extended with ways to chain a series of operations together,
+such that one operation can depend on the outcome of another without requiring
+user space to act as an intermediary. For example, io_uring can be used to read
+a file and then send the contents over a socket asynchronously, without copying the data
+back to user space or performing a context switch. With the door opened to encoding more
+complex sequences of operations, people naturally wanted to handle cases just
+slightly more complex than a simple linear chain of operations.
+</p>
+
+<p>
+This is where BPF comes in. Begunkov's patch set lets users associate a BPF
+<a href="/Articles/811631/">
+struct ops</a> program with io_uring queues; when user space calls
+<tt>io_uring_enter()</tt> on one of those queues, the BPF program will run
+instead of io_uring's normal event loop. The program can use the new
+<tt>bpf_io_uring_submit_sqes()</tt> kfunc to instruct the kernel to process
+entries from the submission queue, and the <tt>bpf_io_uring_get_region()</tt>
+kfunc to obtain access to the submission or completion queue in order to manipulate
+their contents.
+</p>
+
+<p>
+The program then returns <tt>IOU_LOOP_CONTINUE</tt> to indicate that io_uring
+should call the program again after a configurable delay (or a set number of
+completions), or
+<tt>IOU_LOOP_STOP</tt> to return to user space. The BPF program may ask the
+kernel to loop as many times as it wishes, so it is theoretically possible to
+write a program that sets up io_uring, registers a BPF program, calls
+<tt>io_uring_enter()</tt> and then never returns to user space at all. This
+effectively bypasses BPF's limit on the number of operations that can be
+performed in a single program execution by calling the BPF program in a loop; if
+an application is already structured around an asynchronous event loop, it may be
+tempting to put more and more functionality into the BPF component. The BPF
+program does have to be tolerant of both spurious wakeups and potential
+cancellation by the kernel; if the task is killed, for example, the kernel will
+stop calling the BPF program and clean up the io_uring queues as normal.
+</p>
+
+<p>
+That temptation to put more of the program into BPF is one reason that
+<a href="1046950.html">kernel developers were skeptical</a> of Begunkov's
+approach when it resurfaced in November&nbsp;2025. BPF makes it possible to implement complex operations
+in kernel space — but it can hardly be said to be as easy as writing normal
+user-space software. Programs will probably need to communicate between their
+in-kernel and user-space components anyway, but Begunkov's approach would have
+them doing so via ad-hoc interfaces rather than the existing
+io_uring interface.
+</p>
+
+<p>
+Begunkov sees avoiding extraneous system calls as one of several uses for his
+patch set. He also suggested that BPF could become a transitional path for
+deprecating existing io_uring APIs. There are a number of organic extensions to
+the io_uring API, such as
+<a href="/Articles/785690/"><tt>IOSQE_IO_DRAIN</tt></a>, that could be emulated in
+BPF, taking that logic out of the core kernel. He also thought that, as with
+the extensible scheduler class, introducing BPF would allow for experimentation
+with smarter polling algorithms before they're introduced to the kernel.
+</p>
+
+<p>
+Jens Axboe, io_uring's creator and maintainer,
+<a href="https://lwn.net/ml/all/de0e155e-05c3-4e6e-9de4-067ac94c01cf@kernel.dk">
+planned</a> to merge Begunkov's patch set during the 7.1 merge window.
+Caleb Mateos
+<a
+href="https://lwn.net/ml/all/CADUfDZoBTwnCo-f_st9-jdgNhHLWUCjZQFpGdowGUA5BoJ836w%40mail.gmail.com/">
+thought</a> that the changes would not be as useful without kfuncs for
+interacting with io_uring
+<a href="https://www.man7.org/linux/man-pages/man3/io_uring_register_buffers.3.html">
+registered buffers</a> &mdash; additional buffers shared between the kernel and
+user space that can be referenced by io_uring operations. Registered buffers can
+be more efficient because they only need to be faulted and pinned into memory
+once, and can then be reused by subsequent operations.
+</p>
+
+<p>
+Mateos referenced
+<a
+href="https://lwn.net/ml/all/20251104162123.1086035-1-ming.lei@redhat.com/">
+a patch set</a> from Ming Lei, first seen in November (with an
+<a href="https://lwn.net/ml/io-uring/20260106101126.4064990-1-ming.lei@redhat.com/">
+updated version</a>
+in January). Lei's patch set is an alternate approach to integrating io_uring
+and BPF, which includes kfuncs for interacting with registered buffers along with an alternate
+set of attachment points for hooking into the io_uring subsystem. Lei's patches
+would not let users completely customize the behavior of
+<tt>io_uring_enter()</tt>; instead, users would be able to register BPF programs
+that could be invoked with a new <tt>IORING_OP_BPF</tt> io_uring operation.
+The approach is less flexible than
+Begunkov's (which could be used to emulate something similar, since it
+allows the BPF program to inspect and modify requests before submitting them to
+the kernel for processing), but is probably easier to use for targeted changes.
+Lei's approach is arguably more natural for allowing the deprecation of existing
+io_uring commands, since it can be used to replace specific operations with a
+BPF implementation.
+</p>
+
+<p>
+Neither patch set has seen as much discussion as might be warranted, for a major
+change to io_uring. Mateos thought that the
+additional kfuncs were largely orthogonal to Begunkov's work — the kfuncs would
+be useful for BPF programs running in the context of io_uring, regardless of how
+those programs are triggered. Axboe
+<a
+href="https://lwn.net/ml/all/c75e0728-4619-4435-b4a4-9c80331a5408@kernel.dk/">
+agreed</a>, deciding to <a
+href="https://lwn.net/ml/all/177377981764.1008333.17403039550067431801.b4-ty@kernel.dk/">
+apply</a> Begunkov's patch set on March 17. Ming's work will have to be rebased,
+but Axboe seemed generally inclined to accept it as well.
+Either way, configurable BPF is coming to io_uring. 
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/io_uring</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.1</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1062286/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1063461"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hopefully does not obsolete useful special cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 16:14 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1063461/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1063461" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm glad to see a mechanism for general gluing-together without returning to userspace.<br>
+<p>
+I hope that this doesn't obsolete specific special cases that seem like they ought to be possible without BPF. For instance, "open a file into the fixed file table, stat to get the length of the file, mmap that length, close the file". That could clearly be don with a BPF program to put the length into the mmap call, but it'd be simpler to have something like a flag in the mmap operation for "full length", or something similar. I'd love to see this *not* require BPF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063461/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hopefully does not obsolete useful special cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 17:00 UTC (Wed)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1063470/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1063470" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The 'deprecation' comments were more about using BPF compiled and shipped with the kernel to simplify core kernel code, as I understood it. I believe that everything that is possible with io_uring without using BPF will remain so.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063519"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hopefully does not obsolete useful special cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2026 17:49 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1063519/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1063519" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wasn't referring to the deprecation of anything that's currently available. I'm talking about the possibility of new functionality in the brand new IORING_OP_MMAP, and expressing the hope that *extremely simple* cases like "mmap the whole file size" don't get a response of "use BPF for that".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063519/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1064702"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hopefully does not obsolete useful special cases</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2026 7:26 UTC (Thu)
+                               by <b>andrey.turkin</b> (guest, #89915)
+                              [<a href="/Articles/1064702/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andrey.turkin" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1064702" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not? It seems to me a small kernel API + userspace utility library that takes care of commonplace operations through BPF is much better option than in-kernel API suite of same operations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1064702/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1063548"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">At last the prophecy is fulfilled...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2026 1:28 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1063548/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1063548" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+...and the two generic "make the kernel do arbitrarily complex things with one syscall" mechanisms are united. Give it a few more decades and Tanenbaum will be proved right (except we'll be in kernel mode instead of user mode, probably inside of some kind of wasm-like sandbox because of course the browser will be unified with the OS at this point).<br>
+<p>
+/s, probably.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063548/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1063554"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CAP_SYS_ADMIN</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2026 8:01 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1063554/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="roc" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1063554" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; He also suggested that BPF could become a transitional path for deprecating existing io_uring APIs. There are a number of organic extensions to the io_uring API, such as IOSQE_IO_DRAIN, that could be emulated in BPF, taking that logic out of the core kernel.</span><br>
+<p>
+But that only works for processes with CAP_SYS_ADMIN, right? io_uring doesn't require it, but BPF does, so for processes without CAP_SYS_ADMIN moving io_uring APIs to BPF would mean just losing that functionality.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063554/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1063571"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring tracing support</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2026 12:29 UTC (Thu)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1063571/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1063571" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What's the state of the art for an strace-equivalent for an io_uring program?<br>
+<p>
+My understanding is that a program making use of this will just appear to be permanently running inside a syscall, which obviously is the whole point of the mechanism, but is really unfortunate for debugging a misbehaving system. It'd be nice to be able to see (even in not-quite-real-time) what actual I/O the process is doing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063571/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1063853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring tracing support</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 20, 2026 1:38 UTC (Fri)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/1063853/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andresfreund" />
+                <input type="hidden" name="return" value="/Articles/1062286/#CommAnchor1063853" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+perf record/trace -e 'io_uring:*' -p ... <br>
+<p>
+Works reasonably well. There's one event that's command submission, which is pretty much what you might want. Not at my computer right now, so I don't remember the precise name. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1063853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,405 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Parallelizing filesystem writeback [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Parallelizing filesystem writeback">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Writeback for filesystems is the process of flushing the 'dirty' (written) data in the page cac [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1025077/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Parallelizing filesystem writeback</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>June 12, 2025</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+Writeback for filesystems is the process of flushing the "dirty" (written)
+data in the page cache to storage. At 
+the 2025 Linux Storage,
+Filesystem, Memory Management, and BPF Summit (LSFMM+BPF), Anuj Gupta led a
+combined storage and filesystem session on some work that has been done
+to parallelize the writeback process.  Some of the performance problems
+that have been seen with the existing single-threaded writeback came up in
+a <a href="976856.html">session at last year's summit</a>, where the
+idea of doing writeback in parallel was discussed.
+</p>
+
+<p>
+Gupta began by noting that Kundan Kumar, who posted the <a
+href="/ml/all/20250129102627.161448-1-kundan.kumar@samsung.com/">topic
+proposal</a>, was supposed to be leading the session, but was unable to
+attend.  Kumar and Gupta have both been working on a prototype for
+parallelizing writeback; the session was meant to gather feedback on it.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Currently, writeback for buffered I/O is single-threaded, though
+applications are issuing multithreaded writes, which can lead to
+contention.  The backing storage device is represented in the kernel by a 
+<a href="https://elixir.bootlin.com/linux/v6.15.1/source/include/linux/backing-dev-defs.h#L163">BDI</a>
+(<tt>struct backing_dev_info</tt>), and each BDI has a single writeback thread that
+processes the 
+<a href="https://elixir.bootlin.com/linux/v6.15.1/source/include/linux/backing-dev-defs.h#L83"><tt>struct
+bdi_writeback</tt></a> embedded in it.  Each <tt>bdi_writeback</tt> has a
+single list of inodes that need to be written back and a single <a
+href="https://elixir.bootlin.com/linux/v6.15.1/source/include/linux/workqueue.h#L113"><tt>delayed_work</tt></a>
+instance, which makes the process single-threaded.
+</p>
+
+<a href="/Articles/1025054/">
+<img src="../_static/images/2025/lsfmb-gupta-sm.png" border=0 hspace=5 align="left"
+alt="[Anuj Gupta]" title="Anuj Gupta" width=196 height=280>
+</a>
+
+<p>
+Based on ideas from Dave Chinner and Jan Kara in the topic-proposal thread, he and Kumar added a
+<tt>struct bdi_writeback_ctx</tt> to contain context information for a
+<tt>bdi_writeback</tt>, Gupta said.  An array of the writeback contexts was
+added to the BDI, which allows for multiple threads doing writeback for a
+BDI. That can be seen in a
+<a href="/ml/all/20250529111504.89912-1-kundan.kumar@samsung.com/">patch
+series</a> posted by Kumar at the end of May.  They see two levels of
+parallelism that could be added, but  focused on the high-level
+parallelism in the prototype, leaving low-level parallelism for later work.
+</p>
+
+<p>
+The high-level parallelism splits up the work based on the filesystem
+geometry, Gupta said.  For example, XFS has <a
+href="https://en.wikipedia.org/wiki/XFS#Allocation_groups">allocation
+groups</a> that can be used to partition the inodes needing writeback into
+separate contexts of the BDI.  The low-level parallelism could be added by
+having multiple <tt>delayed_work</tt> entries in the <tt>bdi_writeback</tt>;
+different types of filesystem operations, such as block allocation versus
+pure overwrites for XFS, could be handled by separate workqueues at that
+level.
+</p>
+
+<p>
+Christoph Hellwig was not sure that allocation groups were the right choice for
+partitioning (sharding) the inodes for writeback.  Gupta said that testing
+to see what kind of workloads benefit when using the allocation groups will
+be important.  Parallel writeback will be an option; users can disable it
+if it is not beneficial for their workloads.
+</p>
+
+<p>
+Amir Goldstein asked how severe the current bottleneck with single-threaded
+writeback is.  Gupta said that he did not have any numbers on that.  Chris
+Mason said that in his testing it largely depends on whether large folios
+are available; the easiest way to see performance problems with single-threaded
+writeback is to turn off large folios for XFS.  In some simple testing, he
+could get around 800MB per second on XFS with large folios disabled before
+the kernel writeback thread was saturated.  With large folios enabled, that
+number goes to around 2.4GB per second.
+</p>
+
+<p>
+Hellwig was curious where the cycles were being spent in the
+no-large-folios case.  Mason said that he did not remember the details,
+though pages were being moved around a lot to different lists.  Matthew
+Wilcox suggested that the <a
+href="https://docs.kernel.org/core-api/xarray.html">XArray</a> API might be
+part of the problem, since there is no API to clear the dirty bits on a
+range of folios.  If the kernel is clearing those bits one-by-one, that
+might be a bottleneck; it could be fixed, but he has not found the time to do
+so.
+</p>
+
+<p>
+Jeff Layton said that the network filesystems would need some way to limit
+how much parallelization was happening for writeback.  There may be
+underlying network conditions that will necessitate limiting parallel
+writeback.  Gupta acknowledged that need and Hellwig said that local
+filesystems may also need a way to do that at times.  One thing that
+Hellwig would like to see change is the Btrfs-internal mechanism for having
+multiple threads doing writeback with compression and checksumming; having
+a common solution with multiple writeback threads "<q>would remove a lot of
+crap</q>".  He is concerned that other filesystems will pick up that code,
+so having a common solution would head that off; Mason said he was not
+opposed to that idea, though there may be large files that need their
+writeback handled specially.
+</p>
+
+<p>
+Over the remote link, Jan Kara said that what he was hearing was that most
+of the interest was in the low-level parallelism, which would parallelize
+the writeback of individual inodes.  He cautioned that there are various
+problems with doing that, including potential problems with data-integrity
+measurements, since writes are done in a different order.
+</p>
+
+<p>
+Hellwig said that the "<q>global-ish linked lists</q>" that are used to
+track the inodes for writeback are a data structure that is known to cause
+scalability problems.  Adding more threads to work on those lists will make
+things worse; he wondered if using an XArray instead would be better.
+Using allocation groups to shard the inode lists (or XArrays) makes sense
+for XFS—other filesystems may have their own obvious choice for
+sharding—but the management of the threads can be separate from the
+management of the lists.  Other criteria could be used to determine the
+thread to handle a specific inode.
+</p>
+
+<p>
+Mason agreed and wanted to suggest something similar.  For the first
+version of multithreaded writeback, he said that keeping a single inode
+list would make sense.  Rather than work out how to shard the inodes to
+different lists, simply "<q>focus on being able to farm out multiple inodes
+at a time under writeback</q>"; that will help determine where the lock
+contention is.  Gupta was concerned about the lock contention for the inode
+list, but Kara did not think it would be that significant compared to all
+of the other work needed for writeback.
+</p>
+
+<p>
+Once the basics of the feature are working, Goldstein said, it may make
+sense to provide a means for filesystems to help choose inodes for the
+different threads.  Filesystems may have information that can assist the
+writeback machinery to achieve better parallelism.
+</p>
+
+<p>
+Mason got in the last word of the session by relaying another bottleneck that
+he had found in his testing but had forgotten earlier: freeing clean pages.
+Once dirty pages have been written, those clean pages are freed by the kswapd
+kernel thread, which results in another bottleneck.  He suggested that
+there may need to be some parallelism added there as well.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Buffered I/O</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1024402/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1025556"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No parallelism for single files?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2025 13:11 UTC (Mon)
+                               by <b>Homer512</b> (subscriber, #85295)
+                              [<a href="/Articles/1025556/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Homer512" />
+                <input type="hidden" name="return" value="/Articles/1024402/#CommAnchor1025556" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the intend is to parallelize based on inodes, does that mean single large files will get slower relative to work spread out over multiple files?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025556/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025630"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No parallelism for single files?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2025 19:38 UTC (Mon)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/1025630/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iq-0" />
+                <input type="hidden" name="return" value="/Articles/1024402/#CommAnchor1025630" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; If the intend is to parallelize based on inodes, does that mean single large files will get slower relative to work spread out over multiple files?</span><br>
+<p>
+I would not expect there to be a significant slowdown caused by this patch. This is a multi-producer/single-consumer to multi-producer/multi-consumer like workload distribution change. The multi-producer part already causes the most contention, a small bounded set of consumers often will not add significantly more contention.<br>
+<p>
+But in certain situations the new patch would allow allow some writes to different inodes to go faster then is currently possible. And if the workload is properly sharded it could even reduce contention.<br>
+<p>
+So, given they are properly sharding the writeback queue by inode, then an host that only does a lot of parallel writes to one inode should be about as fast as the current logic. Whilst a host with a lot of parallel writes to a single inode with some random other I/O to other inodes might even see a bit of an improvement.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025630/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025673"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No parallelism for single files?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 8:07 UTC (Tue)
+                               by <b>parametricpoly</b> (subscriber, #143903)
+                              [<a href="/Articles/1025673/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="parametricpoly" />
+                <input type="hidden" name="return" value="/Articles/1024402/#CommAnchor1025673" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Parallelism at this level makes sense for SSD drives, but what about spinning rust? Repositioning the heads takes a lot of time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025673/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1025684"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No parallelism for single files?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2025 11:42 UTC (Tue)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/1025684/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iq-0" />
+                <input type="hidden" name="return" value="/Articles/1024402/#CommAnchor1025684" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Depends on the storage stack. Some device mapper, md or other RAID setup might also benefit. And remote block devices (high latency) or battery backed write cached HDDs will probably also benefit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1025684/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1026015"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maybe the solution is sequential performance improvement</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2025 16:36 UTC (Thu)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1026015/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1024402/#CommAnchor1026015" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Caveat: I don't have any knowledge about the topic except what is written in this article.
+
+<p>Still, I wonder if it would not be more effective to improve sequential performance rather than to try parallelization.  Some of the reasons why that might be more promising:
+
+<ul>
+<li>The write bandwidth numbers given (0.8GB/s, 2.4GB/s) are far below what a single core on recent hardware is capable of for RAM access (e.g., 50GB copy bandwidth given <a href="https://chipsandcheese.com/p/amds-zen-4-part-2-memory-subsystem-and-conclusion">here</a>, although that's probably only 25GB/s in each direction).
+
+<li> Of course in the end the result cannot be faster than what the target device is capable of processing, but if the target device is the limit, parallelization at the CPU level will not help.  The numbers given are quite a lot lower than what recent SSDs can process, as long as the SLC cache is not full and the SSD does not perform thermal throttling.
+
+<li> The fact that large folios provide such a big speedup indicates that there are overheads in processing that are what hold back the performance.  Apparently large folios reduce some overhead that contributes a lot to the run-time.  After large folios, there may still be some of that overhead left, and reducing that further might help; or something else becomes the bottleneck and one should eliminate or reduce that.
+
+<li>Given that the discussion is about parallelizing the writes to a single device, if one takes the parallelization approach, there will be some synchronization overhead between the threads doing the writing.
+</ul>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1026015/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,171 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Hardened usercopy whitelisting [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Hardened usercopy whitelisting">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="There are many ways to attempt to subvert an operating-system kernel.  One particularly effecti [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/727283/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Hardened usercopy whitelisting</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 7, 2017</br>
+           </div>
+There are many ways to attempt to subvert an operating-system kernel.  One
+particularly effective way, if it can be arranged, is to attack the
+operations that copy data between user-space and kernel-space memory.  If
+the kernel can be fooled into copying too much data back to user space, the
+result can be an information-disclosure vulnerability.  Errors in the other
+direction can be even worse, overwriting kernel memory with
+attacker-controlled data.  The kernel has gained some defenses against this
+sort of attack in recent development cycles, but there is more work yet to
+be merged.
+<p>
+Much of the heap memory used within the kernel is obtained from the slab
+allocator.  The <a href="695991.html">hardened usercopy patch
+set</a>, merged for the 4.8 kernel, attempts to limit the impact of
+erroneous copy operations by ensuring that no single operation can cross
+the boundary between one slab-allocated object and the next.  But the
+kernel gets a lot of large memory objects from the slab allocator, and it
+is often not necessary to copy the entire object between the kernel and
+user space.  In cases where only part of an object needs to be copied, it
+would be useful to prevent a rogue copy operation from copying to or from
+parts of the structure that do not need to be exposed in this way.
+<p>
+For example, the large <a
+href="http://elixir.free-electrons.com/linux/latest/source/include/linux/mm_types.h#L359"><tt>mm_struct</tt>
+structure</a> describes a process's virtual address space; it contains
+quite a bit of security-sensitive information.  One field in this
+structure, <tt>saved_auxv</tt> is copied to and from user space.  The
+<tt>prctl()</tt> functions that manipulate this field do not copy directly
+to or from the structure, but there is <a
+href="http://elixir.free-electrons.com/linux/latest/source/fs/binfmt_elf.c#L337">some
+obscure code</a> in the ELF binary-format code that does pass that field
+directly to <tt>copy_to_user()</tt>.  It would be nice if that copy
+operation could be restricted to that one field without the risk of
+exposing the rest of the structure.
+<p>
+Enabling protection at that level is the purpose of the <a
+href="/Articles/725935/">hardened usercopy whitelisting</a> patch set.
+Experience says we need to get the provenance of such patches right, so:
+this code originally comes from the grsecurity/PaX patch sets.  David
+Windsor ported and reworked the code for mainline, and Kees Cook posted
+the set for review.
+<p>
+In short, this patch set extends the hardened usercopy mechanism by
+allowing the specification of a "usercopy region" within a slab-allocated
+object.  Only data within that region can be copied to and from user space
+with functions like <tt>copy_to_user()</tt> or <tt>copy_from_user()</tt>.
+It is worth noting that no checking is applied to primitives like
+<tt>put_user()</tt>; the size of those operations is fixed and should not
+be subject to run-time attack.
+<p>
+Normally, a slab cache is allocated with <tt>kmem_cache_create()</tt>.
+This patch set adds a new function:
+<p>
+<pre>
+    struct kmem_cache *kmem_cache_create_usercopy(const char *name,
+			    size_t obj_size, size_t align, unsigned long flags,
+			    size_t useroffset, size_t usersize,
+			    void (*ctor)(void *));
+</pre>
+<p>
+The <tt>useroffset</tt> and <tt>usersize</tt> parameters are new in this
+version of the function; they describe the region of objects allocated from
+this cache that can be copied between kernel and user space.  If
+<tt>usersize</tt> is zero, no copying is allowed at all.  Slabs created
+with <tt>kmem_cache_create()</tt> and objects obtained with functions like
+<tt>kmalloc()</tt> are fully whitelisted.
+<p>
+Whenever an object obtained from a slab allocator is passed to one of the
+user-space copy functions, the area to be copied will be checked to ensure
+that it lies entirely within the whitelisted window.  If that test fails, a
+kernel oops will result.
+<p>
+One implication of the above design is that any given object can only have
+a single region that may be exposed to user space.  In cases where it is
+necessary to copy more than one field, those fields must be grouped
+together so that the single region covers them all.  To get there, the
+patch set ends up reorganizing a few structures before whitelisting them.
+A dozen or so structures have been specifically whitelisted in the patch
+set. 
+<p>
+The final step in the patch set creates a new <tt>GFP_USERCOPY</tt> flag
+for memory allocations.  There are certain system calls that can be used to
+force the kernel to allocate structures with a size controlled from user
+space.  That is normally harmless, as long as the size kept within
+reasonable bounds.  But certain types of attacks can benefit from the
+ability to create objects of a specific size.  If those allocations are
+marked with <tt>GFP_USERCOPY</tt>, they will be taken from a separate slab,
+making it harder to control the layout of parts of the heap area.
+<p>
+It's not clear when these patches will be pushed toward the mainline, but
+there do not appear to be any serious obstacles in their way.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">copy_*_user()</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Security/Kernel hardening</a></td></tr>
+            <tr><td><a href="../Security/Index/index.html">Security</a></td><td><a href="../Security/Index/index.html">Linux kernel/Hardening</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/727322/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

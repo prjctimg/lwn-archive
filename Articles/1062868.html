@@ -1,0 +1,235 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Tracking when BPF programs may sleep [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Tracking when BPF programs may sleep">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" BPF programs can run in both sleepable and non-sleepable (atomic) contexts. Currently, sleepab [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1063661/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Tracking when BPF programs may sleep</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>March 23, 2026</br>
+           </div>
+<p>
+BPF programs can run in both sleepable and non-sleepable (atomic) contexts.
+Currently, sleepable BPF programs are not allowed to enter an atomic context.
+Puranjay Mohan has a
+<a href="https://lwn.net/ml/all/20260226161500.775715-1-puranjay@kernel.org/">
+new patch set</a> that changes that. The patch set would let BPF programs called
+in sleepable contexts temporarily acquire locks that cause the programs to
+transition to an atomic context. BPF maintainer Alexei
+Starovoitov objected to parts of the implementation, however, so acceptance of
+the patch depends on whether Mohan is willing and able to straighten it out.
+</p>
+
+<p>
+In an atomic
+context, kernel code is not allowed to do anything that would delay the continued
+execution of the kernel, such as waiting for block I/O or faulting a page back
+into memory. It is usually up to the kernel programmer (assisted by the
+kernel's various forms of instrumentation) to make sure that they
+don't accidentally call a function that can sleep in such a context. BPF
+programs were originally only capable of running in atomic contexts, and
+were therefore never allowed to call functions that could sleep. In 2020, the
+BPF verifier <a href="825415.html">was extended</a> to handle BPF programs
+that could sleep (by marking the entire program with a special flag),
+but such programs were not permitted to call many of the
+existing BPF interfaces, which assumed they could transition to an atomic context.
+</p>
+
+<p>
+The main advantage of marking a BPF program as sleepable is that it is allowed to
+copy data from user space (which can sleep if the data needs to be faulted back
+into memory). Since that is generally useful, it would be nice if more BPF
+programs could be marked as sleepable; currently, many cannot because they need
+to take locks or acquire resources that are only available in an atomic context.
+Mohan's patch set allows for more fine-grained accounting of contexts in BPF
+programs by having the
+BPF verifier track whether the program is allowed to sleep on an
+instruction-by-instruction basis instead of globally for the whole program.
+</p>
+
+<p>
+The BPF verifier tracks which kernel resources a BPF program has access to at a
+given point by looking for kfuncs (kernel functions to which BPF programs have
+access) that are annotated with the
+<tt>KF_ACQUIRE</tt> and <tt>KF_RELEASE</tt> markers. When a program calls a
+kfunc with the <tt>KF_ACQUIRE</tt> marker, the verifier tracks the return value
+and ensures that the program eventually passes it back to a compatible
+<tt>KF_RELEASE</tt> kfunc. A preparatory patch in Mohan's series adds support
+for these flags to BPF iterators. The main patches add another marker,
+<tt>KF_FORBID_FAULT</tt>, that tells the verifier that the program is not
+allowed to sleep as long as it holds a reference to the acquired resource. The
+intention is just to prevent page faults (hence the name), but the
+implementation forbids all kinds of sleeps (of which page faults are a subset).
+<tt>KF_FORBID_FAULT</tt> can only be used on kfuncs that are already marked with
+<tt>KF_ACQUIRE</tt>. Once the resource is released, the program is allowed to
+sleep again.
+</p>
+
+<p>
+In his cover letter, Mohan gave an example of when this increased granularity might
+be useful. The
+<tt>task_vma</tt> iterator lets BPF programs iterate over a task's virtual
+memory areas (VMAs) — but doing anything with that information is difficult,
+because the iterator yields
+<a
+href="https://elixir.bootlin.com/linux/v6.19.8/source/include/linux/mm_types.h#L892"><tt>vm_area_struct</tt></a>
+structures. Those structures only remain valid as long as <tt>mmap_lock</tt> is
+held. Taking that lock creates a context in which
+page faults are forbidden, since page-fault handling may need to take the same lock.
+With his changes, BPF programs can now read
+from the VMA to obtain a user-space pointer, and then explicitly release the VMA
+structure to exit the atomic context and interact with user space.
+(Although, of course, the VMA in question could be unmapped by another CPU as
+soon as the lock is released, so the program needs to be able to cope with failure.)
+</p>
+
+<pre>
+    bpf_for_each(task_vma, vma, task, 0) {
+        u64 start = vma-&gt;vm_start;
+
+        /* Faulting forbidden, but VMA pointer access allowed */
+        
+        bpf_iter_task_vma_release(&amp;___it);
+        
+        /* mmap_lock released, VMA pointer invalidated */
+        /* Faulting (and sleeping) is fine here. */
+
+        bpf_copy_from_user(&amp;buf, sizeof(buf), (void *)start);
+    }
+</pre>
+
+<p>
+An
+<a href="https://lwn.net/ml/all/20260223174659.2749964-1-puranjay@kernel.org/">
+earlier version</a> of the patch set called the new kfunc marker
+<tt>KF_FORBID_SLEEP</tt>, but Starovoitov had
+<a href="https://lwn.net/ml/all/CAADnVQ+aobVwR1m-v2w_RWFxG_9TwkYQ-K8KtC6D18HrYe8Dig@mail.gmail.com/">
+concerns about the name and semantics</a>. <tt>KF_ACQUIRE</tt> is also used for
+things other than locks, particularly for reference-counted resources;
+Starovoitov suggested differentiating between <tt>KF_ACQUIRE</tt> (for reference
+counts) and <tt>KF_ACQUIRE_LOCK</tt> (for actual locks), and merging the
+semantics of <tt>KF_FORBID_SLEEP</tt> into the latter.
+</p>
+
+<p>
+Mohan
+<a
+href="https://lwn.net/ml/all/CANk7y0hLknrHo+UB2HDPeen6nLxRaBdLNKiMBiMBv7Hh-QzPEw@mail.gmail.com/">
+was fine with that suggestion</a>, but Eduard Zingerman
+<a href="https://lwn.net/ml/all/a8fbc7a3669ad1014b2623c42219d3d074dfbc8f.camel@gmail.com/">
+thought</a> it might be
+worth exploring a more radical change. The verifier currently tracks four
+kinds of resources that all forbid sleeping, but with different
+acquire/release logic: active interrupts, active RCU locks, active preemption
+locks, and other active locks. The list of which kfunc corresponds to which kind
+of acquire/release logic is hard-coded; Zingerman suggested that, if Mohan was
+already going to make changes to the meaning of <tt>KF_ACQUIRE</tt>, it might be
+worthwhile to explore separate markers for these four categories to make the
+verifier's logic more generic.
+</p>
+
+<p>
+Mohan said that exploring the possibility is now
+<a href="https://lwn.net/ml/all/CANk7y0iR5sJkP99ztihrT6DDAp-DA4nZ2heR2kNXgUnKVURWAg@mail.gmail.com/">
+next on his agenda</a> after the current patch set is done. For now, the
+name of the new annotation was changed to <tt>KF_FORBID_FAULT</tt> to indicate a
+narrower intended use. Mohan's follow-up work will look at refactoring the kfunc
+flags to allow for more precisely identifying the type of lock being used. That
+may take some time, however, because Starovoitov
+<a href="https://lwn.net/ml/all/CAADnVQJjzd_r6SjXaxgz-OuJbpP7DkBM3DuspCgd8Nfy4M6iMA@mail.gmail.com/">
+still has problems</a> with the implementation of the latest version of the
+patch set. "<q>Sorry. This is no go.
+We have to go back to the drawing board with the whole thing.</q>"
+</p>
+
+<p>
+Starovoitov specifically objected to the way that Mohan's code repurposed the
+<tt>id</tt> field of the structure that the verifier uses to track stack slots
+containing references to iterators. There are already several slightly different
+uses of IDs across the verifier — something Amery Hung is
+<a href="https://lwn.net/ml/all/20260307064439.3247440-1-ameryhung@gmail.com/">
+working on cleaning up</a> — and Starovoitov doesn't want to add another one
+that is specific to iterators when the patch set is supposed to add a generic
+mechanism. 
+</p>
+
+<p>
+Mohan has not yet responded to Starovoitov's concerns with a new version of the
+patch set, but he has submitted
+<a href="https://lwn.net/ml/all/20260311225726.808332-1-puranjay@kernel.org/">
+another</a> patch set that changes the <tt>task_vma</tt> iterator to use
+per-VMA locking instead of <tt>mmap_lock</tt>. The iterator copies the VMA and
+drops the lock before providing the VMA to the BPF program, making the iterator
+usable in sleepable contexts. That patch set is still undergoing revision, but
+it could solve the specific problem of using <tt>task_vma</tt> iterators in a
+sleepable context. Hopefully the more general mechanism (and Zingerman's
+suggested cleanup) will still be a priority for Mohan afterward, even if the
+newer patch set meets his needs.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1062868/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

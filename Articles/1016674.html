@@ -1,0 +1,257 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A new type of spinlock for the BPF subsystem [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A new type of spinlock for the BPF subsystem">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The 6.15 merge window saw the inclusion of a new type of lock for BPF programs: a resilient qu [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1016367/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A new type of spinlock for the BPF subsystem</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>April 9, 2025</br>
+           <hr>
+<a href="https://lwn.net/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+The 6.15 merge window saw the inclusion of a new type of lock for BPF programs:
+a resilient queued spinlock that Kumar Kartikeya Dwivedi has been working on
+for some time. Eventually, he hopes to convert all of the spinlocks currently
+used in the BPF subsystem to his new lock.
+He gave a remote presentation about the design of the lock at the
+2025 Linux Storage, Filesystem,
+Memory-Management, and BPF summit.
+</p>
+
+<p>
+Dwivedi began by providing a bit of background on existing locking in BPF. In
+2019, Alexei Starovoitov
+<a href="/ml/netdev/20190116050830.1881316-1-ast@kernel.org/">
+introduced</a> <tt>bpf_spin_lock()</tt>, which allowed BPF
+programs to update map values atomically. But the lock came with the serious
+limitation that a BPF program could only hold one lock at a time, and could not
+perform any function calls while the lock was held. This let the verifier ensure
+that BPF programs could not deadlock, but was awkward to use, Dwivedi said.
+</p>
+
+<p>
+In 2022,
+<a href="/Articles/922405/">
+sched_ext</a> led to the introduction of more kernel data structures to BPF,
+including linked lists and red-black trees. The verifier was tasked with
+ensuring that the BPF program could lock and unlock those data structures
+correctly while manipulating them, but still only supported holding one lock at
+a time, and only allowed restricted operations while it was held. Some algorithms
+are much easier to express if the program is allowed to take two locks, Dwivedi
+explained. So this was a lot of friction to impose on BPF users, all for the
+sake of avoiding deadlocks.
+</p>
+
+<p>
+The thing is, the syzbot kernel fuzzing system
+regularly finds deadlocks in the BPF runtime. The verifier
+cannot help with those, either, since they're occurring in kernel code and not
+in the loaded BPF programs. This is "<q>an endless source of issues</q>" that
+the BPF developers need to find some way to deal with, he said.
+</p>
+
+<p>
+So the problem that Dwivedi set for himself was: how to guarantee forward progress
+in the kernel, when applying more static analysis to the kernel is infeasible?
+Furthermore, he
+wanted to find a solution that was scalable, and that could isolate faults to
+the specific BPF program that introduced the problem, without causing other
+programs to suffer. This is clearly a tall order, but Dwivedi believes that he has
+a preliminary solution.
+</p>
+
+<h4>Resilient queued spinlocks</h4>
+
+<p>
+His solution is to introduce a new kind of lock — a resilient queued spinlock — that
+will dynamically check for deadlocks (and livelocks) at run time, and encourage
+its use in areas of the kernel that frequently suffer from locking problems. The
+basic structure of the lock is (for most kernel configurations) four bytes:
+</p>
+
+<ul class="spacylist">
+<li><tt>locked</tt> — a one-byte value that is either one, when the lock is
+held, or zero, when it's free.</li>
+<li><tt>pending</tt> — a one-byte value that is used to indicate that a second
+thread is waiting on the lock.</li>
+<li><tt>tail</tt> — a two-byte index into a table of wait queues that is used
+when more than two threads want the lock.</li>
+</ul>
+
+<p>
+When a thread is waiting on the lock (and would otherwise be wasting CPU
+time spinning), it checks a per-CPU table of held locks against information
+stored in the lock's queue in order to detect deadlocks. If waiting for the lock takes
+too long without the lock becoming free, an error is also returned indicating a
+livelock.
+</p>
+
+<p>
+Dwivedi went through what the process of locking and unlocking the lock looks
+like at different levels of contention. When the lock is uncontended, it works
+exactly like the kernel's current spinlocks: the thread that wants to acquire
+the lock uses a compare-and-exchange instruction to set <tt>locked</tt> to one.
+When it's done, it sets it back to zero. When two threads want the lock, the
+sequence is similar, except that the second thread will set
+<tt>pending</tt> to indicate that it is waiting and start spinning on the lock.
+</p>
+
+<p>
+When more than two threads want the lock, things get interesting. The third
+thread to try to acquire the lock sees that the <tt>pending</tt> bit is set,
+adds itself to a new queue, and then points the <tt>tail</tt> field of the lock
+to the entry for that queue. Then, as the head of the queue, it becomes
+responsible for running checks for deadlocks. Any new threads that attempt to
+acquire the lock add themselves to the queue.
+</p>
+
+<p>
+Eventually, the thread holding the lock will give it up, prompting
+the pending thread to grab it and reset <tt>pending</tt> to zero. Because the
+thread at the head of the queue was handling deadlock checks, the pending thread
+was free to spin on the lock, so the latency from the lock being freed until the
+pending thread can acquire it should be low.
+If the thread holding the lock doesn't give it up in a reasonable amount of
+time, the thread at the head of the queue also notices that, and the waiting
+threads all remove themselves from the queue and return error messages.
+</p>
+
+<p>
+The
+design of the lock is intended to have performance competitive with the kernel's
+existing spinlocks, while still letting deadlocks be detected. To support this,
+Dwivedi showed a number of graphs from benchmarks such as locktorture and
+will-it-scale, which are also available in
+<a href="https://web.git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=6ffb9017e932">
+his commit message</a>. In short, the new lock looks as though it performs only
+slightly worse than the existing spinlock on an Intel x86_64 CPU, and pretty much identically
+on an arm64 CPU — although there was the normal amount of noise in his
+performance data making the difference somewhat hard to detect.
+</p>
+
+<h4>Next steps</h4>
+
+<p>
+Now that the lock is available in the kernel (although it wasn't at the time of
+Dwivedi's presentation), he has plans for how to make use of it.
+The place he most wants to see the lock used is in the BPF runtime, both to help
+eliminate the existing deadlock problems there, and because that will let the
+BPF developers relax some of the restrictions on BPF programs that hold locks.
+He also wants to work on reporting detected deadlocks to user space, which is
+currently not done.
+</p>
+
+<p>
+He pointed the audience at
+<a href="https://github.com/kkdwivedi/rqspinlock/blob/main/rqspinlock.pdf">
+his and Starovoitov's white paper</a> for anyone interested in additional details of how the
+deadlock-detection algorithm works. I asked how long he expected it to take to
+adapt the whole BPF runtime to use his new lock; Dwivedi said that the work was
+not complicated, he just wanted to avoid doing it in the initial patch set.
+"<q>Once the whole thing lands in mainline, we will want to convert more parts.</q>"
+</p>
+
+<p>
+Starovoitov asked about his ideas for replacing the existing spinlocks.
+Specifically, the existing <tt>bpf_spin_lock()</tt> function returns
+<tt>void</tt>, and has no possibility of failure, which means adding error paths
+to use the new lock. Dwivedi said that there was some additional needed work to
+allow multiple locks to be held at once, but that existing BPF programs should
+just get canceled if they cause an error. Part of the point of his work is that
+misbehaving programs should get kicked out of the kernel. In response to some
+clarifying questions, he said that the goal was that "<q>the kernel won't
+break; your program might break</q>", and that any new BPF programs going
+forward could check the return value of the lock explicitly if they needed to.
+</p>
+
+<p>
+Starovoitov expressed hope that the new lock would eventually displace all uses
+of existing spinlocks in the BPF subsystem. Anton Protopopov was concerned
+about the performance impacts from the changeover, and was unconvinced by
+Dwivedi's measurements, although the other BPF developers did not seem overly
+concerned.
+</p>
+
+<p>
+I also asked whether this was the only kind of lock Dwivedi thought the BPF runtime
+would need. He thought this was the only one needed for now, although
+he acknowledged that some people have occasionally wanted mutexes.
+</p>
+
+<p>
+With the lock now accepted into the mainline kernel, it seems likely that
+Dwivedi will be pushing forward with his quest to adapt the BPF subsystem. If
+that conversion does actually successfully eliminate deadlocks without an undue
+performance impact, perhaps other areas of the kernel will also find the new
+lock useful.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Concurrency</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1016674/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

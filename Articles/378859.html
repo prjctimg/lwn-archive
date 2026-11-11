@@ -1,0 +1,173 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Who let the hogs out? [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Who let the hogs out?">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="As a normal rule of business, the kernel tries to avoid using more system resources than are ab [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/378219/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Who let the hogs out?</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 16, 2010</br>
+           </div>
+As a normal rule of business, the kernel tries to avoid using more system
+resources than are absolutely necessary; system time is better spent
+running user-space programs.  So Tejun Heo's <a
+href="http://lwn.net/Articles/377720/">cpuhog patch</a> may come across as
+a little surprising; it creates a mechanism by which the kernel can
+monopolize one or more CPUs with high-priority processes doing nothing.
+But there is a good reason behind this patch set; it should even improve
+performance in some situations.
+<p>
+Suppose you wanted to take over one or more CPUs on the system.  The first
+step is to establish a hog function:
+<p>
+<pre>
+    #include &lt;linux/cpuhog.h&gt;
+
+    typedef int (*cpuhog_fn_t)(void *arg);
+</pre>
+<p>
+
+When hog time comes, this function will be called at the highest possible
+priority.  If the intent is truly to hog the CPU, the function should
+probably spin in a tight loop.  But one should take care to ensure that
+this loop will end at some point; one does not normally want to take the
+CPU out of commission permanently.
+<p>
+The monopolization of processors is done with any of:
+<p>
+<pre>
+    int hog_one_cpu(unsigned int cpu, cpuhog_fn_t fn, void *arg);
+    void hog_one_cpu_nowait(unsigned int cpu, cpuhog_fn_t fn, void *arg,
+			    struct cpuhog_work *work_buf);
+    int hog_cpus(const struct cpumask *cpumask, cpuhog_fn_t fn, void *arg);
+    int try_hog_cpus(const struct cpumask *cpumask, cpuhog_fn_t fn, void *arg);
+</pre>
+<p>
+A call to <tt>hog_one_cpu()</tt> will cause the given <tt>fn()</tt> to be
+run on <tt>cpu</tt> in full hog mode; the calling process will wait until
+<tt>fn()</tt> returns; at which point the return value from <tt>fn()</tt>
+will be passed back.  Should there be other useful work to do (on a
+different CPU, one assumes), <tt>hog_one_cpu_nowait()</tt> can be called
+instead; it will return immediately, while <tt>fn()</tt> may still be
+running.  The <tt>work_buf</tt> structure must be allocated by the caller
+and be unused, but the caller need not worry about it beyond that.
+<p>
+Sometimes, total control over one CPU is not enough; in that case,
+<tt>hog_cpus()</tt> can be called to run <tt>fn()</tt> simultaneously on
+all CPUs indicated by <tt>cpumask</tt>.  The <tt>try_hog_cpus()</tt>
+variant is similar, but, unlike <tt>hog_cpus()</tt>, it will not wait if
+somebody else got in and started hogging CPUs first.
+<p>
+So what might one use this mechanism for?  One possibility is
+<tt>stop_machine()</tt>, which is called to ensure that absolutely nothing
+of interest is happening anywhere in the system for a while.  Calls to
+<tt>stop_machine()</tt> usually happen when fundamental changes are being
+made to the system - examples include the insertion of dynamic probes,
+loading of kernel modules, or the removal of CPUs.   It has always worked
+in the same way as the CPU hog functions do - by running a high-priority
+thread on each processor.   
+<p>
+The new <tt>stop_machine()</tt> implementation, naturally, uses
+<tt>hog_cpus()</tt>.  Unlike the previous implementation, though (which
+used workqueues), the new code takes advantage of the CPU hog threads which
+already exist.  That eliminates <a
+href="http://thread.gmane.org/gmane.linux.kernel/957726">a performance
+bug</a> reported by Dimitri Sivanich, whereby the amount of time required
+to boot a system would be doubled by the extra overhead of various
+<tt>stop_machine()</tt> calls.
+<p>
+Another use for this facility is to force all CPUs to quickly go through
+the scheduler; that can be useful if the system wants to force a transition
+to a new read-copy-update grace period.  Formerly, this task was bundled
+into the migration thread, which already runs on each CPU, in a bit of an
+awkward way; now it's a straightforward CPU hog call.
+<p>
+The migration thread itself is also a user of the single-CPU hogging
+function.  This thread comes into play when the system wants to migrate a
+process which is running on a given CPU.  The first thing that needs to
+happen is to force that process out of the CPU - a job for which the CPU
+hog is well suited.  Once the hog has taken over the CPU, the
+just-displaced process can be moved to its new home.
+<p>
+The end result is the removal of a fair amount of code, a cleaned-up
+migration thread implementation, and improved performance in
+<tt>stop_machine()</tt>.  
+Some <a href="/Articles/378866/">concerns</a> were raised that passing a
+blocking function as a CPU hog could create problems in some situations.
+But blocking in a CPU hog seems like an inherently contradictory thing to
+do; one assumes that the usual response will be "don't do that".  And, in fact, <a
+href="http://lwn.net/Articles/378968/">version&nbsp;2 of the patch</a>
+disallows sleeping in hog functions.    Of
+course, the "don't do that" response will also apply to most uses of CPU hogs in general;
+taking over processors in the kernel is still considered to be an
+antisocial thing to do most of the time.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">CPUhog</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/378859/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

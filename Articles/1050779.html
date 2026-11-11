@@ -1,0 +1,299 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Verifier-state pruning in BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Verifier-state pruning in BPF">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The BPF verifier works, on a theoretical level, by considering every possible path that a BPF  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1051065/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Verifier-state pruning in BPF</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>December 23, 2025</br>
+           <hr>
+<a href="../Archives/ConferenceIndex/index.html">LPC</a>
+</div>
+<p>
+The BPF verifier works, on a theoretical level, by considering every possible
+path that a BPF program could take. As a practical matter, however, it needs to
+do that in a reasonable amount of time. At the
+<a href="https://lpc.events/event/19/">
+2025 Linux Plumbers Conference</a>, Mahé Tardy and Paul Chaignon
+gave a detailed explanation
+(<a href="https://lpc.events/event/19/contributions/2162/attachments/1820/3904/LPC25_State_Pruning.pdf">slides</a>;
+<a href="http://www.youtube.com/watch?v=EoEBkFJ3St4">video</a>) of
+the main mechanism that it uses to accomplish that: state pruning. They focused
+on two optimizations that help reduce the number of paths the verifier needs to
+check, and discussed some of the complications the optimizations introduced to the verifier's
+code.
+</p>
+
+<p>
+Tardy began by giving an example of the simplest kind of
+branching control flow: a program with a single if statement in it. This program
+has two potential execution paths. Adding another (non-nested) if statement makes it four,
+then eight, and by the time one reaches a realistic program, the number of
+possible paths is completely intractable. Sometimes, however, a conditional
+branch doesn't actually result in any changes that the verifier cares about:
+</p>
+
+<pre>
+    int index = 3;
+    if (condition) {
+        // Some code that doesn't change the value of index
+        ...
+    }
+    // The validity of index doesn't depend on whether the branch was taken
+    int foo = array[index];
+</pre>
+
+<p>
+The core question that state pruning asks, Tardy said, is: "<q>Can we skip some
+of the other paths?</q>" To determine that, the verifier uses special "pruning points" in
+a program's execution where it knows that it might be able to cut out redundant
+paths. Pruning points are inserted at the sources and targets of conditional
+jumps, places where unconditional jumps rejoin a different series of
+instructions, and function calls. In the above example, pruning points are added
+at the conditional jump corresponding to the if statement, and at the end of the
+if statement.
+</p>
+
+<a href="/Articles/1050872">
+<img src="https://static.lwn.net/images/2025/mahé-tardy-lpc.png" class="lthumb"
+title="Mahé Tardy" alt="[Mahé Tardy]" />
+</a>
+
+<p>
+When the verifier reaches a pruning point during verification, it saves a copy
+of its current state for later reference. If the pruning point is a conditional
+branch, it also pushes that copy of the state to a stack to come back and
+explore later. The state includes everything that affects the execution of the
+BPF program, including the current instruction pointer, so no information is
+lost when backtracking. When the verifier reaches a subsequent pruning point, it compares
+its current state against the saved states; if the current state is equivalent
+to a previously observed state, the verifier knows that it can stop exploring
+the current state, since it won't find anything new.
+</p>
+
+<p>
+That explanation puts a lot of weight on the word "equivalent", however. In
+theory, Tardy said, two states are equivalent if the current state has a subset
+of the possible values of the saved state (and, in particular, if they both
+occur at the same position in the program). So two states that are identical,
+except that the saved state has an unknown value in register <tt>r1</tt> and the
+current state has the specific value 4 in <tt>r1</tt>, are considered equivalent.
+</p>
+
+<p>
+When state pruning was introduced in
+kernel version 3.18, the check was that simple. But, since then, the
+implementation of state pruning has gained an increasing number of complexities
+to allow the verifier to efficiently prune more states. For example, recent
+kernels use a least-recently-used cache for seen states, to reduce the memory
+footprint of state pruning.
+</p>
+
+<p>
+In practice, Chaignon said, real programs rarely feature states that are
+entirely included in one another. But the verifier can find more overlapping
+states if it only compares parts of the state that turn out to actually matter
+for verification. "<q>Also, the less we compare, the more efficient state
+pruning is.</q>"
+</p>
+
+
+<a href="/Articles/1050872">
+<img src="../_static/images/2025/paul-chaignon-lpc.png" class="rthumb"
+title="Paul Chaignon" alt="[Paul Chaignon]" />
+</a>
+
+
+<p>
+To illustrate this principle, Chaignon went over the two most important
+state-pruning optimizations in the verifier today. The first is to consider only
+"live" registers when comparing states. A register is live if its value is used
+in the future by the program, and dead if it is not used again before it is
+overwritten. If two states are the same other than the contents of a dead
+register, the verifier can infer that exploring further wouldn't result in any
+different program behaviors, since the dead register is by definition not used.
+Therefore, the state can safely be pruned.
+</p>
+
+<p>
+That does require the verifier to know when registers are live or dead; it
+computes that information in a pre-pass over the program before the start of the
+main verification logic. Since which registers a program uses can be seen purely
+by inspecting the individual instructions, that pass is relatively simple. Stack
+slots, however, are not so simple. The same concept of liveness can be applied
+to stack slots, but because of the potential for pointer arithmetic, the
+verifier can't actually tell which stack slots are used at which points in the
+program without simulating it. So the verifier's equivalent logic for
+stack-slot-based pruning is interwoven with the main verification pass, which
+"<q>makes the whole implementation quite different and more complicated</q>."
+</p>
+
+<!-- middle-ad -->
+
+<p>
+The second optimization that Chaignon covered was a bit more specialized. It was
+born from the observation that the verifier often doesn't care about the exact
+value of a register. If a register is used as an index into an array, it needs
+to care about whether the value falls within bounds. But if a value is just
+stored into a BPF map for later use, the verifier doesn't care what the exact
+value is.
+</p>
+
+<p>
+So if two states are equivalent except for the value in a live register or stack slot, but that
+value is never used in a way that requires the verifier to care about it,
+the state can be safely pruned. To track this, every time a value
+is used for verification (such as being used as an array index), it is marked as
+"precise". That mark is propagated backward to previous states and all of the other
+registers and stack slots that contributed to that value. When two states are
+being compared for equivalence, the verifier only checks values that have been
+marked as precise.
+</p>
+
+<p>
+The overall implementation of state pruning in the verifier has changed a lot
+over time, Chaignon said. There are more details than would fit in the
+presentation, so he and Tardy intend to publish a series of blog posts about
+the other things they learned in the course of preparing the talk. At the time
+of writing, those posts are not yet up, but they will presumably appear on
+either
+<a href="https://mtardy.com/">Tardy's blog</a> or <a
+href="https://pchaigno.github.io/">Chaignon's blog</a>.
+</p>
+
+<p>
+One member of the audience asked whether the verifier ever unions two states
+together. That would lose precision, but be better than the verifier failing to
+prove the program safe in a reasonable amount of time, they said.
+Chaignon answered that the Linux kernel verifier doesn't do that, but the
+Windows implementation of eBPF does. That kind of operation is called widening,
+and doesn't always help. Widening replaces a specific state with a more general
+state, in the hopes of causing more state pruning. It's hard to know exactly when widening will actually
+help, and when it will result in the verifier rejecting programs that are
+actually safe. Another member of the audience
+jumped in to clarify that the Linux implementation does actually do widening in
+one specific place: on the second iteration of a loop, if a value wasn't marked
+as precise, it gets widened (i.e. the verifier assumes that register or stack
+slot could take on any value). That helps loops to reach a fixed point, where
+future iterations of the loop can be pruned since they wouldn't add any new
+information, which is
+important for fast verification in practice.
+</p>
+
+<p>
+[ Thanks to the Linux Foundation, LWN's travel sponsor, for supporting my
+travel to the Linux Plumbers Conference. ]
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Verifier</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Linux Plumbers Conference/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1050779/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1055189"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two first blog posts following LPC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 16:27 UTC (Tue)
+                               by <b>mtardy</b> (subscriber, #169901)
+                              [<a href="/Articles/1055189/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mtardy" />
+                <input type="hidden" name="return" value="/Articles/1050779/#CommAnchor1055189" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Regarding that paragraph:</p>
+
+<blockquote>
+There are more details than would fit in the presentation, so he [Chaignon] and Tardy intend to publish a series of blog posts about the other things they learned in the course of preparing the talk. At the time of writing, those posts are not yet up, but they will presumably appear on either <a href="https://mtardy.com/">Tardy's blog</a> or <a href="https://pchaigno.github.io/">Chaignon's blog</a>.
+</blockquote>
+
+<p>We published the two first blog posts for this series:</p>
+<ul>
+  <li><a href="https://pchaigno.github.io/ebpf/2026/01/20/state-pruning-timeline.html">BPF Verifier State Pruning: Timeline</a></li>
+  <li><a href="https://mtardy.com/posts/prune-points/">BPF Verifier State Pruning: Prune Points</a></li>
+</ul>
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055189/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

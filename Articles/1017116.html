@@ -1,0 +1,789 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Taking BPF programs beyond one-million instructions [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Taking BPF programs beyond one-million instructions">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The BPF verifier is not magic; it cannot solve the  halting problem. Therefore, it has to err  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1017013/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Taking BPF programs beyond one-million instructions</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>April 16, 2025</br>
+           <hr>
+<a href="https://lwn.net/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+The BPF verifier is not magic; it cannot solve the
+<a href="https://en.wikipedia.org/wiki/Halting_problem">
+halting problem</a>. Therefore,
+it has to err on the side of assuming that a program will run too long if it
+cannot prove that the program will not.
+The ultimate check on the size of a BPF program is the
+one-million-instruction limit — the verifier will refuse to process more than
+one-million instructions, no matter what a BPF program does. Alexei Starovoitov gave
+a talk at the 2025 Linux Storage, Filesystem,
+Memory-Management, and BPF Summit about that limit,
+why correctly written BPF programs shouldn't hit it, and how to make the user
+experience of large BPF programs better in the future.
+</p>
+
+<p>
+One million was "<q>just a number that felt big in 2019</q>", Starovoitov said.
+Now, in 2025, programs often hit this limit. This prompts occasional requests
+for the BPF developers to raise the limit, but most programs won't hit the limit
+if they're written to take advantage of modern BPF features. Starovoitov's most
+important advice to users struggling with the limit was to remove unnecessary
+inlining and loop unrolling.
+</p>
+
+<a href="/Articles/1017199/">
+<img src="../_static/images/2025/alexei-starovoitov-small.png" class="rthumb"
+alt="[Alexei Starovoitov]" title="Alexei Starovoitov" />
+</a>
+
+<p>
+Guidance is still circulating on the internet to annotate BPF functions with
+<tt>always_inline</tt>. That hasn't been necessary — or helpful — since 2017.
+The same is true of using <tt>#pragma unroll</tt> on loops; the BPF verifier has
+supported bounded loops since 2019. Removing those two things is the most common
+way that Starovoitov has been able to help users shrink the sizes of their BPF
+programs. It may or may not always help, but it definitely lets the verifier
+process the program more quickly, he said.
+</p>
+
+<p>
+If those don't help, there are a few other changes that users can make with more
+care. One thing to consider is the use of global functions in place of static
+functions — a distinction introduced to BPF in kernel version 5.6 in order to
+reduce time spent doing verification and allow for more flexible usage of BPF
+programs.
+Static functions are functions marked with the <tt>static</tt> keyword in C,
+whereas global functions are all other functions. Global functions are verified
+independent of the context in which they are called, whereas static functions
+take that context into account.
+When the verifier is considering static functions, it handles every
+call site separately. This is good and bad — it means that complex type and
+lifetime requirements are easily verified, but it also means that every call to
+a static function counts the entire body of the function
+against the one million instruction limit. If a static
+function is called in a loop, this can quickly eat up a program's instruction budget.
+</p>
+
+<pre>
+    // Verified up to 100 times.
+    for (int i = 0; i &lt; 100; i ++) static_function(i);
+</pre>
+
+<p>
+One member of the audience asked whether Starovoitov's example would really
+result in the static function being verified multiple times, or whether the path
+pruner would prune later verifications as being redundant. Starovoitov explained
+the pruner would only kick in if nothing depending on the loop index were passed to the
+static function.
+</p>
+
+<p>
+Global functions, on the other hand, are only verified once — meaning the cost
+of verifying the body is only paid once, and each further call only counts as
+one instruction as far as the one-million-instruction limit is concerned.
+Because global functions are verified without having any existing context on
+what registers contain what types of values,
+requirements for any arguments to the function need to be specified explicitly
+in the types, and that the verifier cannot take per-call-site information on
+bounds into account. On the other hand, if the argument to a function is
+something like a pointer to a BPF arena, the verifier doesn't need to do bounds
+checks on it anyway, so that's not as much of a problem. There are also various
+annotations, such as <tt>__arg_nullable</tt> or <tt>__arg_ctx</tt>, that the
+user can add to help the verifier understand the arguments to a global function.
+</p>
+
+<p>
+Another trick that is sometimes useful is changing how loops are written.
+Bounded loops are similar to static functions, in that they "<q>just work</q>",
+Starovoitov said, but they require the verifier to process the body multiple
+times. Loops with large numbers of iterations can easily run up against the
+limit. BPF does have several alternatives available, however. Depending on the
+situation, either iterators or run-time checks are an option:
+</p>
+
+<pre>
+    bpf_for (i, 0, 100) // open-coded iterator
+    // See below for why this loop uses "zero" in place of "0"
+    for (int i = zero; i &lt; 100 &amp;&amp; can_loop; i++) // Loop with run-time check
+</pre>
+
+<p>
+The primary difference between bounded loops and the other options is how the
+verifier reacts to determining that two iterations of the loop lead to the same
+symbolic state. In a bounded loop, if an iteration ends in the same verifier
+state that it started in (i.e., without any tracked variables getting a
+different value), the verifier rejects it as a potentially infinite loop. In a
+loop using an iterator or the
+<a href="https://elixir.bootlin.com/linux/v6.13.7/source/tools/testing/selftests/bpf/bpf_experimental.h#L360">
+<tt>can_loop</tt></a> macro
+(the eventual result of the
+<a href="964381.html">BPF <tt>may_goto</tt> work</a>), the verifier knows the
+runtime will halt a loop that continues too long, so it doesn't need to reject
+the loop.
+</p>
+
+<p>
+Starovoitov then went into a long list of correct and incorrect ways to write BPF
+loops. The logic behind why each option was correct or incorrect required a
+certain amount of background on the BPF verifier to understand, and people did
+not find the consequences of each kind of loop obvious.
+</p>
+
+<pre>
+    // Ok, only processes loop body once:
+    bpf_for (i, 0, 100) { function(arr[i]); }
+
+    // Bad, verifier can't prove that the access is in bounds:
+    int i = 0;
+    bpf_repeat(100) { function(arr[i]); i++; }
+</pre>
+
+<p>
+The <tt>bpf_repeat()</tt> macro, an earlier predecessor of <tt>bpf_for()</tt>,
+doesn't give the verifier enough information to know exactly how many times the
+loop will be repeated. So the verifier ends up concluding that <tt>i</tt> could
+potentially be any number, and might therefore be out of bounds for
+<tt>arr</tt>. Adding a check that <tt>i</tt> is less than 100 helps a little
+bit, but the verifier still doesn't know how many loop iterations will happen,
+so it tries to check every value of <tt>i</tt> to make sure the bounds check is
+right:
+</p>
+
+<pre>
+    // Bad. Accesses are in-bounds, but it hits one million instructions
+    // trying to be sure of that:
+    int i = 0;
+    bpf_repeat(100) {
+        if (i &lt; 100) function(arr[i]);
+        i++;
+    }
+</pre>
+
+<p>
+Adding an explicit <tt>break</tt> lets the verifier break out of the loop after
+a limited number of iterations, but it still has to process the body of the loop
+100 times to reach that point.
+</p>
+
+<pre>
+    // Ok, but the loop body is processed many times:
+    int i = 0;
+    bpf_repeat(100) {
+        if (i &lt; 100) function(arr[i]); else break;
+        i++;
+    }
+</pre>
+
+<p>
+A workaround for that is to initialize the loop variable from a global variable,
+instead of from a constant.
+The trick is that because the verifier assumes a global variable
+can be changed by other parts of the code, initializing a loop variable from a
+global variable makes the verifier track the value of
+the loop variable as being an unknown value in a range, instead of a known
+constant. In turn, that means that after incrementing the loop variable, the
+verifier notices that its knowledge about the variable hasn't changed: an
+unknown number plus one is still an unknown number. Therefore, the verifier
+determines that this would be an infinite loop, if it were not for the use of
+the <tt>bpf_repeat()</tt> macro, which lets the BPF runtime terminate the loop
+if it continues too long. The end result is that the verifier only needs to
+examine the loop body once, instead of examining it with different known values
+of <tt>i</tt>:
+</p>
+
+<pre>
+    // Ok, loop body only processed once, because the global variable
+    // changes how the verifier processes bounds in the loop:
+    int zero = 0; // Global variable
+
+    int i = zero;
+    bpf_repeat(100) {
+        if (i &lt; 100) function(arr[i]); else break;
+        i++;
+    }
+</pre>
+
+<p>
+These behaviors are "<q>not obvious to anyone, even me</q>", Starovoitov
+reassured everyone.
+Eduard Zingerman said that Starovoitov's examples hadn't
+even discussed widening, to which Starovoitov replied: "<q>I will get into it.
+You're doing advanced math.</q>" The pitfalls of <tt>can_loop</tt> were no less
+esoteric:
+</p>
+
+<pre>
+    // Ok, but processes loop body multiple times because the verifier
+    // sees each loop as having a different state:
+    for (int i = 0; i &lt; 100 &amp;&amp; can_loop; i++) {
+        function(arr[i]);
+    }
+</pre>
+
+<p>
+Even adopting the same global-variable-based workaround doesn't always help,
+because compilers have some optimizations that apply to basic C for loops that
+don't apply to the <tt>bpf_for()</tt> macro:
+</p>
+
+<pre>
+    // Bad. Could work or could fail to prove the bounds check depending
+    // on how the compiler handles the loop:
+    int zero = 0; // Global variable
+
+    for (int i = zero; i &lt; 100 &amp;&amp; can_loop; i++) {
+        function(arr[i]);
+    }
+</pre>
+
+<p>
+The solution is to prevent the compiler from applying the problematic
+optimizations, at least for now. Eventually, Starovoitov hopes to expand the
+verifier's ability to understand transformed loop variables to render this
+unnecessary.
+</p>
+
+<pre>
+    // Ok, only processes loop body once:
+    int zero = 0; // Global variable
+
+    for (int i = zero; i &lt; 100 &amp;&amp; can_loop; i++) {
+        // Tell the compiler not to assume anything about i, so the loop
+        // is left in a format the verifier can handle.
+        barrier_var(i);
+        function(arr[i]);
+    }
+</pre>
+
+<p>
+"<q>I know this is overwhelming, and it's bad</q>", Starovoitov said. The point
+is that it's hard for experts too, he continued. The situation with arenas is a
+little better. Because the verifier doesn't need to do bounds checks on arena
+pointers for safety, its state-equivalence-checking logic can generalize more
+inside loops. Combining the global-variable trick, <tt>can_loop</tt>, and arena
+pointers results in the best loop that he shared, which can always be verified
+efficiently:
+</p>
+
+<pre>
+    // Verified in one pass, effectively lets the user write any loop:
+    int __arena arr[100];
+
+    for (int i = zero; i &lt; 100 &amp;&amp; can_loop; i++) {
+        function(arr[i]);
+    }
+</pre>
+
+<p>
+So users have ways to write loops without worrying about the
+one-million-instruction limit — but there are still clearly parts of the BPF user experience
+that can be improved. Ideally, users would not need to care about the precise
+details of how they write their loops.
+</p>
+
+<p>
+One approach that Starovoitov tried was to attempt to widen loop variables (that
+is, generalize the verifier's state from "i = 0" to "i = [some unknown number
+within a given range]") when
+checking loops with <tt>can_loop</tt>. That would have allowed the verifier to
+recognize when two passes through the loop are essentially the same (differing
+only by the loop variable's initial value), and remove
+the need for the global-variable trick. Unfortunately, implementing that idea
+turned out to be hard. "<q>I bashed my head against the wall</q>", Starovoitov
+said, before giving up on it.
+</p>
+
+<p>
+Another idea was to use bounds checks inside of loops to split the verifier
+state into two cases, which could potentially permit the same kind of analysis.
+That turns out not to work well because of a compiler optimization called
+<a href="https://www.npopov.com/2023/10/03/LLVM-Scalar-evolution.html">
+scalar evolution</a>, which turns <tt>i++</tt> loops into <tt>i += N</tt> loops, which
+have discontiguous ranges of possible values for the loop variables.
+John Fastabend had a patch in 2017 that was supposed to cope with scalar
+evolution, Starovoitov said, so that idea is still viable. That's the path that
+he currently intends to work on.
+</p>
+
+<h4>Making things better</h4>
+
+<p>
+There is already a lot of specialized code for handling loops in the verifier,
+Starovoitov said. For example, the code dealing with scalar precision: its job
+is to make states look as similar as possible, to allow pruning to happen more
+effectively. It turns out not to really work for loops, so there's special
+detection logic in the verifier to work around problems with calculating whether
+different registers are still alive in the presence of loops. Starovoitov called the
+resulting design a "<q>house of cards</q>" and said that it's time to step back
+and think about how to rewrite the verifier.
+</p>
+
+<p>
+Right now, the verifier has two ways of determining whether a register remains alive; the old
+one is path-sensitive (that is, it depends on the path the verifier took to
+reach a particular place in the code), the new one is not. The new one is a lot more similar to
+the kind of compiler algorithm you find in
+<a href="https://suif.stanford.edu/dragonbook/">
+the Dragon Book</a> or in the academic
+literature. But the new analysis only works for registers, not the stack, so the
+old one has to be kept around. If the new analysis could be made to work for the
+stack, the old analysis could be removed, Starovoitov said, simplifying the
+logic around loops and making it easier to fix some of the bad user experience.
+</p>
+
+<p>
+One way to do that might be to eliminate the stack in its current form (at least
+inside the verifier). The BPF
+stack has a fairly small maximum size; the verifier could potentially convert the entire
+stack into virtual registers. Or the BPF developers could change the ISA to tell
+compilers that there are now 74 registers and no stack. Theoretically, doing
+things that way would both dramatically simplify the verifier code and improve
+the just-in-time compilation of BPF to machine code by making use of more
+registers, when available on an architecture, he explained.
+</p>
+
+<p>
+Zingerman immediately pointed out the problem with that idea, though: access to
+the contents of the stack based on a variable, instead of a fixed stack offset.
+Starovoitov agreed that was a problem. There are also some things, like
+iterators, that have to
+live on the stack that can't really be converted into registers,
+he said.
+</p>
+
+<p>
+The overarching point of all of this is that the verifier needs to be simplified,
+Starovoitov concluded.
+<a href="https://elixir.bootlin.com/linux/v6.13.7/source/kernel/bpf/verifier.c">
+<tt>verifier.c</tt></a> is the biggest file in the kernel
+and "<q>should be shot</q>". That simplification is the best path forward for
+enabling BPF to continue to grow and develop.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Verifier</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1017116/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1017721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 17:13 UTC (Wed)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1017721/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017721" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does WebAssembly have any disadvantages compared to BPF, other than not being part of the current kernel?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017724"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 17:27 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1017724/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017724" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It was not invented by the kernel developers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017724/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2025 13:38 UTC (Thu)
+                               by <b>karim</b> (subscriber, #114)
+                              [<a href="/Articles/1017839/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="karim" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017839" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Most people won't recall this but 10+ years ago there was a serious effort (ktap) to use a lua-based in-kernel VM instead. Was nacked because it wasn't using eBPF ....<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1017725"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 17:38 UTC (Wed)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1017725/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017725" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The thing that makes BPF unique among similar languages/runtimes is its ability to verify that certain program properties hold, beyond just memory safety. A BPF program is checked to make sure that it never deadlocks, never takes a lock without releasing it, never sleeps with a lock, always handles reference counts in kernel objects correctly, doesn't run too long, doesn't use more than a bounded amount of memory, doesn't allocate in contexts where that isn't allowed, doesn't do type-confusion to kernel data, and probably more that I'm forgetting. Those are all important to ensuring that loaded BPF programs don't break a running kernel.<br>
+<p>
+Whether that approach is worthwhile compared to WebAssembly is a value judgement; you could theoretically replace BPF with WebAssembly in the kernel, if you were willing to customize the runtime to do the necessary checks. I don't think anyone has done a good comparison of what the speed impact would be, although there would likely be some overhead, at least.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017725/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 18:36 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1017733/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017733" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; A BPF program is checked to make sure that it never deadlocks</span><br>
+<p>
+But only for one lock at a time. It would have been trivially easy (and just as fast) to do in runtime.<br>
+<p>
+<span class="QuotedText">&gt;  Whether that approach is worthwhile compared to WebAssembly is a value judgement; you could theoretically replace BPF with WebAssembly in the kernel, if you were willing to customize the runtime to do the necessary checks</span><br>
+<p>
+You can't automatically reason about complicated code. So the BPF infrastructure is already growing all sorts of runtime checkers.<br>
+<p>
+I predict that we'll get a classic "memory safe BPF without a verifier" within maybe 2 years, once it becomes clear that the verifier is a fifth wheel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 19:26 UTC (Wed)
+                               by <b>npws</b> (subscriber, #168248)
+                              [<a href="/Articles/1017748/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="npws" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017748" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While the load-time verification certainly has some limitations and your prediction doesn't seem entirely unreasonable, I don't see how various conditions it checks could be checked at runtime without adding overhead to the entire kernel. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017778"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2025 4:58 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1017778/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017778" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why would it matter for the rest of the kernel? BPF will just need to add runtime checks to its own arrays access, instead of relying on the verifier.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017778/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1017753"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 20:06 UTC (Wed)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1017753/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017753" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It sounds like BPF is converging towards Rust, and sooner or later we'll get a Rust backend that emits BPF, having checked the properties you mention using Rust's type system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017753/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1017761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 21:18 UTC (Wed)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1017761/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017761" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can compile simple Rust programs to BPF today, as long as you avoid anything the verifier doesn't know how to handle, I believe. But in practice there's a long way to go for the language to be a fully supported alternative.<br>
+<p>
+In this case, though, I think there's an important difference between Rust's guarantees and BPF's guarantees: who does the checking. I'm currently working on writing up an LSFMM+BPF article about signing BPF programs, and it's a hard question because ideally you want verification to happen in the kernel, so that you don't need to trust in user space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1017755"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is BPF just a worse version of WebAssembly?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2025 21:01 UTC (Wed)
+                               by <b>thoughtpolice</b> (subscriber, #87455)
+                              [<a href="/Articles/1017755/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="thoughtpolice" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1017755" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I mean, yes, I guess BPF is just a worse WASM? WebAssembly is really just an abstract ISA with some a particular type system attached, which is a very good thing, of course, and a super important foundation. But I think that's missing the forest for the trees a bit. The real problem is that even if you replaced all the BPF stuff with WASM, the code verifier would still have to enforce like +50 other ill-specified, subtly shifting, constantly expanding domain specific rules about code running in kernel context, as outlined in the article. "Don't do any memory allocation under certain conditions" is a good example.<br>
+<p>
+The reason the WebAssembly type system is nice is because it gives rise to an algorithm for "validation" (type checking) that rules out many problems like undefined behavior or "calling a function with the wrong arguments" e.g. type confusion exploits. Most importantly, the type checking algorithm is _sound_: it will never say "This WASM module is valid" when it is actually invalid. That's extremely important.<br>
+<p>
+OK, so now we're back in kernel land. The kernel boundary between the WASM/BPF world and the host environment has many things not specified by types, but that are crucial to ensure the system doesn't get into a broken state, like that allocation rule. How do you begin to specify that with an algorithm, much less prove it to be sound, and then implement it in the verifier and do it correctly? This is an extremely important question. The verifier is just implementing a soundness check, but it is much more complicated with many more complex and ill-defined scenarios like this, versus a mathematically defined model like WebAssembly has for its type system. A sound validation check will only ever be approximate, and that can't be changed sure, but it also has to be _correct_, and that is what's very hard.<br>
+<p>
+There're other more complicating factors that make correctness hard. The most pressing one IMO is that the kernel has an absolutely insane amount of surface area, and more and more of it is exposed to BPF as its use cases increase. The internal invariants of the system change regularly and are regularly broken during these changes. This does not help the problem and means that the algorithms for soundness may in fact either be weakened or broken if those invariants change careful. In other words: the TCB of the system is just ridiculously large. The WASM type system is incredibly simple and straightforward because it makes it not only possible, but *relatively easy*, to write a validation algorithm you can be sure is *correct*, or damn near close to it. It's like 200-300 lines of core code, not 30,000 and counting.<br>
+<p>
+And I want to be clear: yes, you can write a WASM interpreter that has a correct validation step, but it still exposes a million host APIs to the programs that, when used improperly, will break your program, just like you can with BPF. If you replaced BPF with WASM in the kernel, you'd still be writing this weird huge soundness checker. But that's why delicate design and a deliberate hand is so important for these things. It's all just... Really really difficult and takes a lot of time and brainpower.<br>
+<p>
+So anyway. I don't think WASM versus BPF really matters that much and the ship has sailed anyway. The question is: can you deliver a sound verifier that you are sure is correct for BPF programs? And I'm just not sure it can be done for Linux, in a way that won't always have the risks of having major holes and functionality gaps that need to be bridged constantly. You will be plugging the small leaky holes on the ship forever, whether it's WASM or BPF or whatever you think up.<br>
+<p>
+Having said all that, I want to be clear I am glad to have BPF and it is incredibly useful for many, many things and I use it somewhat regularly. It is what it is.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1017755/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1018161"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Does the verifier need to be in the kernel?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2025 5:25 UTC (Sun)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1018161/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1017116/#CommAnchor1018161" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If one gives up on eBPF being safe against buggy eBPF code, another option is for a userspace verified to generate and sign a kernel module on a different machine.  The userspace verifier could perform arbitrary checks, and it doesn’t need to run within the kernel.  This means it can be written in whatever language one likes, can crash in out of memory situations, and is otherwise easier to write.  Module signature checking would enforce that only authorized modules would be allowed to run.<br>
+<p>
+I suspect this would make sense for the hyperscalers who build their own kernels, but maybe not for other people who don’t.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1018161/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

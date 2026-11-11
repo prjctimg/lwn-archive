@@ -1,0 +1,352 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Sub-schedulers for sched_ext [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Sub-schedulers for sched_ext">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The extensible scheduler class (sched_ext) allows the installation of a custom CPU scheduler bu [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1056418/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Sub-schedulers for sched_ext</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 29, 2026</br>
+           </div>
+The <a href="922405.html">extensible scheduler class</a> (sched_ext)
+allows the installation of a custom CPU scheduler built as a set of BPF
+programs.  Its merging for the 6.12 kernel release moved the kernel away
+from the "one scheduler fits all" approach that had been taken until then;
+now any system can have its own scheduler optimized for its workloads.
+Within any given machine, though, it's still "one scheduler fits all"; only
+one scheduler can be loaded for the system as a whole.  The <a
+href="/ml/all/20260121231140.832332-1-tj@kernel.org">sched_ext
+sub-scheduler patch series</a> from Tejun Heo aims to change that situation
+by allowing multiple CPU schedulers to run on a single system.
+<p>
+Sched_ext was built around the idea that no scheduler can be optimized for
+every possible workload that it may encounter.  The sub-scheduler work
+extends that idea by saying that no scheduler — even a sched_ext scheduler
+— can be prepared to obtain optimal performance from every workload that a
+given system may run.  From the cover letter:
+<p>
+<blockquote class="bq">
+	Applications often have domain-specific knowledge that generic
+	schedulers cannot possess. Database systems understand query
+	priorities and lock holder criticality. Virtual machine monitors
+	can coordinate with guest schedulers and handle vCPU placement
+	intelligently. Game engines know rendering deadlines and which
+	threads are latency-critical.
+</blockquote>
+<p>
+A system that runs a single workload can also run a special-purpose
+scheduler optimized for that workload.  But the owners of systems tend to
+want to keep them busy, and that means running multiple workloads on the
+same machine.  If two workloads on the same system would benefit from
+different scheduling algorithms, at least one of them is going to end up
+with sub-optimal performance.
+<p>
+The solution is to allow sched_ext schedulers to be attached to control
+groups.  Each task in the system will be governed by the scheduler attached
+to its control group (or to the nearest ancestor group).  The kernel has
+long supported the <a
+href="https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu">CPU
+controller</a>, which allows an administrator to allocate CPU resources
+across control groups.  Interestingly, the sub-scheduler feature is not
+tied to the CPU controller; it is, instead, tied directly to the
+control-group mechanism.  As a result, the CPU controller is still in
+charge of how much CPU time each group gets, while the sub-schedulers
+manage how that CPU time is used by the processes within their respective
+groups.
+<p>
+Control groups with attached schedulers can be nested up to four levels
+deep.  Any scheduler that is to be the parent of another in the
+control-group hierarchy must be written with that responsibility in mind.
+The attachment of a sub-scheduler to a control group will only succeed if
+the parent controller allows it.  The parent scheduler also controls when
+the sub-schedulers' <tt>dispatch()</tt> callbacks are invoked.  This
+callback instructs the scheduler to choose the next tasks to run and add
+them to a specific CPU's dispatch queue.  So, in other words, the parent
+scheduler controls when a given workload (represented by a control group)
+can run, the sub-scheduler controls how the processes that make up that
+workload access the CPU, and the CPU controller is in charge of how much
+CPU time is available for them to run.
+<p>
+
+
+The kernel exports a long list of kfuncs that allow sched_ext programs to
+operate on the scheduler and the processes running under it.  Those kfuncs
+will need to be generalized so that, rather than operating on <i>the</i>
+scheduler, they operate on the appropriate sub-scheduler.  A system that is
+running multiple schedulers must also take extra care to ensure that these
+schedulers do not interfere with each other.  For example, a BPF program
+that is running on behalf of a given scheduler should not be able to affect
+— or even see — any other schedulers that might be present.  So the
+generalization of the sched_ext kfuncs must be carried out in a way that
+preserves the security and robustness of the system as a whole.
+<p>
+To that end, many of those kfuncs have been augmented with an <a
+href="/Articles/1055559/">implicit argument</a> that gives them access to
+the <a
+href="https://elixir.bootlin.com/linux/v6.18.6/source/include/linux/bpf.h#L1602"><tt>bpf_prog_aux</tt>
+structure</a> associated with the running task; from there, they can obtain
+a pointer to the sub-scheduler data they should be working with.  The BPF
+programs themselves need never specify which scheduler they are operating on,
+and have no ability to operate on any scheduler other than the one they are
+attached to.  The kernel is able to ensure that they are always tied to the
+correct sub-scheduler.
+<p>
+Similarly, sched_ext programs must be prevented from operating on processes
+other than the ones running under the scheduler they implement.  The kernel
+already maintains a structure (<a
+href="https://elixir.bootlin.com/linux/v6.18.6/source/include/linux/sched/ext.h#L139"><tt>struct
+sched_ext_entity</tt></a>) in the task structure that holds the information
+needed to manage each task with sched_ext.  The new series adds a new field
+to that structure (called <tt>sched</tt>) pointing to the (sub-)scheduler
+that is in control of that task.  Any kfunc that operates on a process can
+use this information to be sure that the process is, indeed, under the
+purview of the scheduler that is trying to make the change.
+<p>
+Sched_ext is designed with the intent of keeping faulty schedulers from
+causing too much damage.  When a problem is detected with a running
+scheduler (for example, a runnable task is not dispatched to a CPU within a
+reasonable time period), that scheduler is put into "bypass mode".  This
+mode is also entered when a scheduler is being deliberately shut down.  In
+bypass mode, the scheduler is deactivated, and all tasks running under it
+are placed under a simple FIFO scheduler.  In current kernels, that bypass
+scheduler is global.
+<p>
+In a system with multiple schedulers, though, allowing one sub-scheduler to
+toss processes into a global FIFO queue could lead to interference with
+other sub-schedulers.  So, when a sub-schedulers are in use, the parent
+scheduler, if it exists, will inherit tasks from sub-schedulers that go
+into the bypass mode.  In the other direction, if a parent scheduler goes
+into bypass mode, any schedulers below it in the hierarchy will also be
+placed in bypass mode.
+<p>
+The current patch set (version 1, though there was <a
+href="/ml/all/20250920005931.2753828-1-tj@kernel.org/">an RFC version</a>
+in September 2025 as well) is not yet a complete implementation.  It covers
+primarily the dispatch path — where a given scheduler sends a task to a CPU
+to execute.  There are a couple of important phases that happen before
+dispatch, though, that have not been addressed in this series:
+<p>
+<ul class="spacylist">
+<li> The <tt>select_cpu()</tt> callback is invoked when a task first wakes
+     up.  The scheduler should decide what to do with the task, including
+     selecting a CPU for it to run on (though the selection is not final at
+     this stage).
+<li> The <tt>enqueue()</tt> callback will actually put the task into a
+     dispatch queue.  That queue might be a specific CPU's local dispatch
+     queue, but it may also be some other queue maintained by the
+     scheduler, from which the task will be put into a CPU-local queue at a
+     later time.
+</ul>
+<p>
+These callback paths will clearly need to be worked out for a complete
+sub-scheduler implementation.  What is there now, though, is enough to show
+how the whole thing is intended to work.  There is <a
+href="/ml/all/20260121231140.832332-35-tj@kernel.org">a modified
+version</a> of the <a
+href="https://github.com/torvalds/linux/blob/master/tools/sched_ext/scx_qmap.c">scx_qmap
+scheduler</a> that is able to operate as both a parent and a sub-scheduler;
+it shows, in a relatively simple form, the type of changes that are
+necessary to the schedulers themselves.
+<p>
+As noted, this is early-stage work, and it is not yet complete.  One should
+thus not expect to see sub-scheduler support in the kernel for some time
+yet.  It is not hard to see how this feature could be useful on systems
+running a variety of workloads, though, so there will be a clear motivation
+to push it over the finish line.  At that point, the "one scheduler fits
+all" model will have been left far behind.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/CPU scheduling</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.1</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Extensible scheduler class</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1056014/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1056788"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Schedulers Bundled in Applications?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 31, 2026 17:27 UTC (Sat)
+                               by <b>kyouma</b> (subscriber, #181833)
+                              [<a href="/Articles/1056788/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kyouma" />
+                <input type="hidden" name="return" value="/Articles/1056014/#CommAnchor1056788" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is it possible we will start seeing applications shipping with their own schedulers? It kinda makes sense because developers understand their software better than anyone else. They can ship a default scheduler that makes sense for their application. Users then can customize that further if they have more specific needs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056788/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Schedulers Bundled in Applications?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2026 1:22 UTC (Mon)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1056828/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1056014/#CommAnchor1056828" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If an application really wants to control scheduling, wouldn't it be better to support a usermode scheduling primitive, e.g. Google's SwitchTo?[1] Ideal would be having both options; there's not much overlap regarding how they're used and work.<br>
+<p>
+[1] <a href="https://lkml.org/lkml/2020/7/22/1202">https://lkml.org/lkml/2020/7/22/1202</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1056840"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Schedulers Bundled in Applications?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2026 10:51 UTC (Mon)
+                               by <b>kyouma</b> (subscriber, #181833)
+                              [<a href="/Articles/1056840/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kyouma" />
+                <input type="hidden" name="return" value="/Articles/1056014/#CommAnchor1056840" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for your reply. Didn't know about SwitchTo before.<br>
+<p>
+Indeed for a per-application thing a usermode scheduling primitive is simpler.<br>
+<p>
+`sched_ext` sub-schedulers might make more sense for service-type software like a database. Maybe one can write a NixOS module that declaratively specifies that service X goes with scheduler Y. And enabling the service sets up the scheduler for it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1056840/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1057304"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Testing new schedulers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2026 2:06 UTC (Thu)
+                               by <b>mbcook</b> (subscriber, #5517)
+                              [<a href="/Articles/1057304/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mbcook" />
+                <input type="hidden" name="return" value="/Articles/1056014/#CommAnchor1057304" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems like this might also make testing new schedulers easier. Try them out on a cgroup of tasks without worrying about the impact on the whole system until you’re further along. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057304/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

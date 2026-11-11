@@ -1,0 +1,198 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Inline socket-local storage for BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Inline socket-local storage for BPF">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Martin Lau gave a talk in the BPF track of the 2025 Linux Storage, Filesystem, Memory-Manageme [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1018681/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Inline socket-local storage for BPF</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>April 28, 2025</br>
+           <hr>
+<a href="https://lwn.net/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+Martin Lau gave a talk in the BPF track of the 2025 Linux Storage, Filesystem,
+Memory-Management, and BPF Summit about a performance problem
+plaguing the networking subsystem, and some potential ways to fix it. He works on
+BPF programs that need to store socket-local data; amid other improvements to
+the networking and BPF subsystems, retrieving that data has become a noticeable
+bottleneck for his use case. His proposed fix prompted a good deal of discussion
+about how the data should be laid out.
+</p>
+
+<p>
+One day, Lau said, Yonghong Song showed him an instruction-level profile of some
+kernel code from the networking subsystem. Two instructions in particular were much
+hotter than it seemed like they should be. In
+<a href="https://elixir.bootlin.com/linux/v6.14.3/source/net/core/bpf_sk_storage.c#L227">
+<tt>bpf_sk_storage_get()</tt></a>
+(which looks up socket-local data for a BPF program), the inline function
+<a href="https://elixir.bootlin.com/linux/v6.14.3/source/net/core/bpf_sk_storage.c#L21">
+<tt>bpf_local_storage_lookup()</tt></a>
+needs to dereference two pointers in order to retrieve the user data
+associated with a given socket. As it turns out, both of those pointer
+indirections were causing expensive cache misses.
+</p>
+
+<p>
+The socket-local data storage is laid out like this because the kernel can't know
+how much space BPF programs will need in their maps ahead of time, and so must
+be able to dynamically allocate the correct amount. In practice, however, the
+BPF programs in use at Meta, where Lau works, do not change the layout of
+their per-socket data frequently. One program hasn't changed the layout at all
+since 2021.
+</p>
+
+<a href="/Articles/1018332">
+<img src="../_static/images/2025/martin-lau-lsfmmbpf-small.png" class="rthumb"
+alt="[Martin Lau]" title="Martin Lau" />
+</a>
+
+<p>
+So what if that data could be stored inline in the socket structure?
+Specifically, Lau proposed adding a new kernel-configuration parameter for
+reserving space in the structure. When set to zero, the kernel would keep the current
+behavior. When set to some non-zero value, allocations of socket-local
+data from BPF programs could be taken from the reserved space until it fills up,
+before falling back to the existing path. For
+Meta, which knows how much storage its BPF programs use per socket, this would
+allow the kernel to be configured with the appropriate size ahead of time,
+completely avoiding the double-dereference and cache misses. Reorganizing the
+storage like this would also allow saving 64 bytes of internal overhead from the
+BPF map per socket.
+</p>
+
+<p>
+One problem with the scheme is that the memory would no longer be visible to
+per-control-group accounting. Right now, when creating a per-socket BPF map, that
+memory is charged to the user-space program that created the map, Lau
+explained. With this proposal, it would count against the kernel instead.
+</p>
+
+<p>
+Alexei Starovoitov asked whether the array size really needed to be configured
+at build time; couldn't the socket structure end with a variable-length array?
+Lau agreed that it was possible, but thought that it would be complex to handle
+for all of the different types of socket. After a bit of thought, Starovoitov
+suggested that this might be a good fit for
+<a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=e3c92e81711d">
+run-time constants</a>: values that are treated as constants and hard-coded
+into the kernel's machine code, but that can be patched at boot time. Lau said that
+he didn't know that was possible, but that it seemed like it could fit.
+</p>
+
+<p>
+Another developer asked what
+would happen if a BPF program reserved space in the inline storage, and was then
+reloaded by user space — would it get a new allocation (leaving the old
+allocation as garbage), or reuse the old allocation somehow? Lau thought that
+still needed to be decided, and asked for ideas.
+</p>
+
+<p>
+Andrii Nakryiko wanted to know how much space Lau intended to reserve; "<q>like,
+kilobytes?</q>" Lau clarified that they needed somewhere around 100 bytes,
+possibly less if BPF programs could be made to share data that they all need.
+That allayed some of Nakryiko's concerns, but he still wondered how bad a single
+pointer indirection would be. What if the socket structure stored a single
+pointer to a dynamically sized object? Data at the end of the socket structure
+is unlikely to be in cache anyway, he asserted. Lau disagreed, saying that it
+depends on how the packet has been processed so far.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+That said, one potential benefit of using non-inline storage is the ability to
+share data between multiple sockets, he said. For some of the BPF programs he
+worked with, there might only be 500 different values in a given BPF
+map across 500,000 sockets. If those could be combined, it could
+decrease cache misses and make non-inline storage less expensive. He didn't
+think that it would help with the current design, however, since the first
+dereference would still not be cached.
+</p>
+
+<p>
+Song Liu wondered if it would make more sense to compress the data — if there
+are only 500 variants, it should only need 9 bits. Nakryiko agreed, suggesting
+that the current data structures could be stored in a separate map, and the
+socket structures could store a small index into that map. Lau said that he had
+tried that, and the approach ran into some problems.
+</p>
+
+<p>
+Unfortunately, the session also ran into the end of its scheduled time before a
+design could be pinned down.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1018320/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

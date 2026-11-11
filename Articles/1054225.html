@@ -1,0 +1,1462 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Task-level io_uring restrictions [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Task-level io_uring restrictions">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The io_uring subsystem is more than an asynchronous I/O interface for Linux; it is, for all pra [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1054412/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Task-level io_uring restrictions</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 19, 2026</br>
+           </div>
+The <a
+href="https://man7.org/linux/man-pages/man7/io_uring.7.html">io_uring
+subsystem</a> is more than an asynchronous I/O interface for Linux; it is,
+for all practical purposes, an independent system-call API.  It has enabled
+high-performance applications, but it also brings challenges for code built
+around classic, Unix-style system calls.  For example, the <a
+href="https://man7.org/linux/man-pages/man2/seccomp.2.html"><tt>seccomp()</tt></a>
+sandboxing mechanism does not work with it, causing applications using
+<tt>seccomp()</tt> to disable io_uring outright.  Io_uring maintainer Jens
+Axboe is seeking to improve that situation with a rapidly evolving patch
+series adding a new restrictive mechanism to that subsystem.
+<p>
+The core feature of <tt>seccomp()</tt> is restricting access to system
+calls; an installed filter can examine each system call (along with its
+arguments) made by a thread and decide whether to allow the call to proceed
+or not.  The operations provided by io_uring are analogous to system calls,
+so one might well want to restrict them in the same way.  But
+<tt>seccomp()</tt> has no visibility into — and thus no way to control —
+operations requested via io_uring.  Running a program under
+<tt>seccomp()</tt> and allowing it access to io_uring almost certainly
+gives that program a way to bypass the sandboxing entirely.
+
+<p>
+As it turns out, io_uring itself supports a mechanism that allows the
+placement of limits on io_uring operations; LWN <a
+href="826053.html">covered an early version of this feature</a> in
+2020.  To create an operation-restricted ring, a process fills in an array
+of <tt>io_uring_restriction</tt> structures:
+<p>
+<pre>
+    struct io_uring_restriction {
+	__u16 opcode;
+	union {
+		__u8 register_op; /* IORING_RESTRICTION_REGISTER_OP */
+		__u8 sqe_op;      /* IORING_RESTRICTION_SQE_OP */
+		__u8 sqe_flags;   /* IORING_RESTRICTION_SQE_FLAGS_* */
+	};
+	/* Some reserved fields omitted */
+    };
+</pre>
+<p>
+While the term "restriction" is used throughout the API, what these
+structures are doing is describing the <i>allowed</i> operations.  Each has
+a sub-operation code affecting what is allowed:
+<p>
+<ul class="spacylist">
+<li> <tt>IORING_RESTRICTION_REGISTER_OP</tt> allows a specific <a
+     href="https://man7.org/linux/man-pages/man2/io_uring_register.2.html">registration
+     operation</a> — an operation that affects the ring itself.  These
+     operations include registering files or buffers, setting the clock to
+     use, and even imposing these restrictions, among many others.
+<li> <tt>IORING_RESTRICTION_SQE_OP</tt> enables an operation that can be
+     queued in the ring; these include all of the I/O and networking
+     operations supported by io_uring.  The <a
+     href="https://man7.org/linux/man-pages/man2/io_uring_enter.2.html"><tt>io_uring_enter()</tt>
+     man page</a> has a list of available operations.
+<li> <tt>IORING_RESTRICTION_SQE_FLAGS_ALLOWED</tt> sets the list of operation
+     flags that are allowed to appear in io_uring operations; these flags,
+     listed in the <tt>io_uring_enter()</tt> man page, control the
+     sequencing of operations, use of registered buffers, and more.
+<li> <tt>IORING_RESTRICTION_SQE_FLAGS_REQUIRED</tt> creates a set of flags
+     that <i>must</i> appear in each operation.  Making a flag required
+     implicitly sets it as being allowed as well.
+</ul>
+<p>
+The array of these structures can be installed with an
+<tt>IORING_REGISTER_RESTRICTIONS</tt> operation, after which it will be
+effective on the ring.  This restriction mechanism is not as capable as
+what <tt>seccomp()</tt> can do; it cannot look at operation arguments, for
+example.  But it is fast enough to not interfere with the performance goals
+of io_uring, and is sufficient to wall off significant parts of the API.
+<p>
+<!-- middle-ad -->
+There is, however, a significant limitation to the current restriction
+mechanism: restrictions can only be applied to an existing ring, and that
+ring must be in the disabled state at the time.  It works well for an
+application that, for example, needs to create a ring, add restrictions,
+then pass it into a container.  It falls short, though, for use cases that want
+to allow io_uring in general, but with a specified subset of operations.
+Axboe's work is intended to address this limitation by
+allowing restrictions to be applied to a task rather than to a specific
+ring.
+<p>
+Specifically, this work <a
+href="/ml/all/20260109185155.88150-1-axboe@kernel.dk">started</a> by adding
+a new operation, <tt>IORING_REGISTER_RESTRICTIONS_TASK</tt>, that can
+accept the same list of <tt>io_uring_restriction</tt> structures.  That
+list will be stored with the calling task itself, though, rather than with
+a specific ring, and the restrictions will be applied to all rings
+subsequently created by that task.  The list is applied to children during
+a fork, so the restrictions will apply to all child processes created after
+they are set up.  These restrictions thus govern any rings created in the
+future, without the controlling task having to participate in that
+creation.
+<p>
+Once the restrictions have been set, they are immutable, with a couple of
+exceptions.  The <tt>IORING_REG_RESTRICTIONS_MASK</tt> flag allows
+restrictions to be tightened further by removing allowed operations and
+flags, or by adding new required flags.  The process that initially added
+the restrictions retains the power to modify them or remove them entirely.
+That process's children, instead, will remain stuck with the restrictions
+that were created for them.
+<p>
+At least, that was the state of things as of the second RFC version of the
+patch set.  The <a
+href="/ml/all/20260115165244.1037465-1-axboe@kernel.dk">third version</a>
+made a number of changes, starting with the removal of
+<tt>IORING_REG_RESTRICTIONS_MASK</tt> and any other ability to change the
+restrictions once they have been put into place.  The bigger change,
+though, was the addition of more flexible filtering using, inevitably, a
+set of BPF programs.  Interestingly, that flexibility was reduced somewhat
+in later versions, as will be seen.
+<p>
+The current BPF implementation is a bit of a proof of concept.  Among other
+things, it currently only properly filters the <tt>IORING_OP_SOCKET</tt>
+operation, which is the io_uring equivalent to the <a
+href="https://man7.org/linux/man-pages/man2/socket.2.html"><tt>socket()</tt></a>
+system call.  Operations can be controlled, but registration requests are
+not currently included in the BPF mechanism.
+<p>
+There is a new registration operation, <tt>IORING_REGISTER_BPF_FILTER</tt>,
+which adds a new BPF program to a ring; the program is associated with a
+specific <tt>IORING_</tt> operation code.  It will be invoked after the
+initial preparation for a new operation has been done; as a result, any
+structures provided by user space as part of the operation will have been
+copied into the kernel and will be available for the program to inspect.
+That gives these filters an advantage over <tt>seccomp()</tt>, which
+generally cannot access data in user space that is passed to the kernel via
+pointers.
+<p>
+The program will also be passed context specific to the operation
+in question; for <tt>IORING_OP_SOCKET</tt>, that context includes the
+address family, socket type, and protocol provided by user space.  A
+non-zero return value from the BPF program allows the operation to proceed;
+otherwise it will be blocked.  There can be multiple BPF programs attached
+to any given operation; they will be invoked in sequence, and any one of
+them can block an operation.  While the current patch set does not
+implement this behavior, Axboe has <a
+href="/ml/all/eafcaf17-dc4b-4f59-b120-7efcf93048f3@kernel.dk">said</a> that
+he intends to change the behavior to "<q>deny by default</q>" in the
+future; if BPF is in use, then an operation will be disallowed unless a BPF
+program explicitly allows it.
+<p>
+By the time the patch set reached <a
+href="/ml/all/20260118172328.1067592-1-axboe@kernel.dk">version&nbsp;5</a>
+(with the "RFC" tag removed) things had changed again in an interesting
+way.  There are two versions of BPF in the kernel, the "extended BPF" that
+is normally just called "BPF" in recent times, and "classic BPF", which is
+the earlier, BSD-derived variant that was designed for packet filtering.
+Classic BPF is far less capable and lacks compiler support; there have been
+no new users of it added to the kernel for years.  But the current version
+of the io_uring patches now uses classic BPF rather than extended BPF.
+<p>
+Axboe noted that the usability of the feature is reduced by this change:
+"<q>This obviously comes with a bit of pain on the usability front, as you
+now need to write filters in cBPF bytecode</q>".  The change was driven by
+the fact that classic BPF can be used by unprivileged processes, while
+extended BPF requires privilege (specifically, the <tt>CAP_BPF</tt>
+capability).  For the desired use case of sandboxing containers,
+accessibility without privilege is important.  It is worth noting that
+<tt>seccomp()</tt> also still uses classic BPF, for the same reason.  The
+hooks for extended BPF are still there, but cannot be used.
+<p>
+As one might surmise, this patch set seems to be evolving quickly, and may
+well have changed again by the time you read this.  It seems clear, though,
+that it will soon be possible to control access to io_uring at a level
+that, previously, has not been possible.  Just as brakes allow a car to go
+faster, fine-grained control may make io_uring available in contexts where,
+until now, it has been blocked.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/io_uring</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">io_uring/Security</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/7.0</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1054225/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1055041"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2026 18:48 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055041/">Link</a>] (28 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055041" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Here's a crazy thought. What if we use an industry-proven sandboxed environment for it, the one that is battle-tested by the most aggressive Internet environment?<br>
+<p>
+Hint: WASM.<br>
+<p>
+Has the eBPF saga not taught you anything? You'll end up reinventing it _again_.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055041/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055044"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2026 20:07 UTC (Mon)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1055044/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055044" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+... and you'll end up making the exact same comment _again_.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055044/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055048"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2026 21:02 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055048/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055048" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, yes. It'll be a fun recursive WTF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055048/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055072"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 7:14 UTC (Tue)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/1055072/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="edeloget" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055072" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At this time, I feel that eBPF is mature enough to not being systematicly compared to WASM. It's also evolving faster. It's also more and more used outside the space of the Linux kernel (mostly in the network area).<br>
+<p>
+If you really want a différent yet proven VM for the kernel, why WASM? Why not the Java VM? Or the Lua VM? Or any other VM that has been there for years? <br>
+<p>
+Since the eBPF VM is already here, I think that anybody who wants another VM in the kernel will have to implement it, instead of requiring everyone to do it. Isn't that the idea behind Open Source ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055072/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055074"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 7:32 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055074/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055074" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Java VM is not well-suited for this, it needs classloading, object hierarchy, gc, and so on.<br>
+<p>
+LUA would have been great, and it has been used successfully in BSDs in kernelspace.<br>
+<p>
+<span class="QuotedText">&gt; It's also evolving faster.</span><br>
+<p>
+No, it's racing to become competitive with WASM circa 5 years ago. I'm now eagerly awaiting multithreading in eBPF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055074/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055195"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 17:23 UTC (Tue)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1055195/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055195" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; No, it's racing to become competitive with WASM circa 5 years ago. I'm now eagerly awaiting multithreading in eBPF.</span><br>
+<p>
+WASM is still 32bit-only and progress on that have been slow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055195/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 18:50 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055207/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055207" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not anymore: <a href="https://webassembly.org/news/2025-09-17-wasm-3.0/">https://webassembly.org/news/2025-09-17-wasm-3.0/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055324"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2026 17:09 UTC (Wed)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1055324/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055324" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is huge! Is there a version of emscripten that support LP64  available ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055324/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055764"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2026 20:35 UTC (Sat)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1055764/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055764" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In fact it works already, with emscripten 4.0.37 provided node is upgraded to 2.24 and -s MEMORY64 is added to CFLAGS. Congrats to everyone involved.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055764/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1055045"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2026 20:19 UTC (Mon)
+                               by <b>aszs</b> (subscriber, #50252)
+                              [<a href="/Articles/1055045/">Link</a>] (13 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aszs" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055045" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+WASM prevents code from accessing memory outside its sandbox but it doesn't provide memory safety within its sandbox. To provide safety guarantees similar to BPF you would need to make some pretty big changes to WASM.  For example, see <a href="https://arxiv.org/abs/2208.13583">https://arxiv.org/abs/2208.13583</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055045/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055049"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2026 21:03 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055049/">Link</a>] (12 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055049" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, and? eBPF also has the same property. You can create a large array and simulate malloc/free inside this array, with out-of-bounds access.<br>
+<p>
+eBPF code won't be able to get _out_ of it, but it can still logically misbehave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055049/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055060"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2026 23:12 UTC (Mon)
+                               by <b>aszs</b> (subscriber, #50252)
+                              [<a href="/Articles/1055060/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aszs" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055060" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+talk about "Yes, and?"! :) Why would anyone do something like that? The point is that BPF has facilities to validate access to kernel structures both statically (through its verifier) and dynamically (using dynptrs) and WASM doesn't.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055060/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055061"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2026 23:29 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055061/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055061" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Why would anyone do something like that?</span><br>
+<p>
+And why would anyone write code in WASM that has use-after-free and all that?<br>
+<p>
+WASM also can validate access to the kernel structures through dynptrs, you just expose the bpf_dynptr_write/bpf_dynptr_read as helpers to the WASM runtime. There is absolutely no difference here between them.<br>
+<p>
+The only remaining difference is the verifier. And it has been neutered to the point of irrelevance with the addition of bpf_loop/bpf_foreach and other helper functions. So I can trivially make correct eBPF programs that require practically unbounded time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055061/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055063"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 0:06 UTC (Tue)
+                               by <b>aszs</b> (subscriber, #50252)
+                              [<a href="/Articles/1055063/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aszs" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055063" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; And why would anyone write code in WASM that has use-after-free and all that?</span><br>
+<p>
+I'll leave that as an exercise for the reader...   <br>
+<p>
+Anyway, you can't call malloc or free in bpf programs and the bpf verifier statically tracks the lifetime of the pointers the program does have access to, so it guarantees use-after-frees can't happen.<br>
+<p>
+That said, a WASM-to-BPF byte code transpiler would be awesome, i'm surprised no one has made one yet.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055063/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055065"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 1:28 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055065/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055065" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Anyway, you can't call malloc or free in bpf programs</span><br>
+<p>
+You absolutely can: <a href="https://docs.ebpf.io/linux/kfuncs/bpf_arena_alloc_pages/">https://docs.ebpf.io/linux/kfuncs/bpf_arena_alloc_pages/</a> Here's a mandatory LWN article about it: <a href="https://lwn.net/Articles/961941/">https://lwn.net/Articles/961941/</a><br>
+<p>
+<span class="QuotedText">&gt; hat said, a WASM-to-BPF byte code transpiler would be awesome, i'm surprised no one has made one yet.</span><br>
+<p>
+The transpiler is trivial, but the runtime environments are too different for it to be useful.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055065/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 3:59 UTC (Tue)
+                               by <b>aszs</b> (subscriber, #50252)
+                              [<a href="/Articles/1055069/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aszs" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055069" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; You absolutely can: <a href="https://docs.ebpf.io/linux/kfuncs/bpf_arena_alloc_pages/">https://docs.ebpf.io/linux/kfuncs/bpf_arena_alloc_pages/</a> Here's a mandatory LWN article about it: <a href="https://lwn.net/Articles/961941/">https://lwn.net/Articles/961941/</a></span><br>
+<p>
+Sure, there's lots of ways to directly and indirectly allocate memory through bpf apis. But those pointers are tracked by the verifier to prevent unsafe access (use after free, pointer arithmetic, etc.). The wasm bytecode verifier doesn't do this, so any theoretical in-kernel wasm program couldn't safely access kernel memory directly.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055071"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 6:14 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055071/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055071" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The wasm bytecode verifier doesn't do this</span><br>
+<p>
+Yes, it does. WASM, just like eBPF, by construction can't access memory outside of its sandbox. <br>
+<p>
+And just like in eBPF, WASM doesn't actually even _have_ pointers. It instead has indices in memory blocks, and they are always range-checked. Go on and try to read the spec: <a href="https://webassembly.github.io/spec/core/syntax/modules.html#syntax-mem">https://webassembly.github.io/spec/core/syntax/modules.ht...</a><br>
+<p>
+It is very common for old C/C++ programs to re-create the malloc/free on top of a large pre-allocated block of memory in WASM and to use indexes to emulate the C/C++ pointers. And it's possible for C/C++ code in WASM to have out-of-bounds reads/writes, just like on the real hardware. So if you compile OpenSSL into WASM, it will still be vulnerable to a Heartbleed-like bug.<br>
+<p>
+However, the out-of-bounds access in WASM still can NOT escape the memory blocks. They are compiled into index-based array operations, and they are always range-checked.<br>
+<p>
+And of course, exactly the same scenario can happen in eBPF with arenas. The eBPF verifier won't do anything to help.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055071/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055073"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I just leaving this here</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 7:20 UTC (Tue)
+                               by <b>NHO</b> (subscriber, #104320)
+                              [<a href="/Articles/1055073/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NHO" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055073" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://instatunnel.my/blog/the-wasm-breach-escaping-backend-webassembly-sandboxes">https://instatunnel.my/blog/the-wasm-breach-escaping-back...</a><br>
+No further comment<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055073/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I just leaving this here</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 7:35 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055075/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055075" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In other words: bugs happen. Duh. Same for the eBPF, it also has had its share of CVEs.<br>
+<p>
+The kernel developers themselves don't trust eBPF to be safe, so it's limited to the root user only.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1055112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 14:13 UTC (Tue)
+                               by <b>aszs</b> (subscriber, #50252)
+                              [<a href="/Articles/1055112/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aszs" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055112" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;&gt; Yes, it does. WASM, just like eBPF, by construction can't access memory outside of its sandbox.</span><br>
+<p>
+my first comment: <br>
+<p>
+"WASM prevents code from accessing memory outside its sandbox but it doesn't provide memory safety within its sandbox. To provide safety guarantees similar to BPF you would need to make some pretty big changes to WASM. For example, see <a href="https://arxiv.org/abs/2208.13583">https://arxiv.org/abs/2208.13583</a>"<br>
+<p>
+We are literally going in circles. How would your in-kernel wasm jit handle the task_struct pointer returned by bpf_get_current_task_btf()? Or modifying xdp packets with apis like <a href="https://docs.ebpf.io/linux/helper-function/bpf_xdp_adjust_head/?">https://docs.ebpf.io/linux/helper-function/bpf_xdp_adjust...</a> And do stuff like that safely without overhead? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055204"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 18:48 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055204/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055204" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; We are literally going in circles. How would your in-kernel wasm jit handle the task_struct pointer returned by bpf_get_current_task_btf()?</span><br>
+<p>
+Would you read the WASM spec, please? The task_struct will be modeled as a WASM structure type: <a href="https://webassembly.github.io/spec/core/syntax/types.html#syntax-structtype">https://webassembly.github.io/spec/core/syntax/types.html...</a> It's accessible via _references_ only ( <a href="https://webassembly.github.io/spec/core/syntax/types.html#syntax-reftype">https://webassembly.github.io/spec/core/syntax/types.html...</a> ):<br>
+<p>
+<span class="QuotedText">&gt; Reference types are opaque, meaning that neither their size nor their bit pattern can be observed. Values of reference type can be stored in tables but not in memories.</span><br>
+<p>
+It will NOT be accessible using pointer operations from any memory blocks. That's how browsers expose complex objects into the WASM world.<br>
+<p>
+Just like in eBPF (does that phrase sound familiar by now?).<br>
+<p>
+<span class="QuotedText">&gt; And do stuff like that safely without overhead?</span><br>
+<p>
+Yes. Just like in eBPF.<br>
+<p>
+Again, this is not something theoretical or exotic. That's how browsers work RIGHT NOW.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055204/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055326"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2026 17:35 UTC (Wed)
+                               by <b>notriddle</b> (subscriber, #130608)
+                              [<a href="/Articles/1055326/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="notriddle" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055326" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It’s probably worth pointing out that the features you’re talking about are less than a year old. <a href="https://webassembly.org/news/2025-09-17-wasm-3.0/">https://webassembly.org/news/2025-09-17-wasm-3.0/</a><br>
+<p>
+Not necessarily a problem, but it does mean that the idea of wasm being “battle-tested” is wrong. The features you think they should rely on are new.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055326/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055338"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2026 18:41 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055338/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055338" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The typed references are new, but even the first version of WASM had something similar: <a href="https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#external-types%E2%91%A0">https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#exte...</a><br>
+<p>
+External types were represented as tables and functions with similar limitations, they were treated as opaque objects without any ways to get to their exact binary representation (never mind modify them).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055338/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1055064"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 0:25 UTC (Tue)
+                               by <b>ibukanov</b> (subscriber, #3942)
+                              [<a href="/Articles/1055064/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ibukanov" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055064" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+WASM is much harder to protect against Spectre and similar hardware bugs than BPF. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055064/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055066"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 1:09 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055066/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055066" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, it's not. You can do exactly the same constant blinding during code generation. It would require additional development, because it's not how people are combating SPECTRE in user-space, but nothing terribly unusual. Just another pass in the code generator. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055066/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 17:46 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1055198/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055198" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All of these "one only needs to…" and yet…no one is doing it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 19:00 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055208/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055208" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why would you? SPECTRE is not a major issue in userspace that WASM needs to take care of. Browsers prevent timing attacks by isolating different trust domains into different processes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055217"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 21:27 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1055217/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055217" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm talking about the wider WASM-over-BPF commentary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055217/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055223"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A crazy thought</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 22:36 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1055223/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055223" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I understand. My point is that no WASM runtime right now _needs_ to have SPECTRE mitigations due to the way browsers work. So nobody is working on them.<br>
+<p>
+And yes, I looked at the eBPF JIT and Wasmtime and Cranelift, so I roughly understand the scope of work. It's a fair amount, but nothing extraordinary.<br>
+<p>
+Also I have a deep suspicion that with all the kfuncs available to eBPF, you can find enough speculation gadgets there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055223/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1055086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Surely opening files is the key operation to sandbox</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 9:37 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1055086/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="epa" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055086" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I haven't used io_uring (my experience goes as far as select()) but I would expect that the I/O you really need to go fast is read() and write().  Opening the file is a comparatively rare event.  Yet surely most seccomp filters strictly control what files you can open (and whether for read-only, append-only, or read-write) and don't do much to filter the operations on an already open filehandle.<br>
+<p>
+Can't you open the files conventionally, with calls that are filtered by seccomp in the usual way, and then pass those filehandles into io_uring, via an entry point that allows only read and write operations?  Seccomp would allow that restricted form of io_uring only.  That would surely cover 80% of it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055097"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Surely opening files is the key operation to sandbox</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2026 13:21 UTC (Tue)
+                               by <b>alip</b> (subscriber, #170176)
+                              [<a href="/Articles/1055097/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alip" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055097" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Another option is to have an API to emulate io_uring through seccomp-unotify (like Syd) or seccomp-trap (like gVisor).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055097/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1055394"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Imagine...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2026 5:15 UTC (Thu)
+                               by <b>milesrout</b> (guest, #126894)
+                              [<a href="/Articles/1055394/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="milesrout" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055394" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+...a world in which the Linux kernel could have all this security theatre deleted. No more seccomp, no more LSMs. Imagine how much code and overhead could be deleted, how much complexity could be avoided.<br>
+<p>
+None of it is necessary. We have security mechanisms in place already. They're called users and permissions. Don't run random untrusted code you downloaded from the internet without checking it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055394/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055396"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Imagine...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2026 5:40 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1055396/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055396" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A pretty horrible world, I would say.<br>
+<p>
+Not every detail about these mechanisms is good and perfect of course.<br>
+But overall it's a good idea to lock down applications to what they actually need rather than exposing them to everything that is available.<br>
+<p>
+This has nothing to do with running untrusted code.<br>
+Also fully trusted and reviewed code shall be locked down just to reduce and mitigate the remaining bugs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055396/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Imagine...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2026 7:10 UTC (Thu)
+                               by <b>milesrout</b> (guest, #126894)
+                              [<a href="/Articles/1055399/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="milesrout" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055399" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Remember the counterfactual is a simpler world. Simpler kernel, simpler userspace code. There is a lot of complexity in these layers of "security in depth" and complexity is the source of bugs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1055404"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Imagine...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2026 7:50 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1055404/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1055404" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem with a simpler world is simple (as in braindead) users.<br>
+<p>
+I just gave my users a completely new system with the instruction "please test". Thanks to Chinese Whispers, they used it live ... and it contained a painful flaw. It's okay being 95% correct, but if that other 5% is something that's rather noticeable to your customers - ouch! :-(<br>
+<p>
+And apparently it didn't cross ANYbody's mind to think "this is the first time we've used it, and we're using it live". Especially as my default rule is "if you don't know what you're doing, do the same as last week" - the number of times I have to repeat that rule, it frustrates the hell out of me!<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1055404/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1057624"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why can't seccomp() check io_uring-generated syscalls?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2026 22:29 UTC (Sat)
+                               by <b>reillyeon</b> (subscriber, #51146)
+                              [<a href="/Articles/1057624/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="reillyeon" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1057624" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This feels like a dumb question but despite the number of articles mentioning that io_uring "bypasses" seccomp() I feel like no one has explained why these two subsystems can't work together. Perhaps my mental model of how io_uring operates is incorrect, but as I understand it each io_uring operation is equivalent to a system call. Why can't these be checked, perhaps even with the exact same code as the equivalent system call, when the operation is executed? If we can solve the complexities of checking the properties of a system call why can't we do the same for an io_uring operation? Is a completely parallel restriction mechanism really required?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057624/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1057634"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why can't seccomp() check io_uring-generated syscalls?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 8, 2026 0:23 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1057634/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1054225/#CommAnchor1057634" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Io_uring really is an entirely separate interface to kernel-provided functionality.  It has things like <a href="/Articles/863071/">descriptorless files</a>, for example.  Many io_uring operations mirror normal system calls, but others do not.
+<p>
+One <i>could</i> probably find a way to extend <tt>seccomp()</tt> to handle it, but it would probably not be a smaller project than what is being proposed here.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1057634/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

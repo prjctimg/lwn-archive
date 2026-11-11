@@ -1,0 +1,305 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Yet another try at the BPF program allocator [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Yet another try at the BPF program allocator">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The BPF subsystem, which allows code to be loaded into the kernel from user space and safely ex [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/915255/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Yet another try at the BPF program allocator</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 28, 2022</br>
+           </div>
+The BPF subsystem, which allows code to be loaded into the kernel from user
+space and safely executed in the kernel context, is bound to create a number of
+challenges for the kernel as a whole.  One might not think that allocating
+memory for BPF programs would be high on the list of problems, but life
+(and memory management) can be surprising.  The attempts to do a better job
+of providing space for compiled BPF code have, to date, only been partially
+successful; now Song Liu is back with <a
+href="/ml/linux-mm/20221107223921.3451913-1-song@kernel.org/">a new
+approach</a> to finish the job.
+<p>
+<h4>Small, transient, and numerous</h4>
+<p>
+The problem with BPF programs is that they tend to be small, are often
+transient, and can be numerous.  That, alone, would not be hard for the
+kernel to deal with; the slab allocators are highly tuned for the efficient
+allocation and freeing of small objects.  But BPF programs, being
+executable code, must be stored in memory that allows execute access, and
+that complicates the picture.
+<p>
+Any memory that is both executable and writable presents an attractive
+target for attackers, so the kernel goes well out of its way to prevent
+that combination from occurring; some architectures prohibit it entirely.
+The kernel's own code is loaded at boot 
+time, made read-only, and (usually) never changed again.  Loadable modules,
+which require the addition of kernel code at run time,
+complicate things a bit, but modules are relatively large and tend to be
+stable.  The kernel will load the modules it needs shortly after boot, and
+the set of loaded modules will rarely change thereafter.  As a result, even
+if the handling of loadable modules is not optimal, things normally work
+well enough anyway.
+<p>
+As noted above, though,
+BPF programs can come and go frequently, and there can be a lot of
+small programs in the system.  All of this would be fine in the
+absence of the prohibition on memory that is both writable and executable;
+that restriction requires that memory holding BPF programs, which are
+executable, be made non-writable.  That, in turn,
+requires changing the permissions in the "direct map", the range of kernel
+address space that (on 64-bit systems) maps all of the system's physical
+memory.  Even if direct-map addresses are not used to access BPF memory (as
+would 
+happen if the <tt>vmalloc()</tt> family of allocators is used to obtain
+it), the existence of a writable direct mapping to executable code would
+create a potential vulnerability.
+<p>
+The kernel's direct map uses huge-page mappings (of 1GB size when
+possible).  Huge-page mappings reduce the pressure on the system's
+translation lookaside buffer (TLB) and improve the performance of the
+system overall.  If a portion of the direct map must be made read-only,
+though, then the huge page the contains it must be split into smaller
+pages, fragmenting the direct map with a measurable impact on performance.
+Doing that once or twice might not be a big problem but, in a system where
+BPF programs come and go frequently, the impact on the direct map can be
+severe.
+<p>
+The smallness of BPF programs also turns out to be a problem.  In older
+kernels, each BPF program was loaded into its own (4KB) page, meaning that,
+often, most of the page was wasted.  If many of these programs are loaded,
+that wasted memory starts to add up.
+<p>
+In February, Liu <a href="883454.html">set out to solve these
+problems</a>.  The "bpf_prog_pack" allocator worked by allocating 2MB huge
+pages from the kernel, then handing out portions of those pages for BPF
+programs as they 
+are loaded.  The concentration of multiple BPF programs into huge pages
+addressed both problems: it minimized fragmentation of the direct map and
+reduced memory waste by packing BPF programs together in the same page.
+This allocator looked like a good solution and was quickly pulled into the
+mainline during the 5.18 merge window.
+<p>
+Unfortunately, <a href="892743.html">a number of problems</a> quickly
+surfaced, and much of the bpf_prog_pack functionality was backed out
+despite the fact that the source of some of the trouble was to be found in
+the memory-management subsystem.  The
+allocator is still present in the kernel, but it uses 4KB "base" pages, so
+it does not help performance as much as it could.
+<p>
+<h4>Trying again</h4>
+<p>
+Liu's new proposal replaces bpf_prog_pack with a new allocator that
+addresses the complaints about the previous version and, once
+again, uses huge pages to hold BPF programs.  That leads to improved
+performance:
+<p>
+<blockquote class="bq">
+	Based on our experiments, we measured 0.5% performance improvement
+	from bpf_prog_pack. This patchset further boosts the improvement to
+	0.7%.  The difference is because bpf_prog_pack uses 512x 4kB pages
+	instead of 1x 2MB page.
+</blockquote>
+<p>
+The use of 2MB pages is now possible as the result of fixing the
+related problems in the memory-management subsystem.  This new allocator
+goes beyond the use of huge pages, though, and creates a new API for the
+management of transient, executable code in the kernel:
+<p>
+<pre>
+    void *execmem_alloc(unsigned long size, unsigned long align);
+    void *execmem_fill(void *dst, void *src, size_t len);
+    void execmem_free(void *addr);
+</pre>
+<p>
+Any kernel subsystem that needs to set up a segment of executable code can
+allocate the memory with <tt>execmem_alloc()</tt>.  The memory that is
+returned will have read-only protection, so the caller cannot copy the code
+into it directly.  Instead, <tt>execmem_fill()</tt> must be called to
+populate this memory with the executable text.  On the x86 architecture
+(the only one that supports this mechanism now), the "text_poke" machinery
+will be used to safely copy the code while dodging the many race conditions
+that can present themselves when code is being modified.  If a range of
+executable memory is no longer needed, it can be returned with
+<tt>execmem_free()</tt>.
+<p>
+The advantage of this new API is that it is not limited to just BPF
+programs; it can also potentially be used in other places where code is
+loaded into the kernel — specifically for loadable modules.  That would
+improve the efficiency of those allocations while simultaneously
+reducing the number of code-loading implementations in the kernel.  That
+seems like a significant benefit, but there is just one little problem: the
+module loader has not been changed to actually use this API, so there is no
+proof that it will work in that context.
+<p>
+Indeed, it almost certainly will not work for module loading yet, simply
+because there is no support for any architectures other than x86.  Loading
+code into a running kernel is a tricky business, and the details of how it
+can be done safely vary widely from one architecture to the next.  A number
+of architectures now implement at least parts of the text_poke API, which
+simplifies the task, but text_poke is not universal; arm64 does not support
+it, for example.  Architectures also have differing requirements around the
+placement of data areas for modules; it may not work to put a module's BSS
+memory far away from its text, for example.  All of this adds up to a
+number of potential headaches for anybody trying to actually use the new
+API for module loading.
+<p>
+Reviewers of this work would, understandably, like some assurance that the
+new API can work beyond BPF before accepting it; Mike Rapoport, for
+example, has <a href="/ml/linux-mm/Y2o9Iz30A3Nruqs4@kernel.org/">asked</a>
+for "<q>at least some explanation how modules etc can use execmem_ APIs
+without breaking !x86 architectures</q>".  Rick Edgecombe <a
+href="/ml/linux-mm/9e59a4e8b6f071cf380b9843cdf1e9160f798255.camel@intel.com/">responded</a>
+with an assertion that other architectures could be supported with minor
+changes to the API, but questioned whether it it is truly necessary to
+solve the whole problem at this point.
+<p>
+Luis Chamberlain has also <a
+href="/ml/linux-mm/Y3P%2F9DXAjKhmoIvm@bombadil.infradead.org/">expressed
+frustration</a> at the lack of solid (and reproducible) data showing how
+this work improves system performance.  He clearly sees some advantages
+overall, though, since one of his <a
+href="/ml/linux-mm/Y2mXI1WHuhRW7Jt+@bombadil.infradead.org/">complaints</a>
+is that the patch changelogs do not sufficiently highlight "<q>the gains of
+this effort helping with the long term advantage of centralizing the
+semantics for permissions on memory</q>".  Liu has <a
+href="/ml/linux-mm/CAPhsuW4_aYvPJUfCBkMygKPpHx7Y3xPCV7ewLGGAhyztJq3dhA@mail.gmail.com/">responded</a>
+with a bit more data on TLB-miss improvement.
+<p>
+The benefits of the work seem clear, should it manage to not run
+into surprises like its predecessor.  The biggest question with regard to
+merging would seem to be just how much work will be required to convince
+reviewers that this API can handle the module case.  If a complete solution
+is required, the new BPF program allocator seems unlikely to land anytime
+soon.  Since there are no user-space API issues to resolve, though, it
+should be possible to proceed with the BPF solution once reviewers are
+convinced that it does not actively lead in the wrong direction.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Memory management</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/915005/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor916620"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Update about the status of the patch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2022 13:27 UTC (Fri)
+                               by <b>jejb</b> (subscriber, #6654)
+                              [<a href="/Articles/916620/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jejb" />
+                <input type="hidden" name="return" value="/Articles/915005/#CommAnchor916620" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just for people who find this via google, the debate has now evolved to the point where tglx has NACK'd this patch without a solution to the broader executable memory allocation that would cover modules and more:<br>
+<p>
+<a href="https://lore.kernel.org/linux-mm/871qpluxfu.ffs@tglx/">https://lore.kernel.org/linux-mm/871qpluxfu.ffs@tglx/</a><br>
+<p>
+So more patches to address the underlying issue of executable memory allocation may be expected.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/916620/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor957036"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Yet another try at the BPF program allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2024 20:58 UTC (Fri)
+                               by <b>bland</b> (guest, #168935)
+                              [<a href="/Articles/957036/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="bland" />
+                <input type="hidden" name="return" value="/Articles/915005/#CommAnchor957036" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that BPF on older ARM kernels does run into odd allocation location behaviors due to the use of the kernel's module_alloc infrastructure and is tough to write kernel modules around. Thankfully, recent efforts by Mark Rutland on v6.4-rc3 have led to kernel module comprehensible memory allocation locations for BPF programs on ARM!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957036/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

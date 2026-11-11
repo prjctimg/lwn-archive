@@ -1,0 +1,3287 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Accelerating the kernel's build process [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Accelerating the kernel's build process">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Kernel developers do a lot of kernel builds.  Since the kernel is not a small program, those bu [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Accelerating the kernel's build process&quot;" href="https://lwn.net/headlines/1093398/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1093435/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Accelerating the kernel's build process</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 11, 2026</br>
+           </div>
+Kernel developers do a lot of kernel builds.  Since the kernel is not a
+small program, those builds can take a fair amount of time, even on a fast
+machine.  The kernel also has a complex build system; it is probably fair
+to say that few developers truly understand it, and fewer still are willing
+to try to improve it.  Lorenzo Stoakes, armed with LLM-based assistance,
+decided to give it a try, though, and has managed to reduce the time it
+takes to build a kernel — and not by a small amount.
+<p>
+<!-- middle-ad -->
+
+In <a
+href="/ml/all/20260908-build-speedup-v1-0-5dc1ac01672d@kernel.org">the
+cover letter</a> to his 23-part patch series, Stoakes described his
+tool use for this work:
+<p>
+<blockquote class="bq">
+	An LLM was used to first determine where the bottlenecks were then to
+	figure out how to improve them.
+<p>
+	It generated a lot of code, much of it hideous.
+<p>
+	I extensively audited and rewrote a lot of it, and heavily edited commit
+	messages, the cover letter and comments.
+</blockquote>
+<p>
+The results of this work were summarized as "<q>allmodconfig builds up to
+36% faster, incremental builds up to ~70% faster, and noop builds up to
+~90% faster</q>".
+<p>
+<h4>How to accelerate kernel builds</h4>
+<p>
+Getting to that point required a lot of changes to the build process.
+Consider, for example, the <a
+href="https://elixir.bootlin.com/linux/v7.2.2/source/scripts/kallsyms.c"><tt>kallsyms</tt></a>
+program, which runs during the build to create a table of all of the
+symbols (function and variable names) in the kernel.  There are a
+<i>lot</i> of symbols, so this table can be large.  Since the table can
+reside in memory, there is a strong incentive to make it smaller;
+<tt>kallsyms</tt> thus implements a special compression algorithm,
+described this way in the source:
+<p>
+<blockquote class="bq">
+	Table compression uses all the unused char codes on the symbols and
+	maps these to the most used substrings (tokens). For instance, it
+	might map char code 0xF7 to represent "write_" and then in every
+	symbol where "write_" appears it can be replaced by 0xF7, saving 5
+	bytes.
+</blockquote>
+<p>
+As Stoakes (or his LLM) observed, though, <tt>kallsyms</tt> performs this
+compression in a highly inefficient way, trying to perform each token
+replacement in every one of over 150,000 symbols, even though any given
+token will only appear in a small subset of them.  <a
+href="/ml/all/20260908-build-speedup-v1-3-5dc1ac01672d@kernel.org">This
+patch</a> from the series tracks which tokens appear in which symbols,
+so that substitutions are only attempted in places where they will succeed.
+This change alone speeds kernel builds by&nbsp;2-6%.
+<p>
+Even then, though, <tt>kallsyms</tt> outputs its table as a 37MB
+assembly-language file that must then be passed to the assembler to be
+turned into binary data.  <a
+href="/ml/all/20260908-build-speedup-v1-4-5dc1ac01672d@kernel.org">This
+patch</a> causes <tt>kallsyms</tt> to output the binary data in a form that
+the assembler can pull in directly, reducing build times by up to 11% in
+the best case.  Linus Torvalds <a
+href="/ml/all/CAHk-=wgryL8XqjFcO=EQwKdqNn51BANiv16QiqYKCUdXxDQBmg@mail.gmail.com">applauded</a>
+this change, but suggested that it could go further: <tt>kallsyms</tt>
+could simply output an ELF object, taking the assembler out of the picture
+entirely.  Nobody, he suggested, would normally want to write the code
+needed to make <tt>kallsyms</tt> behave that way but, since an LLM is
+involved, "<q>the obvious step would be to just ask the little helper bot
+to switch the whole kallsyms to using libelf-devel and writing an object
+file directly</q>".
+<p>
+<a href="/Articles/1093405/"><img src="../_static/images/2026/build-utilisation.svg"
+alt="[Build utilization plots]" class="photo" width="250" align="right"></a>
+
+The build process uses the <a
+href="https://www.man7.org/linux/man-pages/man1/nm.1.html"><tt>nm</tt></a>
+tool at various stages to query the contents of object files.  The output
+from <tt>nm</tt> is sorted by default, but the build process rarely needs
+sorted data.  <a
+href="/ml/all/20260908-build-speedup-v1-5-5dc1ac01672d@kernel.org">This
+patch</a> disables the sorting when it is not needed, improving build times
+by another couple of percentage points.  In <a
+href="/ml/all/20260908-build-speedup-v1-6-5dc1ac01672d@kernel.org">another
+patch</a>, the various intermediate linking stages are changed to not emit
+relocation data, which is unneeded at that point, again improving build
+times by 2% or so.
+<p>
+Sometimes, though, the use of <tt>nm</tt> can be avoided altogether.  The build
+process currently runs that tool on kernel objects, feeding the output to
+the <a
+href="https://elixir.bootlin.com/linux/v7.2.2/source/scripts/mksysmap"><tt>mksysmap</tt></a>
+<tt>sed</tt> script to create data suitable for feeding to
+<tt>kallsyms</tt>.  <a
+href="/ml/all/20260908-build-speedup-v1-8-5dc1ac01672d@kernel.org">This
+patch</a> replaces that script with new <tt>kallsyms</tt> code that reads
+ELF files directly and extracts the needed data, bypassing <tt>nm</tt>
+entirely.  In the best case, this change improves build times by&nbsp;12%,
+though the improvement seen in most cases is significantly more modest.
+Another modest improvement is had by <a
+href="/ml/all/20260908-build-speedup-v1-9-5dc1ac01672d@kernel.org">not
+allocating the <tt>.modinfo</tt> section</a> in the kernel image.  <a
+href="/ml/all/20260908-build-speedup-v1-10-5dc1ac01672d@kernel.org">This
+patch</a>, which caches information about whether each object file is part
+of a module, speeds build performance, especially in larger directories.
+<p>
+The kernel contains a lot of header files, with the result that object
+files can have a huge number of dependencies.  The <tt>make</tt> utility,
+it seems, spends a lot of time checking these dependencies in a
+single-threaded mode, slowing down the build, especially in cases where
+little has changed.  <a
+href="/ml/all/20260908-build-speedup-v1-11-5dc1ac01672d@kernel.org">This
+patch</a> adds a new utility, called <tt>depcheck</tt>, that performs
+dependency checking in a more efficient way, taking care to only <a
+href="https://man7.org/linux/man-pages/man2/stat.2.html"><tt>stat()</tt></a>
+each file once.  This change may not last, though: Torvalds <a
+href="/ml/all/CAHk-=wiA_UJbKiu8fOezKV=MfEcaFuzZiuk8Fto-Bc1KrA=43Q@mail.gmail.com">suggested</a>
+that much of the trickery used to make dependency checks work properly may
+no longer be needed: "<q>That whole thing is from a quarter century ago,
+and nobody has dared look at that code since</q>".  So the better solution
+might be to just remove it entirely.
+<p>
+Then, there is <a
+href="/ml/all/20260908-build-speedup-v1-12-5dc1ac01672d@kernel.org">this
+patch</a>, which aims to reduce the number of times that the build process
+invokes the compiler to probe whether a specific feature is supported.  The
+compiler and its supported options do not change over the course of a
+kernel build, so it makes sense to remember which options are supported
+after querying them once.  A new set of configuration options is added as a
+way of remembering and testing that information.
+<p>
+The <a
+href="https://elixir.bootlin.com/linux/v7.2.2/source/scripts/mod/modpost.c"><tt>modpost</tt></a>
+tool postprocesses symbol versions in loadable modules; that work involves
+calculating a lot of MD4 hashes.  In current kernels, the data to be hashed
+is accumulated one byte at a time; <a
+href="/ml/all/20260908-build-speedup-v1-13-5dc1ac01672d@kernel.org">this
+patch</a> does the hashing on a per-file basis, yielding a build-time
+improvement of up to&nbsp;6%.  However, this functionality <a
+href="/ml/all/434a7a10-d83e-4402-be91-816bbbc15bb7@suse.com/">is being
+removed</a> from <tt>modpost</tt>, so this change will be dropped from the
+series.  <a
+href="/ml/all/20260908-build-speedup-v1-14-5dc1ac01672d@kernel.org">This
+patch</a> adds more caching to <tt>modpost</tt>, reducing build times by up
+to 12% in some cases.  Finally, <tt>modpost</tt> generates a C file
+containing a descriptor for each module it handles; that file must then be
+compiled into an object file.  As described in <a
+href="/ml/all/20260908-build-speedup-v1-15-5dc1ac01672d@kernel.org">this
+patch</a>, the resulting overhead is not small:
+<p>
+<blockquote class="bq">
+	These files are compiled like any other kernel C file with all of
+	the -include preamble, as well as including linux/module.h, header
+	dependencies generated by fixdep of a few hundred headers, an
+	objtool run and if LTO is being performed, a link is performed to
+	generate native code.
+<p>
+	On an x86-64 allmodconfig build 11,189 *.mod.c files are built,
+	each taking ~0.24s of CPU time to compile, and module finalisation
+	as a whole 6,300 CPU seconds, or 64 seconds of wall time when run
+	over 128 threads.
+</blockquote>
+<p>
+Changing <tt>modpost</tt> to output assembly code, thus avoiding the
+compiler step, removes this overhead, speeding an <tt>allmodconfig</tt>
+build by 11% (and no-op builds by much more).  Nobody will complain about
+an improvement like this but, again, Torvalds <a
+href="/ml/all/CAHk-=wgAWpVHmR74jC7sbSJGQEHyaaN0awNfSz_SjPv3VGSYYA@mail.gmail.com">suggested</a>
+that an even better approach would be to generate the object file directly
+and remove the assembler from the process as well.  Beyond any speedups, he
+said, that change would remove the <tt>.mod.c</tt> files from the build
+entirely.
+<p>
+Other changes include <a
+href="/ml/all/20260908-build-speedup-v1-16-5dc1ac01672d@kernel.org">this
+patch</a>, which causes the finalization step at the end of each module
+build (which runs in milliseconds for any given module) to be batched,
+overcoming the inability of <tt>make</tt> to dispatch thousands of little
+tasks efficiently.  <a
+href="/ml/all/20260908-build-speedup-v1-17-5dc1ac01672d@kernel.org">Another
+patch</a> parallelizes the hashing of files in <tt>modpost</tt>.  There is
+<a href="/ml/all/20260908-build-speedup-v1-19-5dc1ac01672d@kernel.org">a
+rather more complex patch</a> that adds parallelization to the <a
+href="https://elixir.bootlin.com/linux/v7.2.2/source/tools/objtool/Documentation/objtool.txt"><tt>objtool</tt></a>
+utility, with large effects on some builds.
+<p>
+Then, there is the matter of Rust.  Currently, the kernel's Rust crates are
+compiled serially, one at a time.  That slows the kernel build considerably
+now, and will only slow things further as the amount of Rust code grows.
+<a href="/ml/all/20260908-build-speedup-v1-20-5dc1ac01672d@kernel.org">This
+patch</a> uses the <tt>-Zthreads</tt> option to <tt>rustc</tt> to build the
+crates in parallel; that option was added in Rust&nbsp;1.84, which is
+(slightly) older than the minimum version (1.85) required by the kernel.
+The patch will also attempt to use the future <tt>--jobs</tt> option if it
+is available.  Björn Baron <a
+href="/ml/all/t8iID_-Rgtrxxg-f1ZfdOg1xmm7YedvOT4pgDFEXKxoIeu29-JooZ3SSlbze088O0kLSOdgP7xN_Bo9Xm_lO1x51Gd-gIgT-tFPfwM_gCEw=@protonmail.com">warned</a>,
+though, that parallel builds in <tt>rustc</tt> have not fully stabilized,
+so it is not clear that this mode should be used by default.  <a
+href="/ml/all/20260908-build-speedup-v1-22-5dc1ac01672d@kernel.org">This
+other patch</a>, which allows Rust code to be built in parallel with the
+building of C code, should be rather safer.
+<p>
+The <a
+href="/ml/all/20260908-build-speedup-v1-23-5dc1ac01672d@kernel.org">final
+patch</a> in the series causes the build system to use <a
+href="https://zlib.net/pigz/"><tt>pigz</tt></a> to compress the kernel if
+it is available.  <tt>pigz</tt> is able to perform compression in parallel,
+significantly reducing the time required to complete this step.
+<p>
+<h4>In summary</h4>
+<p>
+See the plot (above) for another look at how these patches affect
+kernel-build times.  All told, they add up to a significant
+reduction in the time required to build a kernel.  It seems unlikely that
+developers will complain much about that.  As long as they do not introduce
+build problems (and only the parallel Rust change appears to have any risk
+of doing that), there should not be much opposition to their merging.
+<p>
+Naturally, it was necessary to try it out.  On my system, which is better
+suited to article writing than fast builds, a full kernel build with an
+empty <a href="https://ccache.dev/">ccache</a> reliably takes about
+960&nbsp;seconds.  With this patch series applied, that time drops to about
+860&nbsp;seconds (both are wall-clock time, the CPU-time numbers are quite
+a bit higher).  That is roughly a 10% decrease in build time.  The
+clean-ccache case was chosen because it is easily reproducible, but it is
+also dominated by actual compile time and is the scenario likely to show
+the least improvement.  With a fully populated ccache, the patches made a
+difference of a few seconds in a roughly 90-second build.
+<p>
+At any given time, there must be an impressive number of machines
+performing kernel builds all over the planet.  Developers will be running
+some of those, but there are probably far more in the many
+continuous-integration systems that are running.  So build-time
+improvements may save more than developer time; they will reduce the carbon
+impact of the development process overall.  This work, it seems, should
+have been undertaken long ago.  One wonders what other savings may be
+waiting for a suitably motivated developer to take a close look.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Build system</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1093398/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1093826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 15:06 UTC (Fri)
+                               by <b>shemminger</b> (subscriber, #5739)
+                              [<a href="/Articles/1093826/">Link</a>] (28 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="shemminger" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093826" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How much of the build time is legacy make based build system. Other projects have switched to meson or other tools many years ago.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 15:32 UTC (Fri)
+                               by <b>jpeisach</b> (subscriber, #181966)
+                              [<a href="/Articles/1093828/">Link</a>] (11 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jpeisach" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093828" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One good thing about make is that, like, every system has it. It's the "standard".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 0:33 UTC (Sat)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1093860/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093860" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And also importantly, everyone can more or less read make(1).  It's the lingua franca of build systems.  Fancy stuff gets complex, but the essential part of the language, everyone knows it.  And the fancy stuff is easy to find in the documentation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093868"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 11:04 UTC (Sat)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1093868/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093868" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not so sure about that.<br>
+Make has many weird things in the basics that I frequently have to lookup or ask an AI for.<br>
+Was $@ an input or an output? What did the | in rules mean again? How exactly does this rule match? And why on earth does my rule not match? VPATH, vpath??!! etc. etc.<br>
+<p>
+I don't touch these things often enough to really remember the basics well.<br>
+Let alone the recipe tab vs space insanity.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093868/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 13:04 UTC (Sat)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1093874/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093874" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>I'm not so sure about that.
+Make has many weird things in the basics that I frequently have to lookup or ask an AI for.</p>
+</blockquote>
+<p>Sure, there are language features that are not known by people.  But they are easily searchable.  My common steps:</p>
+<ol class="spacylist"><li>Search for 'gnu make manual' in your favourite search engine.</li>
+<li>The first page is usually the right one: <a href="https://www.gnu.org/software/make/">https://www.gnu.org/software/make/</a>.</li>
+<li>Once there, click on 'HTML (1040K bytes) - entirely on one web page.'</li>
+<li>ctrl+f and write the thing I'm searchign for, in this case <code>$@</code>.</li>
+<li>After a few &quot;next&quot; presses, you find several mentions of <code>$@</code> next to <code>Automatic variables</code>; click that.  (And if you don't click that, you'll eventually find it with many &quot;next&quot; presses.</li>
+</ol>
+<p>That leads us to the documentation of <code>$@</code>:</p>
+<pre><code>Here is a table of automatic variables:
+
+$@
+
+    The file name of the target of the rule.
+    If the target is an archive member,
+    then ‘$@’ is the name of the archive file.
+    In a pattern rule that has multiple targets
+    (see Introduction to Pattern Rules),
+    ‘$@’ is the name of whichever target caused the rule’s recipe to be run. 
+
+...
+</code></pre>
+<blockquote class="bq"><p>What did the | in rules mean again?</p>
+</blockquote>
+<p>The same process would bring us to the answer.  This time, the first appearance of <code>|</code> in the GNU Make documentation is the interesting one.</p>
+<pre><code>...
+Order-only prerequisites can be specified
+by placing a pipe symbol (|) in the prerequisites list:
+any prerequisites to the left of the pipe symbol are normal;
+any prerequisites to the right are order-only:
+
+    targets : normal-prerequisites | order-only-prerequisites
+</code></pre>
+<blockquote class="bq"><p>How exactly does this rule match?
+And why on earth does my rule not match?</p>
+</blockquote>
+<p>This is certainly more complex.  GNU make(1) has <code>-p</code> and <code>--debug=print</code> to help understand that.  Some BSDs also have <code>-p</code>.  Once I learned that <code>-p</code> and <code>--debug=-print</code> exist, I've always been able to figure out any such issues quickly (minutes or hours).  But admittedly, I have a lot of practice with that, and it's not trivial.</p>
+<blockquote class="bq"><p>VPATH, vpath??!!</p>
+</blockquote>
+<p>Similar as the first two questions, this can be found in the manual quickly.</p>
+<p>Nevertheless, I agree that <code>VPATH</code> is particularly complex to understand (even with the manual in front).  I didn't say every corner case of the language is easy; just a large part of it.</p>
+<p>The good news is <code>vpath</code> is something superfluous that I don't like using at all, and recommend avoiding.  I prefer having explicit rules ('static pattern rules') where possible, and list the dependencies with their path instead of relying on <code>vpath</code>.  I've also experimented that explicit rules tend to be <b>much</b> faster, since make(1) has to think less.</p>
+<p>I think the same of <code>VPATH</code>: I don't like it, and don't support it in my projects.  The main thing I don't like from VPATH is that it's a list of directories.  Explicit paths are better than using file names and letting make(1) guess where to find them.</p>
+<blockquote class="bq"><p>I don't touch these things often enough to really remember the basics well.</p>
+</blockquote>
+<p>Compare the above, which at least is easy to find documentation for, versus &quot;why is autotools/CMake/else doing this?&quot;  Those tools rely on implicit behavior for most things, so most often, the question is not &quot;how does this weird <code>$@</code> thingy work?&quot; but rather &quot;why is it doing/not doing something, if I didn't/did tell it to do it?&quot;, and there's no keyword to search for.</p>
+<blockquote class="bq"><p>Let alone the recipe tab vs space insanity.</p>
+</blockquote>
+<p>At least, again, this is something relatively well known.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094210"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 13:16 UTC (Mon)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/1094210/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cortana" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094210" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even easier than that: 'info make' then 'i' to jump to an index entry, then '$@' and enter to jump to the index entry for $@<br>
+<p>
+Not all manuals have good indices sadly but for those that do this is an invaluable time saver.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094210/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094222"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 14:41 UTC (Mon)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094222/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094222" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Yeah, it's just that I (and many others) don't know how to use info(1).  :/</p>
+<p>The good news is that we can pipe to less(1), and use the usual navigation tools of less(1) --less powerful than info(1), but more well-known--.</p>
+<pre><code class="language-sh">info make | less
+</code></pre>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094222/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094311"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 19:22 UTC (Mon)
+                               by <b>rschroev</b> (subscriber, #4164)
+                              [<a href="/Articles/1094311/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rschroev" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094311" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When I need to read an info page, I tend to use pinfo instead of regular info, because IMO it's a lot easier to use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094311/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1093871"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 14:34 UTC (Sat)
+                               by <b>grmnsftphr</b> (subscriber, #178591)
+                              [<a href="/Articles/1093871/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="grmnsftphr" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093871" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Drawing in linguistics (in a way real linguists will cry) Makefiles are more like proto languages, where you might identify a few fragments but otherwise never be sure if the speaker asked for a proto sandwich or all your money. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093871/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1094306"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 17:50 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1094306/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094306" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can't read anything but the simplest Makefiles. Every time I needed to debug a complex Make build, I ended up cargo-culting it and/or just rewriting it in something sane[r] like CMake.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094306/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 21:29 UTC (Mon)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094319/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094319" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I can't read anything but the simplest Makefiles.</span><br>
+<p>
+I can't read even the simplest CMakeLists.txt.  :)<br>
+<p>
+<span class="QuotedText">&gt; Every time I needed to debug a complex Make build, I ended up cargo-culting it and/or just rewriting it in something sane[r] like CMake.</span><br>
+<p>
+The exact same thing happens to me with CMake/autotools/..., with the exception that I can't read even the simplest ones.  And searching for documentation is worse, because they have more implicit things, which are the tricky things to search for.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093869"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 11:30 UTC (Sat)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1093869/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093869" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+unless things have changed, freebsd does not have gnu make installed by default; it must be installed from ports<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093869/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093878"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 13:53 UTC (Sat)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1093878/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093878" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+GNU make(1) is very portable, and can be installed (as you said, through ports, if necessary) almost everywhere.  The BSD maintainers are often okay using GNU make(1) for building stuff that needs it, as some OpenBSD maintainer told me some years ago.  Moreover, they strongly prefer it over other more complex build systems.<br>
+<p>
+POSIX make(1) is also useful.  In POSIX.1-2024, it improved **a lot**, and is not the useless thing it had always been.  It still needs improvements before I'd consider it over GNU make(1), but we'll eventually get there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093878/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093829"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 15:47 UTC (Fri)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1093829/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093829" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Do you have benchmarks showing that the migrations lead to faster build time ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093829/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093838"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 17:35 UTC (Fri)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/1093838/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbonzini" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093838" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can say for QEMU that it made it the build system much more mantainable, and we also get a better test harness from Meson for free. QEMU is pushing Meson to the limit, for example by building code for ten different architectures, but still it's night and day compared to the GNU Make.<br>
+<p>
+On the other hand, rewriting the whole Linux build Makefiles would be a huge compatibility breakage. Moving logic from GNU Make to C is a lot easier and more palatable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093838/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093866"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 9:29 UTC (Sat)
+                               by <b>dottedmag</b> (subscriber, #18590)
+                              [<a href="/Articles/1093866/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dottedmag" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093866" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But will it lead to faster build times?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093866/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093879"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 14:01 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/1093879/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbonzini" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093879" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No-op (and almost no-op) make became ten times faster (1s vs 10s). Most developers used build trees with minimal configuration to make no-op rebuilds faster, so the impact wasn't as earth shattering as it sounds. But the trick is not needed anymore.<br>
+<p>
+ Exact numbers for a cold configure+make were not hugely different at the time of the conversion, and over the years meson became both slower and faster.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093879/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 21:55 UTC (Sat)
+                               by <b>shemminger</b> (subscriber, #5739)
+                              [<a href="/Articles/1093933/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="shemminger" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093933" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The real issue in DPDK was that old version had inherited lots of Makefile cruft and macros with a Kconfig like system. The real win was that the configuration process was much faster (first stage); the actual compile steps take about he same. The underlying issue was a complex make infrastructure causing multiple single threaded passes over lots of files. <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1093830"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 16:16 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093830/">Link</a>] (10 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093830" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+meson is strictly speaking not a "build" tool, it is a build _configuration_ tool that delegates the actual build to either ninja or some other backend. As opposed to the actual build, the configuration is designed to happen rarely which means meson itself is not in the performance path.<br>
+<p>
+CMake is another build configuration tool that supports both ninja and GNU Make as backends which allows for some performance comparisons between these two backends. ninja is newer and seems consistently faster... but apparently not by a huge margin? I believe one of the benefits is that Make confuses (infrequent) build configuration with (frequent) build which makes it more complex and slower. That "confusion" also makes Make more user-friendly because the super annoying configure &amp;&amp; make two steps user interface can often be simplified.  I mean friendlier for the end-users, not for the build developers.<br>
+<p>
+I suspect ninja is also more "economical" than Make with filesystem queries which obviously helps with NTFS' abysmal performance. That likely matters much less on Linux. <br>
+<p>
+Great article from the author about ninja's design and performance:<br>
+<a href="https://aosabook.org/en/posa/ninja.html">https://aosabook.org/en/posa/ninja.html</a><br>
+<p>
+<p>
+I would bet migrating the kernel build away from Make would yield at most 10-20% speedup in _some_ situations (and 0% in many others...) on Linux and that would come at a huge development price and prolonged disruption: lots of subtle build and configuration bugs lingering for years and of course breaking the build of all out of tree modules.<br>
+<p>
+tl;dr: not a very appealing migration.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093830/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093867"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 10:55 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1093867/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="khim" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093867" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's very hard to split that hair. Consider Make: it's a build tool, sure… but what if you use Kati ( <a href="https://github.com/google/kati">https://github.com/google/kati</a> ) ? Now it's “a build configuration tool”, suddenly.<br>
+<p>
+I have no idea how much adoption of Kati can do for Linux kernel, but in Android introduction of Kati made build about 10x faster — when configuration change is not detected. Then it's a bit slower than GNU Make.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093867/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093870"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 12:19 UTC (Sat)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093870/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093870" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It's very hard to split that hair. </span><br>
+<p>
+Not sure what you meant but "build configuration" is relatively well defined:<br>
+- build system inspection (e.g. "./configure")<br>
+- feature selection (e.g. Kconfig)<br>
+- no compilation or linking<br>
+<p>
+It can happen that you are not sure whether something should be determined only once at configure time versus every time at actual build time, but it's very rare.<br>
+<p>
+If you look at the design rationale for ninja, it is opinionated about NOT having features that help with build configuration. This is why it is never used as a front end.<br>
+<p>
+<span class="QuotedText">&gt; Consider Make: it's a build tool, sure… </span><br>
+<p>
+Mainly but not just. As I mentioned before, the curse _and_ blessing with Make is that it is powerful and complex enough to perform some configuration and waste time "building" it repeatedly. But that does not happen when you (under?)use Make as a mere backend for autotools or CMake.<br>
+<p>
+<span class="QuotedText">&gt; but what if you use Kati</span><br>
+<p>
+<p>
+I don't know about Kati. On the first line it claims to "translate" a Makefile to a ninja file. That looks like going "sideways" from a starting point that is blurring that line in the first place. That is indeed extremely confusing. But it still cannot blur the clear "configuration" line that autotools, CMake, meson and others have all agreed to draw in pretty much the same place.<br>
+<p>
+tl;dr: a solution making a mess is not enough to confuse other solutions that do not.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093870/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1093872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 12:26 UTC (Sat)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093872/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093872" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; As opposed to the actual build, the configuration is designed to happen rarely which means meson itself is not in the performance path.</span><br>
+<p>
+... unless you are a build system developer, a very basic CI system or a Linux distribution. Then build configuration is in your critical path.<br>
+<p>
+But I still don't think "configuration performance" is the main reason for explaining the mass migration away from autotools[*] that has been happening over the last couple decades. It did not hurt for sure, but not the main reason. I think the main reasons were:<br>
+- autotools do not support Windows natively<br>
+- while they are generally very reliable, debugging autotools issues is a very short distance from the nearest psychiatric hospital.<br>
+<p>
+[*] autotools which the kernel never needed in the first place. So no need to replace them with meson or CMake.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 8:14 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1093972/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093972" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think another reason is that a lot of the types checks autotools does are just not necessary any more because platforms have standardised on one way of doing things a lot more than they used to.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094221"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 14:36 UTC (Mon)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/1094221/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jengelh" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094221" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;I think another reason is that a lot of the types checks autotools does are just not necessary any more because platforms have standardised on one way of doing things a lot more than they used to.</span><br>
+<p>
+I think the POSIX API success is not rooted in accepted standardization. Instead, the Unix competition that was the cause for all the API diversity just died out. A fair number of configure.ac files these days only do option processing and flag obtaining for the libraries they use, without testing the base OS for much function.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094221/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1095416"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2026 15:47 UTC (Sat)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/1095416/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="anton" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1095416" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I agree and disagree.</p>
+<p>I agree: The wide range of Unix systems and computer architectures of the 1980s and 1990s has mostly consolidated to a few, and if a developer is content with supporting GNU/Linux and architecture-independent code (or just providing special support for AMD64 and generic support for the rest, or so), autoconf is not needed.</p>
+<p>I disagree: If, OTOH you as a developer pride yourself in supporting a wide range of Unix systems and computer architectures, autoconf is still useful.  E.g., in Gforth we have had 16 substantive commits to configure.ac in the last 6 months (where substantive means that the commit message is not just &quot;Bump version number&quot;).</p>
+<p>OTOH, if you also want to port to Windows, things may be different.  These days, WSL reduces the motivation for doing extra rounds for a Windows port, though.</p>
+<p>As for automake, that is a different thing:  It is useful for programs written mostly in C or C++ to produce much of the Makefile automatically.  We have not found it useful for Gforth.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1095416/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1094552"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 20:04 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094552/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094552" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>FD: CMake developer</p>
+<blockquote class="bq"><p>meson is strictly speaking not a &quot;build&quot; tool, it is a build <em>configuration</em> tool that delegates the actual build to either ninja or some other backend.</p>
+</blockquote>
+<p>I call CMake, Meson, autoconf, etc. &quot;build systems&quot;. <code>make</code> and <code>ninja</code> are &quot;build tools&quot; or &quot;build executors&quot;. The latter are, basically, DAG executors with no real notion of &quot;oh, these compilations are all part of target T&quot;. The former define semantics like &quot;target-wide flags&quot; or &quot;target T links to target U&quot; and what those things mean. Some build systems are also build tools (e.g., bazel, build2). One can also cobble together a &quot;build system&quot; from a build tool with macro support (Make).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094552/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2026 16:21 UTC (Wed)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1094760/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094760" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I call CMake, Meson, autoconf, etc. "build systems". make and ninja are "build tools" or "build executors".</span><br>
+<p>
+"configuration" is admittedly vague, but not as vague as "system" or... "tool" !?<br>
+<p>
+Of course, language is mostly convention. Looking at popular options for C/C++ (capitals mine):<br>
+<p>
+<a href="https://www.gnu.org/prep/standards/html_node/Configuration.html">https://www.gnu.org/prep/standards/html_node/Configuratio...</a> (obviously)<br>
+<span class="QuotedText">&gt; Each GNU distribution should come with a shell script named CONFIGURE. This script is given arguments which describe the kind of machine and system you want to compile the program for. The configure script must record the configuration options so that they affect compilation.</span><br>
+<p>
+<a href="https://mesonbuild.com/Overview.html#terminology">https://mesonbuild.com/Overview.html#terminology</a><br>
+<span class="QuotedText">&gt; Meson follows the overall structure of other popular build systems, such as CMake and GNU Autotools. This means that the build is divided into two discrete steps: CONFIGURE step and BUILD step.</span><br>
+<p>
+<a href="https://cmake.org/cmake/help/latest/guide/tutorial/Before%20You%20Begin.html#cmake-generators">https://cmake.org/cmake/help/latest/guide/tutorial/Before...</a><br>
+<span class="QuotedText">&gt; CMake is a CONFIGURATION program, sometimes called a "meta" build system. As with other CONFIGURATION systems, CMake is not ultimately responsible for running the commands which produce the software build. Instead, CMake GENERATES A BUILD SYSTEM based on project, environment, and user-provided CONFIGURATION information.</span><br>
+<p>
+<a href="https://cmake.org/cmake/help/latest/manual/cmake.1.html#cmdoption-cmake-fresh">https://cmake.org/cmake/help/latest/manual/cmake.1.html#c...</a><br>
+<span class="QuotedText">&gt; --fresh</span><br>
+<span class="QuotedText">&gt; Perform a fresh CONFIGURATION of the build tree. This removes any existing CMakeCache.txt file and associated CMakeFiles/ directory, and recreates them from scratch.</span><br>
+<p>
+PS: more recent languages seem better equipped to avoid this two phases.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094771"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU Make is part of the issue</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2026 17:53 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094771/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094771" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Sure, they have &quot;configure&quot; and &quot;generate&quot; steps. But I don't see how that contradicts what else was said. Do you have a better term for what I described later (i.e., having a model of what it means for sources to belong to a &quot;target&quot; and for those targets to &quot;link&quot; to each other)?</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094771/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1098999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GNU MAKE is not needed for Linux KBUILD anymore.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 6, 2026 17:41 UTC (Tue)
+                               by <b>Rihards</b> (guest, #186989)
+                              [<a href="/Articles/1098999/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Rihards" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1098999" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The Openmktr (open make translator) tool is a Google Kati fork with significantly improved GNU Make compatibility and performance. Its goal is to become a universal GNU Make to Ninja translator that completely avoids using GNU software and can fully build the Linux kernel's Kbuild system with Ninja across all architectures. The resulting builds are also fully bootable in QEMU.<br>
+<p>
+It's a very new project, but the tool itself is already quite capable. Here's the Git repository:<br>
+<p>
+<a rel="nofollow" href="https://github.com/RihardsPaps/Openmktr">https://github.com/RihardsPaps/Openmktr</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1098999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093827"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 15:46 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093827/">Link</a>] (19 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093827" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The impressive ccache numbers at the very end kinda spoils all the rest.<br>
+<p>
+ccache is really underrated. I've met some extremely experienced kernel developers still not using it!? There are very few situations where it cannot be used but a lot more where it is unfortunately not. These optimizations look great but I suspect mere ccache promotion could do a lot more to save time and energy in the world. Promotion is non-technical work that is less fun than solving problems with an LLM though :-)<br>
+<p>
+In fact, ccache (or something like it) should be integrated in toolchains themselves. This would avoid ugly PATH hacks and rare and subtle caching issues like "run_second_cpp". The best place to implement any cache is where the repetition happens, that's where all the knowledge is. <br>
+<p>
+Another unrelated but also underrated trick is placing all build directories on a large tmpfs (when you have enough RAM). The speedups are very modest there but the complexity is very small, you have to figure it out only once and the drawbacks are none. Besides performance, this avoids pointless storage wear and tear. All build directories are temporary, so why use persistent storage for them? That makes no sense.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093827/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093850"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Persistent storage can have benefits</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 20:58 UTC (Fri)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/1093850/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093850" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; All build directories are temporary, so why use persistent storage for them? </span><br>
+<p>
+Persistent storage for build directories might enable continuation (instead of re-start) from power failures or other transient disturbances.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093850/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093852"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Persistent storage can have benefits</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 21:46 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1093852/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093852" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even if your power fails only once, twice or a bit more a day it probably makes sense to keep transient files off disk.<br>
+That said, the page cache does actually cache those files and it doesn't buy you much to avoid actually storing them, as this is background/delayed anyway.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093852/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Persistent storage can have benefits</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 13:55 UTC (Sat)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093877/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093877" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ &gt; That said, the page cache does actually cache those files and it doesn't buy you much to avoid actually storing them, as this is background/delayed anyway.<br>
+<p>
+It's apparently not that simple because it makes a very significant difference on slow storage like spinning hard drives. There are probably limits to how much you can delay and for how long and "delayed" does not mean "free" either.<br>
+<p>
+Not much time saved with flash storage in my experience but there it saves a lot of pointless storage wear.<br>
+<p>
+If you are curious and can't find old hard drives then compare tmpfs with a (self-?) network mount instead? Could be tricky because caching the network never works as you expect :-)<br>
+<p>
+It probably depends on the filesystem and other minute details too :-(<br>
+<p>
+Or, you can just not be curious, use tmpfs, enjoy fast builds always and forget about it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 23:04 UTC (Fri)
+                               by <b>himi</b> (subscriber, #340)
+                              [<a href="/Articles/1093856/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="himi" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093856" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure ccache is exactly *underrated* - it's not as widespread as it should be (anyone who does dev work in a supported language should be using it), but the places where it makes a big difference are using it *hard*. It definitely deserves more visibility, though - it's an old and mature project, so it mostly just sits in the background being used by people who know of it and barely mentioned otherwise; if you don't already know of it "through the grapevine" you're not likely to discover it.<br>
+<p>
+It's also worth pointing out sccache (<a href="https://github.com/mozilla/sccache">https://github.com/mozilla/sccache</a>) - it supports rust as well as C/C++ (being a Mozilla project that makes a lot of sense), and with the kernel's growing use of rust it'll probably become an important alternative for ccache. Unlike the C/C++ ecosystem, rust/cargo supports configuring a compiler wrapper at the tool level - that makes sccache considerably easier to integrate, though for a project like the kernel that's using rustc directly that's less useful.<br>
+<p>
+Build directories on tmpfs are great - if you've got RAM to spare on top of your actual build requirements, and enough of it to hold the entire build tree (~31GiB for the 6.12.109 kernel I built a few days ago), they'll give a nice boost. Just make sure to unmount them after you're done - I left a few kernel build tmpfs mounts in place recently (automated mount, no automated unmount, forgetful dev) and was deeply confused by OOM killer activations on my 128G build instance . . .<br>
+<p>
+The only thing I'd add to the ccache/sccache/etc discussion is that you really need to pick the right storage for your cache - the impact of latency there can wipe away a lot of the gains. This is particularly noticeable with cloud-based build nodes - on our internal cloud with ceph backed volume storage, moving from an HDD backed pool to an SSD backed pool made an enormous difference, more than using tmpfs build directories. I've seriously considered weird hacks like "caching" my ccache dir on tmpfs (copying it from persistent storage on boot, then syncing it back on shutdown) to work around this, but fortunately the SSD backed volumes were good enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093862"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 2:23 UTC (Sat)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1093862/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093862" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq">Build directories on tmpfs are great</blockquote>
+
+<p>Oh, they most definitely are.  I build Debian packages when new kernels come out.  My machine has 128MB of RAM and 32 physical cores (64 threads).  Building Linux in the tmpfs is amazingly fast, though my fans do spin up and the power consumption on the UPS goes up by a hundred watts or so.
+<p>I keep a tmpfs set to max out at 50GB in <code>/tmp</code> which is more than enough to build the kernel.
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093862/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 12:26 UTC (Sat)
+                               by <b>aviallon</b> (subscriber, #157205)
+                              [<a href="/Articles/1093873/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="aviallon" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093873" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I do hope you have more than 128MB of RAM for your 50GB tmpfs though ;) <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093876"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 13:46 UTC (Sat)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/1093876/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dskoll" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093876" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Argh.  128GB of RAM, of course.  My brain is still living in the 90s, apparently.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093876/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093973"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 8:21 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1093973/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093973" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On Rust kache is another relatively recent competitor for build caching. They are also starting to support C and C++ but I think mostly as part of the Rust build that includes C or C++ code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093973/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094540"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 19:10 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094540/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094540" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>There's interest in supporting other C and C++ builds from the maintainers as well; I filed some issues after reading a blog post that uncovered some assumptions they had been making (and are now fixed).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094540/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093834"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 14:34 UTC (Sat)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1093834/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093834" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Another unrelated but also underrated trick is placing all build directories on a large tmpfs (when you have enough RAM).</span><br>
+<p>
+You don't even need that much RAM. Just have a decent-size swap, over-ride the default tmpfs size of half RAM, and away you go. Okay, it may flush a load of stuff to swap, but it makes efficient use of all your RAM, and cleans up behind you.<br>
+<p>
+I used to do that as a matter of course for my gentoo builds.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093834/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1093924"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 17:07 UTC (Sat)
+                               by <b>andy_shev</b> (subscriber, #75870)
+                              [<a href="/Articles/1093924/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andy_shev" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093924" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have you ever met the collisions in ccache? I had. If one needs a clean build (for example, for bisecting a nasty bug) it won't help much. (Note, I use ccache quite heavily, but I understand its limits.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093924/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1093951"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 17:05 UTC (Sun)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/1093951/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k3ninho" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093951" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Another unrelated but also underrated trick is placing all build directories on a large tmpfs (when you have enough RAM). The speedups are very modest there but the complexity is very small, you have to figure it out only once and the drawbacks are none. Besides performance, this avoids pointless storage wear and tear. All build directories are temporary, so why use persistent storage for them? That makes no sense.</span><br>
+<p>
+I did this for a while in 2008 versus laptop spinning rust and wasn't convinced that it was faster than having the dentry cache prewarmed. I think that the dentry cache needs to be excellent for Linus' own build-test-use cycles, so it is.<br>
+<p>
+I would like (and might ask a digital amanuensis for a PoC) to be able to remount a folder (with a quota) that's kept in hot cache. Maybe I mount a whole root partition, say 16GiB for a desktop installation, kept in hot cache on these 32+GiB machines we have today.<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093951/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 17:14 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093952/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093952" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I did this for a while in 2008 versus laptop spinning rust and wasn't convinced that it was faster than having the dentry cache prewarmed. I think that the dentry cache needs to be excellent for Linus' own build-test-use cycles, so it is.</span><br>
+<p>
+"pre-warmed" and "hot cache" sound like you are referring to incremental builds. I should have been clearer: it's when building _from scratch_ (or with a large version difference) that I have seen tmpfs shine. There isn't much to "pre-warm" when building from scratch. tmpfs savings come from avoiding _writing_ the build directories to disk. I never tried moving the source code to tmpfs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 17:30 UTC (Sun)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/1093953/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="k3ninho" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093953" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;"pre-warmed" and "hot cache" sound like you are referring to incremental builds.</span><br>
+<p>
+I'm sorry you got that impression. I tested with `make mrproper` and then `find linux/ -type -f -exec cat "{}" | /dev/null \;` for what made sense as having the files read and placed in dentry cache. Versus a tmpfs copied to RAM there was a huge overhead copying to RAM before you could work which pretty exactly balanced out dentries created for the tree. Maybe this build is a rarity for not writing much data out, I would expect that to suck on a laptop 5400 RPM rust in 2008.<br>
+<p>
+<span class="QuotedText">&gt; I never tried moving the source code to tmpfs.</span><br>
+What's the nuance I'm missing, then for "placing all build directories on a large tmpfs"? Aren't build artefacts going to sit in subfolders with the source code before linking?<br>
+<p>
+(Whatever you've read by me here and elsewhere, I hope it's only the impression of being stupid and not full-blown stupidity.)<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093964"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 23:39 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093964/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093964" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; What's the nuance I'm missing, then for "placing all build directories on a large tmpfs"? Aren't build artefacts going to sit in subfolders with the source code before linking?</span><br>
+<p>
+Ha, that explains... No!<br>
+<p>
+Look for "make O=..."  in "make help".<br>
+<p>
+BTW my experience is not just with the kernel builds. CMake and meson default to separate build directories. It makes everything so simpler.<br>
+<p>
+ I suspect it's not even possible to mix object and source files with meson...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093964/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1093965"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 23:45 UTC (Sun)
+                               by <b>himi</b> (subscriber, #340)
+                              [<a href="/Articles/1093965/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="himi" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093965" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In my case, I create a tmpfs mount and then create a git worktree on the tmpfs with the appropriate git rev - the build tree is freshly created in tmpfs, and of course all the build artifacts are also written to the same tmpfs (the only thing that isn't is my ccache cache, which /does/ benefit from pre-warming, particularly the metadata).<br>
+<p>
+The 'git worktree add' command doesn't take all that long - git really is amazingly fast - but I haven't benchmarked this in great detail. Most of my comparative numbers are from having two similar (but not identical) build nodes, and experimenting on one vs the other before adding things to the automated build workflow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093965/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1094559"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 20:36 UTC (Tue)
+                               by <b>Xeyler</b> (subscriber, #159814)
+                              [<a href="/Articles/1094559/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Xeyler" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094559" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would by no means consider myself an experienced kernel developer, but I haven't tried ccache. My development most typically follows the progression of a single git branch, so I use git worktrees to allow my filesystem to fill the same role as ccache.<br>
+<p>
+When I fetch new upstream changes or when I make local changes to code, stale object files are rebuilt. Otherwise, the old object files from the previous build which are still hot are reused. In a normal kernel developer workflow, I don't see ccache speeding things up much except in the case of bisections. Even then, I wouldn't expect to get a particularly impressive hit rate unless I was frequently bisecting across the same git revision list.<br>
+<p>
+Am I out of touch?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094559/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094765"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2026 16:32 UTC (Wed)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1094765/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094765" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Am I out of touch?</span><br>
+<p>
+I don't think so. The kernel's incremental build is one of the very few that I trust and if you don't invoke the compiler much, then there is of course little to no value in caching the output of the compiler that you don't invoke much.<br>
+<p>
+But there is only so much incremental builds can achieve and ccache shines when you have to compare different .config files or kernel releases. Or when the kernel is only one part of some image build or some other layer of abstraction that is not clever enough to leverage the kernel's incremental build. Plus it takes a few seconds to enable and does not seem to hurt when you're not leveraging it. And it's not just for the kernel.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094765/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1094825"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ccache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2026 6:22 UTC (Thu)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/1094825/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="johill" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094825" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Bisecting is one (relatively rare) case, but also for example:</p>
+<ul class="spacylist"><li>maintaining/building different branches (unless you use worktrees for each and build there),</li>
+<li>build-testing something that gets discarded and maybe re-applied in an only slightly different form, or</li>
+<li>rebuilding while working on a patch series (where you rebase to edit it).</li>
+</ul>
+<p>My ccache statistics currently show about a 50% hit rate (combined, 80% thereof direct hits), so it' definitely make a difference to me.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094825/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about Ingo Molnar's Fast kernel headers tree ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2026 21:04 UTC (Fri)
+                               by <b>schutz</b> (subscriber, #3760)
+                              [<a href="/Articles/1093835/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="schutz" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093835" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This reminds me of Ingo Molnar's fast kernel headers tree (<a href="https://lwn.net/Articles/880175/">https://lwn.net/Articles/880175/</a>), published in 2022. If I remember well, only a few patches (if any) were merged.<br>
+<p>
+Does anyone know what happened to it? Is it complementary to or superseded by this work (and/or by Linus' comment about the dependency check) ?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093976"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about Ingo Molnar's Fast kernel headers tree ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 9:49 UTC (Mon)
+                               by <b>make</b> (subscriber, #62794)
+                              [<a href="/Articles/1093976/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="make" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093976" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Two years ago, I tried to continue the effort (because kernel header dependencies are a big mess), submitted lots and lots of patches, but it was ultimately rejected: <a href="https://lore.kernel.org/lkml/Zl8QW91FwZ9UpulZ@casper.infradead.org/">https://lore.kernel.org/lkml/Zl8QW91FwZ9UpulZ@casper.infr...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093976/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1093927"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2026 19:02 UTC (Sat)
+                               by <b>cyperpunks</b> (subscriber, #39406)
+                              [<a href="/Articles/1093927/">Link</a>] (22 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyperpunks" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093927" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Use CMake or meson similar meta build generator to manage your projects. Unlikely to happen to Linux kernel, but it should be doable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093927/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093957"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 20:19 UTC (Sun)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1093957/">Link</a>] (21 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093957" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why?  Does that make the build faster?<br>
+<p>
+I've written quite fast makefiles, and I doubt CMake/Meson can make them faster at all (most likely, slower).<br>
+<p>
+&lt;<a href="https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/GNUmakefile">https://git.kernel.org/pub/scm/docs/man-pages/man-pages.g...</a>&gt;<br>
+&lt;<a href="https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/share/mk">https://git.kernel.org/pub/scm/docs/man-pages/man-pages.g...</a>&gt;<br>
+<p>
+I'd be curious if one can write a patch set that turns that into Meson and manages to improve performance significantly while keeping the features essentially intact.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093957/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093959"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 20:33 UTC (Sun)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1093959/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093959" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p><code>::=</code> And make keeps inventing new perl-style operators.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093959/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 21:34 UTC (Sun)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1093960/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093960" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's because BSD make(1) (actually, there are different make(1) implementations in the BSDs, so I'm not sure if this is consistent among them or not) had one meaning of `:=` and GNU make(1) had a different one.  Because standardizing one would break a lot of existing code, POSIX decided to use `::=` for the meaning of GNU make(1)'s `:=`.<br>
+<p>
+At least, POSIX.1-2024's make(1) is closer to something usable than previous POSIX make(1).  Non-standard make(1) is still necessary for non-trivial stuff, but it's nice to see progress.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1093974"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 8:53 UTC (Mon)
+                               by <b>cyperpunks</b> (subscriber, #39406)
+                              [<a href="/Articles/1093974/">Link</a>] (18 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cyperpunks" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093974" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Makes it possible to maintain complex (cross platform) projects in a sane way. Using plain make (and autotools) will very fast become a real problem.<br>
+The possibility to generate e.g. ninja code is also an advantage. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093974/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093981"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 10:50 UTC (Mon)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1093981/">Link</a>] (15 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093981" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What's the benefit of ninja?<br>
+<p>
+According to &lt;<a href="https://stackoverflow.com/q/62847359/6872717">https://stackoverflow.com/q/62847359/6872717</a>&gt;, Ninja seems<br>
+to be faster because the configure step is slower, and focuses on<br>
+generating optimized Ninja files.  That's ironic, because build systems<br>
+with a 'configure' pre-step are so brittle that I never trust them, and<br>
+thus I end up often wiping the entire generated files, and configuring<br>
+again.  So, a single-step make(1)-only build system could be faster, as long as the makefiles are carefully written to be fast.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093981/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 14:35 UTC (Mon)
+                               by <b>karkhaz</b> (subscriber, #99844)
+                              [<a href="/Articles/1094215/">Link</a>] (14 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="karkhaz" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094215" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Here are a few ninja advantages over (handwritten) make off the top of my head:</p>
+<ul class="spacylist"><li>Built-in &quot;clean&quot; function. <code>ninja -t clean</code> unlinks all built files. In make, typically you write your own clean target and have to manually maintain the list of all files to delete. Which is okay if you want the extra control and also want to have an extra <code>veryclean</code> target and so on, but it's nice to have a sensible default.</li>
+<li><code>ninja -t graph | dot -Tsvg &gt; deps.svg &amp;&amp; firefox deps.svg</code> is good for debugging. There's third-party tools that do this for make (like <a href="https://github.com/lindenb/makefile2graph">makefile2graph</a> and probably many others) but of course it's nice to have it built into the tool itself. More to the point, to use tools like <code>makefile2graph</code> you have to run make and pipe its output, because there's no way to parse Makefiles, and running make may involve running arbitrary commands and so on even when you're avoiding running the build with <code>-n</code>. Ninja file is 'just data' and can be parsed without running commands and also without executing functions/macro expansions/etc. So it's very suited for querying with features like <code>-t graph</code>, <code>-t targets</code>, <code>-t inputs</code> and so on.</li>
+<li>Ninja implicitly creates the directory tree beneath output files before running the command to make them. With make, you either have to do <code>mkdir -p $(dir $@)</code> at the beginning of each recipe, or you have to make the target depend on <code>$(dir $@)</code> and write a separate recipe for making it (which is a little faster but still unnecessary boilerplate). Ninja doesn't do much implicitly but I appreciate this one aspect, because it's always what you want.</li>
+<li>Ninja has a <code>restat</code> keyword that can significantly speed up builds by pruning dependency subtrees that don't need to be rebuilt. The idea is: if a target is labelled as 'restat', and running the recipe for it doesn't update its mtime, then it is treated as if it never needed to be updated in the first place, therefore none of its reverse deps need to be rebuilt either. Of course the command that is supposed to write the target needs to be aware of this feature so it's a little niche, I'm not sure if CMake and friends ever use it but I use it frequently with ninja files that I generate from a custom configure script. AFAIK make has no equivalent of this.</li>
+<li>The 'configure' fragility you mentioned can be significantly mitigated because the ninja file can be part of the build graph. The idea is that if the ninja file's reverse-deps go out-of-date, then ninja will re-run the configure command to regenerate its own ninja file before reloading it and continuing with the build. I'm not sure whether this is possible with make, I tried something simple now and it seemed like quine territory so I gave up.</li>
+<li>Pools can be used to restrict the concurrency of commands that should not be run in parallel. It's a bit limited but it does the job, with Make I think the only way to do this is to have a separate sub-Makefile that overwrites <code>MAKEFLAGS</code>, which itslef is suboptimal because you may have options other than <code>-j</code> in there.</li>
+<li>Related, the built-in <code>console</code> pool allows particular recipes to run non-concurrently with any others and to take ownership of the console, streaming its output directly to the terminal. For other commands, their output is buffered by ninja and dumped to terminal all at once when the command completes. With make, command output can be interleaved when running in parallel which makes debugging difficult</li>
+<li>The 'dyndeps' feature can be used to dynamically update the build tree when certain kinds of input files are not known in advance, which obviates some situations where you need to run the build, reconfigure, and run again. Again this is a little niche and I'm not sure how generally applicable it is for metabuild tools, but for artisinally-generated ninja it feels very satisfying when it allows you to get the build graph just right without reruns.</li>
+</ul>
+<p>Often I hear people advocating for ninja because &quot;it's faster&quot; and I'm not sure if that's really a great reason unless your builds are truly astronomical, I recall 10 years ago that switching to ninja saved ~30s on a noop build of chromium but most people aren't doing that. Personally I default to make for simple tasks where doing 'configure+build' every time is inexpensive and not worth worrying about, but as soon as I need any of the affordances above, I write a python script that generates a ninja file, run it once, and if I did it correctly ninja will run it again only whenever it needs to :)</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094223"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 15:48 UTC (Mon)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094223/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094223" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>--  Built-in &quot;clean&quot; function.  ninja -t clean unlinks all built files.
+In make, typically you write your own clean target and have to manually maintain the list of all files to delete.  [...]</p>
+</blockquote>
+<p>Here's a trivial definition of a clean rule:</p>
+<pre><code class="language-mk">.PHONY: clean
+clean:
+	$(info	$(INFO_)RM -rf		$(builddir))
+	$(RM) -rf $(builddir)
+</code></pre>
+<p><a href="https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/share/mk/clean.mk">https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/share/mk/clean.mk</a></p>
+<blockquote class="bq"><p>--  <code>ninja -t graph | dot -Tsvg &gt; deps.svg &amp;&amp; firefox deps.svg</code> is good for debugging.</p>
+</blockquote>
+<p>make(1) has <code>--debug=print</code> and <code>-p</code>.  I find them quite good.  All the (few) bugs I've had to debug, they were trivial with these tools (just a few minutes to find the issue).</p>
+<blockquote class="bq"><p>More to the point, to use tools like makefile2graph you have to run make and pipe its output, because there's no way to parse Makefiles, and running make may involve running arbitrary commands and so on even when you're avoiding running the build with -n.</p>
+</blockquote>
+<p>If one has a makefile that runs non-trivial commands (that is, commands that modify something) when running with <code>-n</code>, that's an evil makefile.</p>
+<p>I always define a <code>nothing</code> target that does nothing, precisely to debug makefiles:</p>
+<p><a href="https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/GNUmakefile#n43">https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/GNUmakefile#n43</a></p>
+<pre><code class="language-mk">.PHONY: nothing
+nothing:;
+</code></pre>
+<p>I can then use <code>make -p nothing | less</code> to inspect the database.</p>
+<blockquote class="bq"><p>--  Ninja implicitly creates the directory tree beneath output files before running the command to make them. With make, you either have to do mkdir -p $(dir $@) at the beginning of each recipe,</p>
+</blockquote>
+<p>That'd be wrong.</p>
+<blockquote class="bq"><p>or you have to make the target depend on $(dir $@) and write a separate recipe for making it</p>
+</blockquote>
+<p>Yes, I use <code> | $$(@D)/</code> at the end of the pre-requisite lists that need it.</p>
+<blockquote class="bq"><p>(which is a little faster but still unnecessary boilerplate).
+Ninja doesn't do much implicitly but I appreciate this one aspect, because it's always what you want.  [...]</p>
+</blockquote>
+<p>I don't appreciate this implicit thing either.  I agree that I dislike the implicit things that make(1) does, and explicitly disable them:</p>
+<p><a href="https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/GNUmakefile#n16">https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/GNUmakefile#n16</a></p>
+<pre><code class="language-mk">MAKEFLAGS += --no-builtin-rules
+MAKEFLAGS += --no-builtin-variables
+MAKEFLAGS += --warn-undefined-variables
+</code></pre>
+<p>I would similarly dislike this implicit behavior of Ninja.  I want full control, even if that means some extra code.  I have 34 occurences of <code> | $$(@D)/</code>, plus the definition of the rule:</p>
+<pre><code class="language-mk">%/:
+	+$(info	$(INFO_)MKDIR		$@)
+	+$(INSTALL_DIR) $@
+</code></pre>
+<blockquote class="bq"><p>--  Ninja has a restat keyword that can significantly speed up builds by pruning dependency subtrees that don't need to be rebuilt. The idea is: if a target is labelled as 'restat', and running the recipe for it doesn't update its mtime, then it is treated as if it never needed to be updated in the first place, therefore none of its reverse deps need to be rebuilt either.  [...]</p>
+</blockquote>
+<p>I don't see why I'd run a recipe for a target and not update the target file.</p>
+<blockquote class="bq"><p>--  The 'configure' fragility you mentioned can be significantly mitigated because the ninja file can be part of the build graph.</p>
+</blockquote>
+<p>I disagree with the 'significantly' part.  I consistently get into issues with 2-step build systems, and never found an exception.  I didn't have any issues in many years of a single-step make(1)-only build system written by me; incremental builds just work, as they should.</p>
+<p>Setting the ninja file as part of the build graph would solve the issue for a single-step ninja-only build system, since I'd do the right thing hand-writing the ninja files.  But for something generated, I yet have to find a build system that doesn't have such issues.</p>
+<p>That is, I expect ninja is not problematic about this; it's autotools/meson/cmake/whatever that are problematic.</p>
+<blockquote class="bq"><p>The idea is that if the ninja file's reverse-deps go out-of-date, then ninja will re-run the configure command to regenerate its own ninja file before reloading it and continuing with the build. I'm not sure whether this is possible with make, I tried something simple now and it seemed like quine territory so I gave up.</p>
+</blockquote>
+<p>With make(1), you should make all file targets depend on the makefiles themselves.  It's trivial, IME:</p>
+<pre><code>foo: foo.c Makefile ...
+	...
+</code></pre>
+<p>Here's a real example (the variable $(MK) expands to the full set of makefiles):
+<a href="https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/share/mk/build/html/troff.mk#n28">https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/share/mk/build/html/troff.mk#n28</a></p>
+<blockquote class="bq"><p>--  Pools can be used to restrict the concurrency of commands that should not be run in parallel.  [...]</p>
+</blockquote>
+<p>Do you use that for having the load under control?  How about using <code>-l4</code> instead of <code>-j4</code>?</p>
+<p>Otherwise, in general I don't need to avoid concurrent programs, so I can't talk about such a use case.</p>
+<blockquote class="bq"><p>--  Related, the built-in console pool allows particular recipes to run non-concurrently with any others and to take ownership of the console, streaming its output directly to the terminal. For other commands, their output is buffered by ninja and dumped to terminal all at once when the command completes. With make, command output can be interleaved when running in parallel which makes debugging difficult.</p>
+</blockquote>
+<p>make has <code>--output-sync</code> to control the output.  <code>--output-sync=recurse</code> keeps the output organized so that the output of each recipe is atomic (including recursive make(1)).  If you don't use recursive make(1) --and you should avoid it--, you can use <code>--output-sync=target</code> should be enough.  The performance is only minimally degraded.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094223/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094301"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 17:24 UTC (Mon)
+                               by <b>karkhaz</b> (subscriber, #99844)
+                              [<a href="/Articles/1094301/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="karkhaz" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094301" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I think reasonable people can disagree with many of these, but I'll just give a few clarifications</p>
+<blockquote class="bq"><p>Here's a trivial definition of a clean rule</p>
+</blockquote>
+<p>Yes, this is fine if you're happy to blow away the entire build directory, and also if you have written the build so that all outputs go under one directory tree. As soon as you have one output directory for object files, another for documentation, etc then you need to start manually maintaining lists of directories again or have separate clean targets. Alternatively, you put them all under one tree, and blow away the documentation when you only wanted to clean the object files.</p>
+<p>Ninja's <code>-t clean</code> option takes a target as an optional argument, which cleans only the reverse tree that was used to build that target. So you choose what you want to clean because its all just a graph traversal. There's actually no reason in principal why make couldn't have this feature, but it doesn't and so you have to manually write clean targets.</p>
+<blockquote class="bq"><p>If one has a makefile that runs non-trivial commands (that is, commands that modify something) when running with -n, that's an evil makefile.</p>
+</blockquote>
+<p>Agree, but you still need to run make to parse its output due to things like <code>$(wildcard ...)</code> which make needs to evaluate every time it runs, meaning it's impossible for an external tool to parse a Makefile for debugging without actually running make. My point is that I can rsync my build.ninja out of my CI machine and debug it locally outside of the build tree, with Makefiles you have to run make in the exact build context (with the debug flags you mentioned, or makefile2graph or whatever). I think it's valuable to have the final build graph &quot;baked into&quot; a file that I can examine at leisure outside the build context.</p>
+<blockquote class="bq"><p>I don't see why I'd run a recipe for a target and not update the target file.</p>
+</blockquote>
+<p>A concrete example. I want to generate some web pages describing my music listening habits, similar to &quot;Spotify Unwrapped&quot;, basically which songs/artists/albums/genres I most listen to, what the trends are over time, and so on. My music player (cmus) writes a line to a text file called <code>$(date -I).log</code> every time a song starts or stops playing. From these log files, I want to generate one JSON file per artist, one JSON file per album, etc, containing the timestamps for the songs played for just that artist or album; from these I can generate one web page per artist/album/etc.</p>
+<p>Clearly <code>rihanna.json</code> must depend on every log file (<code>2026-09-14.log</code>, <code>2026-09-13.log</code>, ...) because every time I rerun the build, I may have listened to Rihanna since last time. So the script which generates <code>rihanna.json</code> reads all the log files and generates a new list of timestamps to go into <code>rihanna.json</code>. The optimization that ninja allows is: my script can read <code>rihanna.json</code>, and if the new list is equal to the old list, the script will terminate without writing to<code>rihanna.json</code>. That means that the web page, graphs, etc for Rihanna that depend on <code>rihanna.json</code> do not need to be regenerated. Only the artist and album pages for songs that I've listened to since yesterday get regenerated. So even though every JSON file depends on every log file, using <code>restat</code> means that if an artist doesn't appear in a log since the last build, its dependents don't get rebuilt.</p>
+<p>This is a real example from my personal workflows. I guess from your posts that you're more concerned with building software written in C, I'm not really sure how this would apply. One handwavey guess is that if you have some kind of tool that dumps which C files depend on which headers/libraries, but declines to update this file if it hasn't changed (despite the source files having their mtimes updated, but the <code>#include</code>s haven't changed) then this would be useful? Not sure. I use ninja to run all kinds of non-software-building workflows and take a lot of satisfaction from making the build do as little work as possible.</p>
+<blockquote class="bq"><p>With make(1), you should make all file targets depend on the makefiles themselves. It's trivial, IME</p>
+</blockquote>
+<p>Agreed that you should do that, but I'm describing something else. Again I'm not sure what the make equivalent of this is, but in ninja, you would make the ninja file depend on <em>the directory containing the source files</em>. Thus, when a source file is deleted or a new source file is added, this changes the directory mtime, so ninja knows that it needs to re-configure itself to change the list of files to be rebuilt. If an existing sourcefile is modified, this will rebuild its dependents (which are now out of date) but won't necessitate re-configuring (because the file list hasn't changed).
+In make, I guess this is a non-issue because you would use something like <code>$(wildcard )</code> to get the list of files every time, so it's like running <code>configure</code> on every build instead of only when needed.</p>
+<blockquote class="bq"><blockquote class="bq"><p>Pools can be used to restrict the concurrency of commands that should not be run in parallel.
+Do you use that for having the load under control? How about using -l4 instead of -j4?</p>
+</blockquote>
+</blockquote>
+<p>It's not really great for load control, you can use it for that, but it's a blunt instrument. In a previous job there were a few known commands CI that took many GB of memory so we put those ones in a pool to avoid OOM, while allowing other jobs to run in parallel, but that's a bit of a hack. It's really for concurrency control. Examples:</p>
+<ul class="spacylist"><li>Some build commands need to write to a database (or append to a file), only one process at a time is allowed to do this</li>
+<li>I'm using ninja to scrape websites, each individual page is a target in the build graph. I make one pool for every domain, so that pages in the same domain are scraped one at a time but the scraping happens in parallel for unrelated domains</li>
+</ul>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094301/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094318"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 21:26 UTC (Mon)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094318/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094318" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Yes, this is fine if you're happy to blow away the entire build directory</p>
+</blockquote>
+<p>TBH, I never use <code>make clean</code> anymore.  It's been literally years since the last time I needed to do that.  I've only done it a few times, for the sole reason of measuring how much time takes a build from scratch.  A well designed makefile removes the reason to <code>make clean</code>.</p>
+<p>So, yes, the only times I've wanted to do that, I wanted to blow the entire directory.  Although I could live without the target at all.</p>
+<p>The one thing that seems more interesting is the <code>uninstall</code> target.</p>
+<blockquote class="bq"><p>Ninja's -t clean option takes a target as an optional argument, which cleans only the reverse tree that was used to build that target.</p>
+</blockquote>
+<p>Hmmm, this seems genuinely interesting.  Not for replacing <code>make clean</code>, but for replacing <code>make uninstall</code>.  This one is a bit more difficult to specify in makefiles, indeed.</p>
+<p>Here's an example of how I define uninstall targets currently:</p>
+<pre><code>_htmlpages    ::= $(patsubst $(_MANDIR)/%, $(_htmldir)/%, $(_HTMLMAN))
+_htmlpages_rm ::= $(addsuffix -rm, $(wildcard $(_htmlpages)))
+
+
+$(_htmlpages): $(_htmldir)/%: $(_MANDIR)/% $(MK) | $$(@D)/
+	$(info	$(INFO_)INSTALL		$@)
+	$(INSTALL_DATA) -T $&lt; $@
+
+
+.PHONY: install-html
+install-html: $(_htmlpages);
+
+.PHONY: uninstall-html
+uninstall-html: $(_htmlpages_rm);
+</code></pre>
+<p>and then</p>
+<pre><code>%-rm:
+	$(info	$(INFO_)RM		$*)
+	$(RM) $*
+</code></pre>
+<p>It's indeed a bit nasty.</p>
+<blockquote class="bq"><p>There's actually no reason in principal why make couldn't have this feature</p>
+</blockquote>
+<p>Agree.  I think an extension to make(1) implementing something similar would indeed be interesting.</p>
+<blockquote class="bq"><p>A concrete example. I want to generate some web pages describing my music listening habits, similar to &quot;Spotify Unwrapped&quot;</p>
+</blockquote>
+<p>Interesting!  That seems indeed useful.</p>
+<p>I think it could be implemented for make(1) with something similar to <code>.PHONY</code>.  Maybe: <code>.ONLYIFCHANGED</code>, and use it as:</p>
+<pre><code class="language-mk">.ONLYIFCHANGED: foo
+
+foo: bar
+        ...
+</code></pre>
+<p>And then if the recipe somehow doesn't change the mtime of <code>foo</code>, make(1) would consider it up to date and propagate that information.  It would be up to the author to write a recipe that avoids changing the file if not necessary.</p>
+<blockquote class="bq"><p>In a previous job there were a few known commands CI that took many GB of memory so we put those ones in a pool to avoid OOM</p>
+</blockquote>
+<p>Hmmm.  Seems a bit workaroundish, but interesting.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094318/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094548"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 19:46 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094548/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094548" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>FD: CMake developer</p>
+<blockquote class="bq"><p>Here's an example of how I define uninstall targets currently:</p>
+</blockquote>
+<p>This has the issue that if you install, then remove a source file for some manpage, uninstall is blind because the source tree.</p>
+<p>Personally, I detest globbing in build systems because I'd rather have an explicit list of everything that needs processed. It also allows me to run a build of an individual target without worrying that there is a <code>conflict.cpp.LOCAL.1234.cpp</code> file laying around with unmerged conflict resolutions.</p>
+<blockquote class="bq"><p>And then if the recipe somehow doesn't change the mtime of foo, make(1) would consider it up to date and propagate that information. It would be up to the author to write a recipe that avoids changing the file if not necessary.</p>
+</blockquote>
+<p><code>ninja</code> keeps track of this in a <code>.ninja_log</code> file with a &quot;phantom&quot; mtime to use instead of the on-disk mtime. Note that it also keeps a hash of the command used for an output so that if it changes, the output is rerun (instead of depending on the entire Makefile or having a snippet per target…which is a recipe for terrible performance on Windows because of the swarm of tiny file reads/writes involved).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094548/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094565"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 21:04 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094565/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094565" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; This has the issue that if you install, then remove a source file for some manpage, uninstall is blind because the source tree.</span><br>
+<p>
+Indeed.  That's why I install under /opt when I can have a single directory that fully contains the installation.  That way, I can chop it with a single `rm -rf /opt/some/dir/`.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094565/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094566"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 21:06 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094566/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094566" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+s/when/where/<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094566/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1094546"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 19:38 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094546/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094546" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>FD: CMake developer</p>
+<blockquote class="bq"><p>I didn't have any issues in many years of a single-step make(1)-only build system written by me; incremental builds just work, as they should.</p>
+</blockquote>
+<p>That's fine when there's no environmental introspection, but running <code>pkg-config</code> on every build is just a waste of resources instead of having a cache in front of it (not to mention the joys of forgetting to reload modules or environment modifications that can ping pong the state).</p>
+<blockquote class="bq"><p>I don't see why I'd run a recipe for a target and not update the target file.</p>
+</blockquote>
+<p>It's usually used for internal things to build systems. For example, CMake's modules support will rescan a source if anything changes, but if the <em>dependencies</em> don't change, there's no need to rerun the collation steps (which turn the dependencies into rules that <code>ninja</code> understands to add necessary edges to the build graph).</p>
+<blockquote class="bq"><p>Do you use that for having the load under control? How about using -l4 instead of -j4?</p>
+</blockquote>
+<p>This, IME, comes up when <em>memory</em> is the limiting resource rather than CPU usage. For example, one can put all of the CUDA compilations into a pool of size 4 (or whatever) to avoid <code>cudacc</code> from OOM-killing everything else on the machine. In static builds with lots of executables, you may also want to avoid concurrency of their link steps against each other (as they can do a stampeding herd if they all have their dependencies satisfied at the same time).</p>
+<blockquote class="bq"><p>make has --output-sync to control the output. --output-sync=recurse keeps the output organized so that the output of each recipe is atomic (including recursive make(1)). If you don't use recursive make(1) --and you should avoid it--, you can use --output-sync=target should be enough. The performance is only minimally degraded.</p>
+</blockquote>
+<p><code>-Otarget</code> is the default <code>ninja</code> behavior (and I use it by default). What <code>pool = console</code> lets you do is say that <em>this</em> target needs exclusive access to the TTY; don't run anything concurrent with it. This is used for CMake's TTY cache editor. The kernel would use this for <code>menuconfig</code>.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094546/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1094333"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 3:56 UTC (Tue)
+                               by <b>madscientist</b> (subscriber, #16861)
+                              [<a href="/Articles/1094333/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="madscientist" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094333" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>I definitely don't want to get into a tit-for-tat between GNU Make and any other tool: my opinion is people should use what they like.  I'll just make a few factual points:</p>
+<blockquote class="bq"><p>Ninja has a restat keyword that can significantly speed up builds by pruning dependency subtrees that don't need to be rebuilt. The idea is: if a target is labelled as 'restat', and running the recipe for it doesn't update its mtime, then it is treated as if it never needed to be updated in the first place,</p>
+</blockquote>
+<p>This is how all makefiles work all the time.  I could definitely be wrong but I have a vague memory that Ninja's <code>restart</code> keyword was added specifically to emulate make's behavior.</p>
+<blockquote class="bq"><p>The 'configure' fragility you mentioned can be significantly mitigated because the ninja file can be part of the build graph. The idea is that if the ninja file's reverse-deps go out-of-date, then ninja will re-run the configure command to regenerate its own ninja file before reloading it and continuing with the build.</p>
+</blockquote>
+<p>GNU Make actually invented this idea AFAIR (it's been a core feature of GNU Make since version 3.12 which... is so old I don't even know when it was released, but version 3.63 was released in 1993, so... a while ago).</p>
+<blockquote class="bq"><p>Pools can be used to restrict the concurrency of commands that should not be run in parallel. It's a bit limited but it does the job, with Make I think the only way to do this is to have a separate sub-Makefile that overwrites MAKEFLAGS, which itslef is suboptimal because you may have options other than -j in there.</p>
+</blockquote>
+<p>In modern POSIX make versions (including GNU Make) you can use the <code>.WAIT</code> facilities to force some targets to be run serially rather than in parallel.  This feature was added in GNU Make 4.4 (released in 2022).</p>
+<blockquote class="bq"><p>Related, the built-in console pool allows particular recipes to run non-concurrently with any others and to take ownership of the console, streaming its output directly to the terminal. For other commands, their output is buffered by ninja and dumped to terminal all at once when the command completes. With make, command output can be interleaved when running in parallel which makes debugging difficult</p>
+</blockquote>
+<p>GNU Make supports output synchronization which works similarly.  This was added in GNU Make 4.0, in 2013.</p>
+<blockquote class="bq"><p>The 'dyndeps' feature can be used to dynamically update the build tree when certain kinds of input files are not known in advance, which obviates some situations where you need to run the build, reconfigure, and run again. Again this is a little niche and I'm not sure how generally applicable it is for metabuild tools, but for artisinally-generated ninja it feels very satisfying when it allows you to get the build graph just right without reruns.</p>
+</blockquote>
+<p>I'm not sure exactly what this means, but GNU Make supports multiple facilities that can dynamically generate rules: the above-mentioned automatic rebuild of makefiles can be used, as well as the <code>$(eval ...)</code> function that allows arbitrarily generated strings to be interpreted as make rules.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094333/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094339"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 9:09 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094339/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094339" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>This is how all makefiles work all the time. I could definitely be wrong but I have a vague memory that Ninja's restart keyword was added specifically to emulate make's behavior.</p>
+</blockquote>
+<p>I can confirm that makefiles (not just GNU, but all) behave in this way.  I yesterday couldn't refute that, since I wrote an incorrect test, but now that you said it, I wrote a better test, and indeed, this is the behavior of GNU make(1).</p>
+<pre><code class="language-mk">alx@devuan:~/tmp/dir$ ls -l
+total 12
+-rw-rw-r-- 1 alx alx 74 Sep 15 11:04 Makefile
+-rw-rw-r-- 1 alx alx  4 Sep 14 23:22 a
+-rw-rw-r-- 1 alx alx  4 Sep 14 23:22 b
+-rw-rw-r-- 1 alx alx  0 Sep 15 11:04 c
+alx@devuan:~/tmp/dir$ cat Makefile 
+.PHONY: all
+all: a;
+
+a: b
+	touch a
+
+b: c
+	echo foo
+
+c:
+	echo bar
+alx@devuan:~/tmp/dir$ make
+echo foo
+foo
+alx@devuan:~/tmp/dir$ bmake
+echo foo
+foo
+alx@devuan:~/tmp/dir$ ls -l
+total 12
+-rw-rw-r-- 1 alx alx 74 Sep 15 11:04 Makefile
+-rw-rw-r-- 1 alx alx  4 Sep 14 23:22 a
+-rw-rw-r-- 1 alx alx  4 Sep 14 23:22 b
+-rw-rw-r-- 1 alx alx  0 Sep 15 11:04 c
+</code></pre>
+<p><code>c</code> is newer than b, so <code>b</code> is remade, but since its recipe does nothing, <code>a</code> is not remade.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094339/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094550"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 19:49 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094550/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094550" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>What if <code>b</code> exists but its mtime is not updated because <code>c</code> doesn't require its contents to change?</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094550/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094567"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 21:06 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1094567/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094567" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you write a test, we can see.  I don't fully understand what you mean.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094567/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094579"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2026 0:31 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094579/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094579" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <pre><code>.PHONY: all
+all: a
+
+a: b
+        touch a
+
+b: c
+        ( [ -f $@ ] &amp;&amp; diff -q $&lt; $@ ) || cp $&lt; $@
+
+c:
+        echo bar &gt; $@
+</code></pre>
+<p>This behaves as I expect in the initial case. Updating <code>c</code> manually just does the check for <code>b</code> and skips <code>a</code>. However, it <em>always</em> does this in this state. <code>ninja</code>'s restat will <em>remember</em> that <code>b</code> was attempted to be updated and say &quot;no work to do&quot; while <code>make</code> always does the <code>b</code> check.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094579/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1094471"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 14:03 UTC (Tue)
+                               by <b>karkhaz</b> (subscriber, #99844)
+                              [<a href="/Articles/1094471/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="karkhaz" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094471" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><blockquote class="bq"><p>the ninja file can be part of the build graph.</p>
+</blockquote>
+</blockquote>
+<blockquote class="bq"><p>GNU Make actually invented this idea AFAIR</p>
+</blockquote>
+<p>Interesting, thank you for this and the other clarifications! I used this simple example to check how it works:</p>
+<pre><code>; tree
+├── configure
+├── Makefile
+└── src_directory
+    └── foo
+;
+; cat configure
+#!/bin/sh
+touch Makefile
+;
+; cat Makefile
+SRC_FILES = $(wildcard src_directory/*)
+DST_FILES = $(patsubst src_directory/%,dst_directory/%,$(SRC_FILES))
+
+all: $(DST_FILES)
+
+Makefile: src_directory configure
+	./configure
+
+dst_directory/%: src_directory/%
+	mkdir -p $(dir $@)
+	cp $&lt; $@
+;
+; make
+mkdir -p dst_directory/
+cp src_directory/foo dst_directory/foo
+;
+; touch src_directory/bar    # File list has changed, needs re-configure
+;
+; make
+./configure
+mkdir -p dst_directory/
+cp src_directory/bar dst_directory/bar
+;
+; touch src_directory/bar    # File list has not changed, rebuild only
+;
+; make
+mkdir -p dst_directory/
+cp src_directory/bar dst_directory/bar
+</code></pre>
+<p>(A configure script that merely touches Makefile is obviously pointless. The more realistic usage would be for the configure script to generate a Makefile containing the list of files in <code>src_directory</code> to avoid needing <code>$(wildcard)</code> and <code>$(patsubst)</code>, and due to the dependency on the directory, it will be rerun whenever the list of files in the directory changes).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094471/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1094545"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 19:29 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094545/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094545" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>FD: CMake developer</p>
+<blockquote class="bq"><p>The idea is that if the ninja file's reverse-deps go out-of-date, then ninja will re-run the configure command to regenerate its own ninja file before reloading it and continuing with the build. I'm not sure whether this is possible with make, I tried something simple now and it seemed like quine territory so I gave up.</p>
+</blockquote>
+<p>You can also do <code>ninja -t clean targetname</code> to clean just a given target.</p>
+<blockquote class="bq"><p>I'm not sure if CMake and friends ever use it but I use it frequently with ninja files that I generate from a custom configure script. AFAIK make has no equivalent of this.</p>
+</blockquote>
+<p>It's used internally for CMake-authored rules (definitely in the C++ modules support), but it isn't exposed to users.</p>
+<blockquote class="bq"><p>The idea is that if the ninja file's reverse-deps go out-of-date, then ninja will re-run the configure command to regenerate its own ninja file before reloading it and continuing with the build. I'm not sure whether this is possible with make, I tried something simple now and it seemed like quine territory so I gave up.</p>
+</blockquote>
+<p>Ninja has support for <code>generator = 1</code> on a rule to say &quot;this remakes the <code>build.ninja</code> files. Makefiles can do the same (autoconf and CMake both do it), but I've never dug into the implementation.</p>
+<blockquote class="bq"><p>The 'dyndeps' feature can be used to dynamically update the build tree when certain kinds of input files are not known in advance, which obviates some situations where you need to run the build, reconfigure, and run again. Again this is a little niche and I'm not sure how generally applicable it is for metabuild tools, but for artisinally-generated ninja it feels very satisfying when it allows you to get the build graph just right without reruns.</p>
+</blockquote>
+<p>It's necessary for C++ and Fortran modules (really, any language where the <em>contents</em> of the file dictate compilation order). Code generators have this happen at times too. But CMake doesn't expose this for users to control (perhaps in the future, but nothing on the horizon).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094545/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 10:54 UTC (Mon)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1093983/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093983" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Makes it possible to maintain complex (cross platform) projects in a sane way. Using plain make (and autotools) will very fast become a real problem.</span><br>
+<p>
+It's been a long time since I had to do anything cross-platform, so I can't speak much, but I've pushed the limits of makefiles in my projects, and don't see why it would be inherently difficult.<br>
+<p>
+I wouldn't put autotools in the same category as plain make.  It's far from being plain make.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1094551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">make - the assembly of a build</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2026 19:52 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1094551/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094551" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>On Windows, some tools need to use the <code>\</code> separator to work properly, so you'll need to flip the slashes around (sometimes). One thing I was unable to do in Make syntax was to end a dependency with a <code>\</code> because it either escaped the following space or the newline after it. I feel like I tried <code>\\</code> but was stymied by some other rule.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1093943"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clarification on the Rust part</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 13:14 UTC (Sun)
+                               by <b>ojeda</b> (subscriber, #143370)
+                              [<a href="/Articles/1093943/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ojeda" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093943" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>Currently, the kernel's Rust crates are compiled serially, one at a time. That slows the kernel build considerably now, and will only slow things further as the amount of Rust code grows.</p>
+</blockquote>
+<p>No, the kernel crates are built in parallel as much as they can be between themselves (one has to respect a build graph unlike for most of C).</p>
+<p>In fact, as the kernel grows, more code would be in leaves (e.g. drivers), and those are already built in parallel during the descend together with the rest of the C object files (so there is almost always work to be done in all cores).</p>
+<p>The main issue is that a fixed set of crates are built during <code>prepare</code>. That is what is noticeable and a pain point, especially <code>core</code> which is huge and at the top of the graph, but even that fixed set are all already built in parallel among themselves where possible.</p>
+<p>Relatedly, what I have been working on is a series that removes several restrictions on what we can do on the Rust build (like having crates on different folders and dependencies between them, docs, exports and tests for every crate, and so on), by hacking a bit at the build system. As a consequence of that, the crates will move out of <code>prepare</code>. One of the patches in the article also moves the crates out of <code>prepare</code>, which is good, and perhaps we may want to land that first before the big change I want to do. Either way, the pain of <code>prepare</code> will go away.</p>
+<p>Now, one of the patches here asks the compiler to introduce parallelism within the compiler itself, in the frontend (<code>-Zthreads</code>), but it is experimental and has had issues in the recent past according to Björn, so we don't want to enable it by default for now. Maybe for nightly, but even then, some people use nightly regularly -- most nightlies of the compiler work just fine (the Linux kernel is in upstream Rust's CI, which helps with that). So breaking that may be a bit disruptive... I think it may be best to simply leave it as an option (people can already easily enable it anyway).</p>
+<p>Outside of that, there is also the option of parallelizing the backend of the compiler, but since the beginning I added <code>-Ccodegen-units=1</code> on purpose, for getting the best end results.</p>
+<p>I think it could be interesting to have the <code>DEV=1</code> move we discussed a few times, to have an easy setup for developers vs. end users, that e.g. may enable options like that for fast iteration time instead of best results (plus perhaps other things like debug assertions and what not, though those are already in the Kconfig explicitly).</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093943/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093944"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clarification on the Rust part</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 13:35 UTC (Sun)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1093944/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093944" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;since the beginning I added -Ccodegen-units=1 on purpose, for getting the best end results.</span><br>
+<p>
+Would it not make sense to have a switch for that to turn it into codegen-units=8 or something for cases where the end product performance doesn't matter much? (e.g. most CI test builds).<br>
+It could also reduce gcc's -O2 to -O1 perhaps, which speeds up gcc quite a lot.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093944/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093945"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clarification on the Rust part</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2026 13:46 UTC (Sun)
+                               by <b>ojeda</b> (subscriber, #143370)
+                              [<a href="/Articles/1093945/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ojeda" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093945" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>Yeah, that is what I mean by the <code>DEV=1</code> bit.</p>
+<p>The optimization level is already part of the Kconfig, as the debug assertions etc., but perhaps it makes sense to have a single, easy toggle for some of those options (perhaps on the command-line).</p>
+<p>[ Someone may reasonably argue that we should just provide a config fragment with those, assuming all it does is part of Kconfig already. ]</p>
+<p>I am not sure about using in CI, though (at least as the only one), i.e. what I personally prefer to test in CI is ideally something closer to the &quot;real build&quot; end users will do.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093945/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093967"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clarification on the Rust part</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 1:04 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1093967/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093967" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think in general it might make sense to have an "optimize for build speed rather than the performance of the resulting kernel" option. Inspired by `cargo check`, maybe `make check`?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093967/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093968"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clarification on the Rust part</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 1:59 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1093968/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093968" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"make check" sounds to me like it runs the self-tests. That's actually what the GNU coding standards say to do, so I think it would be confusing to do something entirely different in the kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093968/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1093969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clarification on the Rust part</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 4:37 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1093969/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="josh" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093969" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p><em>shrug</em>, another name could work just as well. The important aspect is build-testing the kernel without trying to produce a particularly fast kernel.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1093982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Clarification on the Rust part</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 10:56 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1093982/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1093982" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I am not sure about using in CI, though (at least as the only one), i.e. what I personally prefer to test in CI is ideally something closer to the "real build" end users will do.</span><br>
+<p>
+Or: both maybe? Not necessarily running the same set of tests.<br>
+<p>
+BTW making the best use of finite resources is the undervalued QA expertise that most projects don't even know they need. Look for the responsibilities and decision processes in this area and find... none :-)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1093982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1094218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Recursive make</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 14, 2026 14:01 UTC (Mon)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/1094218/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geert" />
+                <input type="hidden" name="return" value="/Articles/1093398/#CommAnchor1094218" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The Linux kernel build system is still using recursive invocations of make to visit subdirectories, right?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1094218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

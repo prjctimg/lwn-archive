@@ -1,0 +1,721 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A strange BPF error message [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A strange BPF error message">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Yonghong Song brought a story about tracking down the cause of a strange verifier error messag [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1016367/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A strange BPF error message</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>April 4, 2025</br>
+           <hr>
+<a href="https://lwn.net/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+Yonghong Song brought a story about tracking down the cause of a strange verifier error
+message to the 2025 Linux Storage, Filesystem, Memory-Management, and BPF
+Summit. He then presented some possible ways to improve Clang's user experience for
+anyone running into the same class of error in the future. Toward the end of his
+allotted time, he also discussed the problems with optimizations that change the
+signature of functions — a problem that José Marchesi had also brought up in
+<a href="1015747.html">the previous session</a>.
+</p>
+
+<h4>An unhelpful error</h4>
+
+<p>
+Song started by presenting an example taken from a real program. The example was
+a bit dense, but the problem basically comes down to this code:
+</p>
+
+<pre>
+    bool icmp6_ndisc_validate() {
+        __u8 nexthdr;
+        // ...
+        int offset = ipv6_hdrlen_offset(&amp;nexthdr);
+        // ...
+    }
+
+    static __always_inline int ipv6_hdrlen_offset(__u8 *nexthdr) {
+        __u8 nh = *nexthdr;
+        // ...
+        switch (nh) {
+        case NEXTHDR_NONE:
+            return DROP_INVALID_EXTHDR;
+        // ...
+        }
+    }
+</pre>
+
+<p>
+The
+code features an uninitialized variable (nexthdr) that was passed by reference into
+another function. This is not invalid in C, because the other function might
+initialize the variable by writing to it, so Clang doesn't issue a warning. In
+this case, though, <tt>ipv6_hdrlen_offset()</tt> does not initialize it, and instead reads
+from it in order to decide which branch of a switch statement to take. Clang
+doesn't warn in that function either, because it assumes the function
+argument points to initialized memory.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+At that point, the code is passed to the optimizer, and everything goes wrong.
+The optimizer inlines one function into the other function, notices that the
+program is reading from an uninitialized variable (which would be undefined
+behavior, which it assumes cannot happen), and decides that this code
+must be unreachable. It turns the entire tail of the function into a single
+<tt>unreachable</tt> instruction in the LLVM IR, and then hands that off to the
+BPF code-generation backend. That backend ignores the <tt>unreachable</tt>
+instruction, but since the function's original return has been subsumed into it,
+the code generator ends the function without emitting a return instruction.
+That leads in turn to
+this somewhat confusing error from the BPF verifier:
+</p>
+
+<pre>
+    last insn is not an exit or jmp
+</pre>
+
+<p>
+While this error makes sense with an understanding of the sequence of events
+that led to it, at first Song found it a good deal more puzzling. It's not
+intuitive that an uninitialized variable would cause this error message, he
+said. He actually ran into this same problem helping someone with another
+program — so this isn't an isolated incident. People are seeing this message and
+being justifiably confused.
+</p>
+
+<p>
+Marchesi and David Faust said that GCC does pretty much
+the same thing, and therefore has pretty much the same problem. One audience
+member asked why LLVM was generating an <tt>unreachable</tt> instruction instead
+of inferring that the value of the variable was <tt>undef</tt> (LLVM's
+representation of a value which could be anything). Song
+answered that LLVM's <tt>undef</tt> has "<q>a lot of interesting
+semantics</q>" that made it not always the right fit.
+</p>
+
+<a href="/Articles/1016238/">
+<img src="../_static/images/2025/yonghong-song-small.png" class="lthumb"
+alt="[Yonghong Song]" title="Yonghong Song" />
+</a>
+
+<p>
+There have been a few attempts to avoid this kind of error, Song said. One
+option is to use <tt>-ftrivial-auto-var-init=zero</tt> to make the compiler
+initialize all variables with zero, where possible. This sort of works, in the sense
+that the generated program is no longer rejected, but it may hide a real bug.
+It's also a performance problem for some
+<a href="https://en.wikipedia.org/wiki/Express_Data_Path">
+express data path</a> (XDP) programs that may need to
+initialize lots of IP headers.
+</p>
+
+<p>
+Another approach that he tried was to have the BPF backend recognize the
+<tt>unreachable</tt> instruction and emit an error at that point. This is
+better, but it's not an airtight defense, because there's no guarantee that the
+optimizer won't do something else in the future that results in different code
+being generated. For example, it could have just chosen to assume that the value
+of the variable matched whichever switch statement it found most convenient.
+</p>
+
+
+<p>
+If the presence of <tt>unreachable</tt> could be relied on, the BPF backend
+could emit a useful error message when it sees it. So the approach Song is
+currently pursuing is to try and make it so that the
+optimizer will not use transformations that can eliminate <tt>unreachable</tt>
+instructions when compiling for BPF. He also has
+<a href="https://github.com/llvm/llvm-project/pull/131020">a pull request</a>
+for LLVM
+open that tries to generate <tt>unreachable</tt> in more cases, although it
+looks unlikely to be accepted in its current form.
+</p>
+
+<p>
+One attendee suggested using LLVM's <tt>poison</tt> value, which is subtly different
+from <tt>undef</tt> (as
+<a href="https://www.youtube.com/watch?v=ZMaZH3YYJqY">a presentation</a> from
+the 2020 LLVM developer's meeting explains).
+Song agreed that it was possible in theory, but it wasn't likely
+to be accepted by the LLVM maintainers for various reasons.
+</p>
+
+<p>
+Marchesi wondered whether this same kind of behavior could manifest in other
+verifier errors, or whether it was always the same message. Song answered that
+he had only observed this specific error in testing, but that in general there
+was no reason to assume that other verifier errors were impossible.
+Eduard Zingerman said that he had actually seen some sched_ext code that did not
+result in the "last insn is not an exit or jmp" message, but had caused
+a verification failure in a different place in the program.
+Marchesi
+suggested that this specific case could be caught by examining the program's control-flow
+graph at compile time. Song said that was not possible, because LLVM's BPF
+backend doesn't have access to the control-flow graph. Marchesi asserted that
+this was a problem with LLVM's design, and that the backend needs access to the
+program's control-flow graph for several reasons.
+</p>
+
+<p>
+As a partial solution that would at least deliver better error messages,
+Song proposed having the BPF backend generate a call to the non-existent
+<tt>bpf_unreachable()</tt> kernel function when it sees a <tt>unreachable</tt>
+instruction. This would still result in a verifier failure on existing kernels,
+but hopefully one that is more specific and therefore easily searched for.
+Future kernels could recognize calls to <tt>bpf_unreachable()</tt> and supply a
+nicer failure message. Specifically, he proposed:
+</p>
+
+<pre>
+    last isns marked as unreachable, maybe due to uninitialized variable?
+</pre>
+
+<p>
+Some other alternatives he considered included adding an <tt>unreachable</tt>
+instruction to the BPF virtual machine,
+adding a <tt>bpf_unreachable()</tt> kernel function,
+or actually making the Clang frontend detect all uninitialized variable usage
+across functions. The first two are not really necessary, he said. Someone
+working at Google actually had a patch that implemented the latter option, but
+it never got merged. At the time, the project didn't consider it a priority
+because people normally use a sanitizer to detect problems with uninitialized
+variables. Unfortunately, that's not really an option for BPF programs.
+</p>
+
+<p>
+Faust commented that this sounded like another use case where it would be
+helpful to have the rules of the verifier extracted out of the kernel so they
+could be run elsewhere. If that were done, the compiler could check the binary
+itself, and then use its context on the program to produce a more helpful error
+message.
+</p>
+
+<h4>Signature changes</h4>
+
+<p>
+With the time remaining in the session, Song turned to another topic: how
+optimization can change the signatures of functions, and how to represent that
+in BPF's debugging information format, BTF.
+According to an analysis of the DWARF debug information of a recent
+kernel, there are 64,129 functions in the kernel. Of those, 635 have arguments changed,
+306 have the return value removed, and 18 have both.
+</p>
+
+<p>
+The DWARF debug format does actually have a way to represent that information,
+in the form of the <tt>DW_AT_calling_convention</tt> tag, but it's not specific
+enough — it only tells the user that something changed, not what changed. Song
+then briefly described two proposed new ways of representing the original
+signature of an optimized function in BTF. Unfortunately, the group didn't have
+much time to dig into the the topic before it was time for the next session.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Verifier</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1016105/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1016523"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Isn't this a language problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2025 18:21 UTC (Fri)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1016523/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="geofft" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016523" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Isn't this fundamentally a (classic) weakness in the C language, that there's no way to distinguish a pointer to an uninitialized value that you need to write to first and a pointer to an initialized value that is okay to read from?<br>
+<p>
+BPF is its own environment, and there's no particular requirement to be fully backwards compatible with the large body of existing C code. (I would bet that the overwhelming majority of existing C code won't pass the verifier!) Why is using standard C the answer here? <br>
+<p>
+Of course one approach is to use another language that can distinguish these at the type level (like Rust's MaybeUninit&lt;T&gt;, and using Rust would unsurprisingly be my preferred solution), but wouldn't it also be feasible to write BPF programs in some variant of C that addresses these sorts of issues? If you have no need to compile existing, unmodified C code, couldn't you do something along the lines of Cyclone and add some new pointer types that capture the information needed to avoid these sorts of issues?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016523/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016534"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Isn't this a language problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2025 23:23 UTC (Fri)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/1016534/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cesarb" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016534" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Isn't this fundamentally a (classic) weakness in the C language, that there's no way to distinguish a pointer to an uninitialized value that you need to write to first and a pointer to an initialized value that is okay to read from?</span><br>
+<p>
+Some Microsoft library headers use annotations like __in or __out to specify whether a pointer is supposed to be an input or an output for a function call, probably borrowed from IDL. I don't know whether gcc or clang have an equivalent __attribute__ which could be used to implement these annotations.<br>
+<p>
+In the example on this article, if the nexthdr argument of ipv6_hdrlen_offset were annotated as __in, the compiler could know that passing it a pointer to an uninitialized value is a mistake, allowing it to output a warning on the call in icmp6_ndisc_validate; if, on the other hand, the nexthdr argument of ipv6_hdrlen_offset were annotated as __out, the compiler could generate a warning when that function tries to read from that argument. Either way, it would be easier to see that something is wrong with the code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016534/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016550"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Isn't this a language problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2025 16:51 UTC (Sat)
+                               by <b>ABCD</b> (subscriber, #53650)
+                              [<a href="/Articles/1016550/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ABCD" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016550" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>GCC (but apparently not Clang) does have an attribute that might be useful here; unfortunately, it is applied to the function as a whole, not a particular parameter (although it does reference a specific parameter, and can be applied multiple times for multiple parameters).  For the function in question, it would probably look something like:</p>
+
+<p><pre>
+static __always_inline int ipv6_hdrlen_offset(__u8 *nexthdr) __attribute__((access(read_only, 1))) {
+    /* ... */
+}
+</pre></p>
+
+<p>For further information, see the GCC documentation for <a href="https://gcc.gnu.org/onlinedocs/gcc/Common-Function-Attributes.html#index-access-function-attribute">the <tt>access</tt> attribute</a>.</p>
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016550/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1016544"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Isn't this a language problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2025 9:42 UTC (Sat)
+                               by <b>dottedmag</b> (subscriber, #18590)
+                              [<a href="/Articles/1016544/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dottedmag" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016544" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or nag the people working on C standard to strike another item off the "undefined behaviour" list, so that demons stop flying off one's nose in this particular case. Fortunately, this is is a work being done already.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016544/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1016537"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trivial for static code analysis</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2025 2:32 UTC (Sat)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/1016537/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jreiser" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016537" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Almost any tool for static [offline] code analysis will detect the error in the exhibited code that deals with <tt>nexthdr</tt>.  In many cases, running a BPF code requires privileges. The administrator of the privileges can establish a requirement for a satisfactory report from a static analysis tool, perhaps authenticated using cryptography or sourced from within a restricted area of a filesystem.  It is too much to expect BPF to do everything dynamically [online].
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016537/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016539"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trivial for static code analysis</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2025 3:06 UTC (Sat)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/1016539/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="intelfx" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016539" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Almost any tool for static [offline] code analysis will detect the error in the exhibited code that deals with nexthdr. In many cases, running a BPF code requires privileges. The administrator of the privileges can establish a requirement for a satisfactory report from a static analysis tool, perhaps authenticated using cryptography or sourced from within a restricted area of a filesystem. It is too much to expect BPF to do everything dynamically [online]. </span><br>
+<p>
+If this mechanism existed, there would have been no need for BPF in the first place. Why bother with BPF at all, with its verifier and all its idiosyncrasies, if it were possible, feasible, and acceptable to "just" require an unforgeable report about the safety of a given program?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016539/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016545"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trivial for static code analysis</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2025 11:15 UTC (Sat)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1016545/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016545" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+They serve a different purpose. The BPF verifier checks that the program is harmless, the static checker checks that it has no obvious bugs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016545/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1016538"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an IPv6 problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2025 3:22 UTC (Sat)
+                               by <b>buck</b> (subscriber, #55985)
+                              [<a href="/Articles/1016538/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="buck" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016538" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps a wee bit off-topic, but successful compilation resulting in dropping IPv6 packets would arguably be expected behavior here<br>
+<p>
+<a href="https://www.rfc-editor.org/rfc/rfc9098.html#name-introduction">https://www.rfc-editor.org/rfc/rfc9098.html#name-introduc...</a><br>
+<p>
+On a slightly more serious note, if this code is just peeking at the next header, then, OK, but, in general, can one chase nexthdrs and still have the BPF verifier accept the code? I thought it was somehow responsible for verifying the code is guaranteed to terminate (without solving the halting problem)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016538/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016601"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this an IPv6 problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2025 12:06 UTC (Mon)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1016601/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="daroc" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016601" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In this case I think the code was just peeking at the next header, yes. But modern BPF does allow pointer chasing — the trick is that any loop must be verifiably bounded. Depending on the exact way you write the loop this is done in different ways. Options include: having a bounded maximum number of iterations, or using the may_goto instruction to allow the BPF runtime to terminate a loop early if it wants to.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016601/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1016739"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Difference in Culture</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2025 12:46 UTC (Tue)
+                               by <b>jeremyhetzler</b> (subscriber, #127663)
+                              [<a href="/Articles/1016739/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jeremyhetzler" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016739" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What's interesting to me is the culture difference.<br>
+<p>
+In C, reading from an uninitialized variable is a cardinal sin and is punishable by undefined behavior. If a program does that, compilers choose to exercise their standard-given right to provide the least-helpful behavior possible: ignoring statements or entire functions, exhibiting unrelated errors far away from the actual problem, etc. Certainly not emitting a diagnostic along the lines of "hey, just fyi, you're trying to read an uninitialized variable".<br>
+<p>
+BPF is a restricted variant of C. Yet in BPF, compiler writers seem to feel like letting your program crash and burn in the face of undefined behavior is not good enough. Here if your program reads from an uninitialized variable, you're not on your own. The compiler is going to try and help you.<br>
+<p>
+I wonder why.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016739/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016741"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Difference in Culture</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2025 13:33 UTC (Tue)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/1016741/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pizza" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016741" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; In C, reading from an uninitialized variable is a cardinal sin and is punishable by undefined behavior. If a program does that, compilers choose to exercise their standard-given right to provide the least-helpful behavior possible: ignoring statements or entire functions, exhibiting unrelated errors far away from the actual problem, etc. Certainly not emitting a diagnostic along the lines of "hey, just fyi, you're trying to read an uninitialized variable".</span><br>
+<p>
+Sorry to spoil your rant, but that should read "compilers MAY choose"<br>
+<p>
+I can't speak to other compilers, but GCC will happily emit diagnostics about uninitialized variable access if the user so desires.  -Wuninitialized has been available since 1992 (in GCC 2.1), and has been part of the (still-growing) set enabled by -Wall since 2005 (in GCC 4.0).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016741/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016884"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Difference in Culture</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2025 8:48 UTC (Wed)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/1016884/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="chris_se" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016884" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I can't speak to other compilers, but GCC will happily emit diagnostics about uninitialized variable access if the user so desires. -Wuninitialized has been available since 1992 (in GCC 2.1), and has been part of the (still-growing) set enabled by -Wall since 2005 (in GCC 4.0).</span><br>
+<p>
+In this specific example, -Wuninitialized for GCC actually warns about this, but only if the optimizer is turned on to at least -O1. However, clang (at least versions 14 through current trunk) doesn't warn about this at all, even with -O3, see the following example in godbolt:<br>
+<p>
+<span class="QuotedText">&gt; <a href="https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYBMCmBRdBLAF1QCcAaPECAMzwBtMA7AQwFtMQByARg9KtQYEAysib0QXACx8BBAKoBnTAAUAHpwAMvAFYTStJg1DIApACYAQuYukl9ZATwDKjdAGFUtAK4sGe1wAyeAyYAHI%2BAEaYxCBmABykAA6oCoRODB7evnrJqY4CQSHhLFEx8baY9vkMQgRMxASZPn5cFVXptfUEhWGR0bEJCnUNTdmtQ109xaUDAJS2qF7EyOwc5gDMwcjeWADUJutuQ/ioAHQIB9gmGgCCG1s7mPuHxxGonueX13dmmwzbXj2ByOBHwgk%2B6yut2%2BE0cyF2AH0EWIAO5MACeCgRwVowSewQIu2AmAICNQVCoSgIEC8BLiCIIACpdiFVAQEOhiLN9gB2Ky3XaC3a0wT0wkMBDPAAiu0ZrPZnIO/JuQt2ChRhGQkogEu5Jj531VoiUuw0IENqqFxBJSwYuwArPalRbBcanlxzQLLYLrQRbbtJGZnV7BVgqEwvLQCJ6Vd7dr7/b9g7HBfqpd80xnbm9PLsAG5iPDoJgETAQPUGkPCukMlmYNkc4jJ1UE3bkykk6VEklkilUiDmABs8sbs2bVptxDt7apuzAYAOMsDycz0NurZYTGC5YzlZTu0SxAJVAHZjMBdxxdLIH2Znt6BM9rcDHMZlI%2BcLV7LszH62VqoTKdTRXHl01uDh5loTh7V4PwOC0UhUE4NxrGsNVFmWJ4Nh4Uho3giD5gAaxAdYNFOLhSPtSQ4lI%2BIeTMDRB30ThJFgzReCQjheAUEANFw9j5jgWAYCgESICQNAWESOhonIShJOk%2BgYmAKQ3xoKNoh4iAInY0gImCep0U4HD9OYYh0QAeQibRMAcYzeEkthBAshhaCM/DSCwCIvGANwxFoHjuF4LBNyMcQPPwa0HDwPNMEChD61srxryC8hBEqXTcQiYhDI8LBdIII8WHs0hYuIN4lClTBQuAXEjAEvgDGABQADU8EwFELMSRgSv4QQRDEdgpBkQRFBUdQPN0VoDHq0xLGsfQ8AiHjIHmVBEmqQKAFoAHVomIEhFy8BhgjSQsAC9MHQXYtosnDUDKo8sBW8s2ls6oXAYdxPGaEAAE4%2BMCPFpn6aRcjSARRj8AGkhSCGGCmPoYmkOx3o6YZGh%2B7IYdR6KBE6BpEZKUHbAxqH/r4iZCeBpGQEkeYFAwlYJEg6C2I8zjdlUOJBy2wdJCJZB4SkU4zF2CBcEIEhb3WLhZl4PCtB/UgEEwJgsBiV7iPtPioI4VjSGKnXSDghDOO43j%2BPwwSxKQRYCESZK5IgBSZOIUJWFWbnef5wXhckUXeCuqWnr0PrhFEcRhvDsa1F0qbSBRHLEns1mOBgk3dM4izksdwlyS5nm%2BYF4Ahd2EWxYgDwpLdmW5YVgT5lV9X%2BlevWDaNvjTY4zgLb4xWCNIYj1nWU4R/HifJ6YvX1nZs3e6tpXSCExAUFQGulOd12lJAFTAz4OhS2ILSdI80zDJK8/zKsmy7NSxzGAIFy3N0ryfL82gApKkLDFq1YEMimjWK8Ug6qCSilHCBIMoeSyjlcyeV/4KyKiVMqFVMBVRqnVUA1tGpMGam1DqXUeqpXDgNKO0gY5KDjpNWI%2Bhf4oFQpYRay14BrQ2ukbae1iAHSbOsKUx1TqOAuldG6FkzaPSLHFVhb08Z%2BAgK4cmrQgZFFpq0cG1RFGwzyOkImMxxiVDRvjMmWMWgyOqATboNNiYxHGMYrIpiqaWJUdYlmCwljMzlsxdOc8e4cELj7EuZcK7i0lkQYgdd5aL0Hs3DWlAiIkVHpPJJ49p4sR8YhBePF%2B4NRXuJNeG9ZIUBduvRS/Rti/wZMQY6hED4aWPpQU%2BCEr7uRMgZa%2B1l3olQfs5Vy7kAGYG8r5fygUcI/zCogzyeAoqOGAbpRKyBkqrEgelPWCFYG5QwBMwqeBiqpVQSkdB1Vf5YIalQJqrV2qdW6nBHCpDI5DQobIWOE0EK6HWHQ2ajCbBZRemwzanBdr7UOnwgRJ0hG4kutdW6s9EISOetI3GH15FfU0co3oLi1Fww0SYnIWKdFWL0WY9GXRNGIuJdTZxhLHGkoxro/onjGbuKGmnDO3cMl%2BO9sXXY5SjDi0KtU7kEt8BhIiQ3a28SR5j2SUkrxBs2Xm1sJbAeytiKDj%2BqcHmf1JD2i4GqnkXAzA8i1V4swvBipcA0F3LOC9lVp1NZnDmNrG6lU0ukOmQA%3D%3D">https://godbolt.org/#z:OYLghAFBqd5QCxAYwPYBMCmBRdBLAF1QCc...</a></span><br>
+<p>
+So it appears to me that clang's diagnostics could be better here (my guess is the warning is only ever emitted in clang before the optimizer is even ran, thus not catching this case that is spread over two functions), which is why this compiler warning wouldn't have caught this here.<br>
+<p>
+That said: that issue with clang is fixable, and in my eyes one should always compile C/C++ code with -Werror=uninitialized -- if the compiler is absolutely sure that something is uninitialized, it should be an error to read from it.<br>
+<p>
+-Wmaybe-uninitialized is a different beast, I've had plenty of false positives for that, especially once switching to a newer compiler version; there I'd not want to promote that to an error. (Still I take it seriously if it does appear.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016884/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1016889"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Difference in Culture</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2025 11:46 UTC (Wed)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/1016889/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pizza" />
+                <input type="hidden" name="return" value="/Articles/1016105/#CommAnchor1016889" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; In this specific example, -Wuninitialized for GCC actually warns about this, but only if the optimizer is turned on to at least -O1. </span><br>
+<p>
+That is because the optimizer is what figures this (and most other potential UB) out.  The corollary is if optimizer is not used, the compiler won't have any way of recognizing that variable access is uninitialized, and thus won't be able to helpfully  replace it with an invocation of your PC's self-destruct feature.<br>
+<p>
+<span class="QuotedText">&gt; That said: that issue with clang is fixable, and in my eyes one should always compile C/C++ code with -Werror=uninitialized -- if the compiler is absolutely sure that something is uninitialized, it should be an error to read from it.</span><br>
+<p>
+FWIW I generally agree with you but naive ways of preventing this warning (such as always initializing the variable upon declaration) can hide logic bugs that this warning would have potentially exposed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016889/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

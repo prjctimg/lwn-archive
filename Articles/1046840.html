@@ -1,0 +1,1164 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Checked-size array parameters in C [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Checked-size array parameters in C">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="There are many possible programmer mistakes that are not caught by the minimal checks specified [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1047222/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Checked-size array parameters in C</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 1, 2025</br>
+           </div>
+There are many possible programmer mistakes that are not caught by the
+minimal checks specified by the C language; among those is passing an array
+of the wrong size to a function.  A recent attempt to add some safety
+around array parameters within the crypto layer involved the use of some
+clever tricks, but it turns out that clever tricks are unnecessary in this
+case.  There is an obscure C feature that can cause this checking to
+happen, and it is already in use in a few places within the kernel.
+<p>
+The discussion started when Ard Biesheuvel <a
+href="/ml/all/20251114180706.318152-2-ardb+git@google.com">sought</a> to
+improve the safety of the poetically  named function
+<a
+href="https://elixir.bootlin.com/linux/v6.17.8/source/lib/crypto/chacha20poly1305.c#L112"><tt>xchacha20poly1305_encrypt()</tt></a>:
+<p>
+<pre>
+    void xchacha20poly1305_encrypt(u8 *dst, const u8 *src, const size_t src_len,
+			           const u8 *ad, const size_t ad_len,
+			       	   const u8 nonce[XCHACHA20POLY1305_NONCE_SIZE],
+			       	   const u8 key[CHACHA20POLY1305_KEY_SIZE]);
+</pre>
+<p>
+A potential problem with this function is that it takes as parameters
+several pointers to arrays of type <tt>u8</tt>.  As Biesheuvel pointed out,
+the size of the <tt>nonce</tt> and <tt>key</tt> arrays is not checked by
+the compiler, even though it is clearly specified in the function
+prototype.  That makes it easy to, for example, give the parameters in the
+wrong order.  The resulting vulnerabilities are generally not the outcome
+developers have in mind when they write cryptographic code.
+<p>
+Biesheuvel suggested that it was possible to write the prototype this way
+instead (differences shown in bold):
+<pre>
+    void xchacha20poly1305_encrypt(u8 *dst, const u8 *src, const size_t src_len,
+			           const u8 *ad, const size_t ad_len,
+			       	   const u8 <b>(*nonce)</b>[XCHACHA20POLY1305_NONCE_SIZE],
+			       	   const u8 <b>(*key)</b>[CHACHA20POLY1305_KEY_SIZE]);
+</pre>
+<p>
+The types of the last two arguments have changed; there is a new level of
+pointer indirection, with the argument being a pointer to an array of a
+given size.  Callers must change their calls by adding an additional
+<tt>&amp;</tt> operator to obtain the desired pointer type, but the address
+that is passed is the same.  In this case, though, the compiler will check
+the sizes of the array passed, and will now catch a reordering of the
+arguments to the function.
+<p>
+Jason Donenfeld <a href="/ml/all/aRePu_IMV5G76kHK@zx2c4.com">was
+interested</a> by the idea, but he knew of an arguably more straightforward
+way to address this problem.  It seems that, buried deep within the C
+standard, is a strange usage of the <tt>static</tt> keyword, making it
+possible to write the prototype as:
+<p>
+<pre>
+    void xchacha20poly1305_encrypt(u8 *dst, const u8 *src, const size_t src_len,
+			           const u8 *ad, const size_t ad_len,
+			       	   const u8 nonce[<b>static</b> XCHACHA20POLY1305_NONCE_SIZE],
+			       	   const u8 key[<b>static</b> CHACHA20POLY1305_KEY_SIZE]);
+</pre>
+<p>
+This, too, will cause the compiler to check the sizes of the arrays, and it
+does not require changes on the caller side.  Unlike the pointer trick,
+which requires an exact match on the array size, use of <tt>static</tt>
+will only generate a warning if the passed-in array is too small.  So it
+will not catch all mistakes, though it is sufficient to prevent
+memory-safety and swapped-argument problems.
+<p>
+Eric Biggers <a href="/ml/all/20251115021430.GA2148@sol">pointed out</a>
+that GCC can often generate "array too small" warnings even without
+<tt>static</tt>, but that the kernel currently disables those warnings;
+that would suppress them when <tt>static</tt> is used as well.  (The
+warning was <a href="https://git.kernel.org/linus/021533194476">disabled in
+6.8</a> due to false positives.)  But he thought that adding
+<tt>static</tt> was worthwhile to get the warnings in Clang — if Linus
+Torvalds would be willing to accept use of "<q>this relatively obscure
+feature of&nbsp;C</q>".
+<p>
+Torvalds, as it turns out, <a
+href="/ml/all/CAHk-=wj6J5L5Y+oHc-i9BrDONpSbtt=iEemcyUm3dYnZ3pXxxg@mail.gmail.com">has
+no objection</a> to this usage; he likes the feature, if not the way it was
+designed:
+<p>
+<blockquote class="bq">
+	The main issue with the whole 'static' thing is just that the
+	syntax is such a horrible hack, where people obviously picked an
+	existing keyword that made absolutely no sense, but was also
+	guaranteed to have no backwards compatibility issues.
+</blockquote>
+<p>
+He pointed out that there are a number of places in the kernel that are
+already using it; for a simple example, see <a
+href="https://elixir.bootlin.com/linux/v6.17.8/source/drivers/tty/vt/vt.c#L4981"><tt>getconsxy()</tt></a>
+in the virtual-terminal driver.  He suggested perhaps hiding it with a
+macro like <tt>min_array_size()</tt> just to make the usage more obvious,
+but didn't seem convinced that it was necessary. Donenfeld <a
+href="/ml/all/20251118170240.689299-1-Jason@zx2c4.com">followed up</a> with
+a patch to that effect a few days later, but then pivoted to <a
+href="/ml/all/20251122025510.1625066-4-Jason@zx2c4.com/">an
+<tt>at_least</tt> marker</a> instead.
+<p>
+A lot of work has gone into the kernel to make its use of C as safe as
+possible, but that does not mean that the low-hanging fruit has all been
+picked.  The language has features, such as <tt>static</tt> when used to
+define formal array parameters, that can improve safety, but which are not
+generally known and not often used.  In this particular case, though, it
+would not be surprising to see this "<q>horrible hack</q>" come into wider
+use in the near future.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">C language safety</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Releases/6.19</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1046840/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1048895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">[static n] should be avoided if possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 0:54 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1048895/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048895" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+[n] should be as fine as [static n], and even better.<br>
+<p>
+It's unfortunate that the kernel had to turn -Wstringop-overflow off; I hope that can be resolved eventually, and code using [n] can be safe again.<br>
+<p>
+[static n] is not as good as [n], among other reasons, because it doesn't guarantee that the function will not read beyond the first 'n' elements.  GCC diagnoses if a function reads beyond that, but that's a GNU extension.  [static n] as designed by the C Committee is bad, and should be avoided.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1048908"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">[static n] should be avoided if possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 9:10 UTC (Tue)
+                               by <b>danielthompson</b> (subscriber, #97243)
+                              [<a href="/Articles/1048908/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="danielthompson" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048908" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure I understood that last bit. I thought that neither [static n] nor [n] can guarantee the function will not read beyond the first n elements (although either might warn).<br>
+<p>
+AFAICT the C standard defines static array indices as an single additional constraint on callers (e.g. there's nothing that [n] does that [static n] doesn't also do). Assuming that constraint is met then I don't see why [static n] is would be not as good as [n] when the function implementation does not honour its prototype.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048908/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1048911"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">[static n] should be avoided if possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 9:47 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1048911/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048911" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      It depends on what you call a guarantee.  If you use appropriate compiler flags, you can get such guarantees
+
+<pre>
+alx@devuan:~/tmp$ cat array-bounds.c 
+void g(int a[43]);
+
+void
+f(int a[42])
+{
+	a[100] = 7;
+
+	g(a);
+}
+alx@devuan:~/tmp$ gcc -Warray-parameter=2 -Werror=array-bounds=2 -Werror=stringop-overflow=4 -O2 -S array-bounds.c 
+array-bounds.c: In function ‘f’:
+array-bounds.c:8:9: error: ‘g’ accessing 172 bytes in a region of size 168 [-Werror=stringop-overflow=]
+    8 |         g(a);
+      |         ^~~~
+array-bounds.c:8:9: note: referencing argument 1 of type ‘int[43]’
+array-bounds.c:1:6: note: in a call to function ‘g’
+    1 | void g(int a[43]);
+      |      ^
+array-bounds.c:6:10: error: array subscript 100 is outside array bounds of ‘int[42]’ [-Werror=array-bounds=]
+    6 |         a[100] = 7;
+      |         ~^~~~~
+array-bounds.c:4:7: note: at offset 400 into object ‘a’ of size [0, 168]
+    4 | f(int a[42])
+      |   ~~~~^~~~~
+cc1: some warnings being treated as errors
+</pre>
+
+The C standard claims [n] has no meaning at all, so it's easy for the C standard to also claim that [static n] has strictly stronger guarantees than [n].  However, the C standard doesn't acknowledge that existing quality compilers (i.e., GCC) assign [n] a stronger meaning than the C standard ackowledge.
+
+<br></br>
+
+About why [static n] would be worse than [n], there are a few reasons (plus the one mentioned above):
+
+<ul>
+<li>[static n] implies [[gnu::nonnull()]] on the parameter, which is a UB bomb.</li>
+
+<li>[static n] implies that n is nonzero, and if it is ever zero, you have UB, which is a UB bomb.</li>
+</ul>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048911/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1048915"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">[static n] should be avoided if possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 10:09 UTC (Tue)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/1048915/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="excors" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048915" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The a[100]=7 line only causes a warning/error at -O2, not at -O1 or -O0 (with GCC 13.3.0). So it can sometimes be a useful heuristic (when it's not causing too many false positives), but it's not what anyone would call a guarantee.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048915/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1048918"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">[static n] should be avoided if possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 10:25 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1048918/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048918" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure how much heuristics are involved.  I haven't seen the implementation.<br>
+<p>
+But yeah, I agree the diagnostics about array parameters need some improvements.<br>
+And GCC is indeed working on improving those diagnostics.<br>
+<p>
+On the other hand, -O2 is what most projects use.  I personally build my projects in a loop with all different optimization levels, to maximize diagnostics.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048918/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1048983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">[static n] should be avoided if possible</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 15:28 UTC (Tue)
+                               by <b>danielthompson</b> (subscriber, #97243)
+                              [<a href="/Articles/1048983/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="danielthompson" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048983" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think we're on the same page, although perhaps coming from opposite directions.<br>
+<p>
+From the point of view of the standard [static n] is essentially a hint to the optimizer that allows it to optimize the function more aggressively by imposing restrictions on the caller. Nothing to do with diagnostics, although without diagnostics then there is a risk that failing to meet the restrictions would go undiscovered.<br>
+<p>
+Given how similar they are, I'd assume the only reason [static n] would ever get "better" diagnostics might be because the false positive rate is lower:  if the warnings can be switched independently then people who adopt the weird syntax for diagnostic reasons could simply switch back to [n] if there are false positive diagnostics.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1048931"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">[static n] is 100% useless (on top of being bad for safety)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 12:32 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1048931/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048931" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My previous comment mentioned that [static n] is dangerous.<br>
+<p>
+However, it's worse than that.  There's nothing that [static n] will enforce that wouldn't be enforced by [n].<br>
+<p>
+Both GCC and Clang entirely ignore [static n] --as they should, it's pure crap-- regarding diagnostics of array bounds.<br>
+<p>
+I can only assume they were assuming [static n] would do something it doesn't do but didn't really test, because it's trivial to show that [static n] doesn't add any diagnostics.<br>
+<p>
+See &lt;<a href="https://lwn.net/ml/all/ei7wbiu6m2lvso3gbc4ohvz3h575anjxqm64zqi7lg3pzilaxy@go4bjuiv3exr/">https://lwn.net/ml/all/ei7wbiu6m2lvso3gbc4ohvz3h575anjxqm...</a>&gt;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048931/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1048903"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Waste of developer mental capacity</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 8:22 UTC (Tue)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1048903/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048903" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Imagine a world where developers of a complex piece of software like an OS kernel would not have to worry about low level compiler issues like this that language creators and compiler developers knew how to solve for many decades.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048903/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1048936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unfortunately compilers don't enforce [static N]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 13:24 UTC (Tue)
+                               by <b>tdz</b> (subscriber, #58733)
+                              [<a href="/Articles/1048936/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tdz" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048936" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wished that [static N] would be used more widely. We could have had compile-time array-length and null-ptr tests in C for years. ([static 1] is a non-null pointer here.) However, citing C23 6.7.7.4, paragraph 6:<br>
+<p>
+"If the keyword static also appears within the [ and ] of the array type derivation, then for each call to<br>
+the function, the value of the corresponding actual argument shall provide access to the first element<br>
+of an array with at least as many elements as specified by the size expression"<br>
+<p>
+This is essentially just an optimization hint. There is no requirement to do any bounds checking. When I tried a few years ago, clang did while gcc didn't warn about violations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1048939"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC enforces both [n] and [static N]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 13:32 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1048939/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048939" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I don't know in the past, but in the present day, Clang is way behind GCC.
+
+GCC diagnoses both [n] and [static n] in exactly the same way, and [static n] is unnecessary.
+
+<pre>
+alx@devuan:~/tmp$ cat array-bounds.c
+void g(int a[43]);
+
+void f(int a[42]);
+void f(int a[42])
+{
+	a[100] = 7;
+	g(a);
+}
+
+void gs(int a[static 43]);
+
+void fs(int a[static 42]);
+void fs(int a[static 42])
+{
+	a[101] = 8;
+	gs(a);
+}
+
+int
+main(void)
+{
+	int a[2];
+
+	f(a);
+	fs(a);
+}
+alx@devuan:~/tmp$ gcc -S -O2 -Wall -Wextra array-bounds.c 
+array-bounds.c: In function ‘f’:
+array-bounds.c:7:9: warning: ‘g’ accessing 172 bytes in a region of size 168 [-Wstringop-overflow=]
+    7 |         g(a);
+      |         ^~~~
+array-bounds.c:7:9: note: referencing argument 1 of type ‘int[43]’
+array-bounds.c:1:6: note: in a call to function ‘g’
+    1 | void g(int a[43]);
+      |      ^
+array-bounds.c: In function ‘fs’:
+array-bounds.c:16:9: warning: ‘gs’ accessing 172 bytes in a region of size 168 [-Wstringop-overflow=]
+   16 |         gs(a);
+      |         ^~~~~
+array-bounds.c:16:9: note: referencing argument 1 of type ‘int[43]’
+array-bounds.c:10:6: note: in a call to function ‘gs’
+   10 | void gs(int a[static 43]);
+      |      ^~
+array-bounds.c: In function ‘main’:
+array-bounds.c:24:9: warning: ‘f’ accessing 168 bytes in a region of size 8 [-Wstringop-overflow=]
+   24 |         f(a);
+      |         ^~~~
+array-bounds.c:24:9: note: referencing argument 1 of type ‘int[42]’
+array-bounds.c:4:6: note: in a call to function ‘f’
+    4 | void f(int a[42])
+      |      ^
+array-bounds.c:25:9: warning: ‘fs’ accessing 168 bytes in a region of size 8 [-Wstringop-overflow=]
+   25 |         fs(a);
+      |         ^~~~~
+array-bounds.c:25:9: note: referencing argument 1 of type ‘int[42]’
+array-bounds.c:13:6: note: in a call to function ‘fs’
+   13 | void fs(int a[static 42])
+      |      ^~
+array-bounds.c: In function ‘f’:
+array-bounds.c:6:10: warning: array subscript 100 is outside array bounds of ‘int[42]’ [-Warray-bounds=]
+    6 |         a[100] = 7;
+      |         ~^~~~~
+array-bounds.c:4:12: note: at offset 400 into object ‘a’ of size [0, 168]
+    4 | void f(int a[42])
+      |        ~~~~^~~~~
+array-bounds.c: In function ‘fs’:
+array-bounds.c:15:10: warning: array subscript 101 is outside array bounds of ‘int[42]’ [-Warray-bounds=]
+   15 |         a[101] = 8;
+      |         ~^~~~~
+array-bounds.c:13:13: note: at offset 404 into object ‘a’ of size [0, 168]
+   13 | void fs(int a[static 42])
+      |         ~~~~^~~~~~~~~~~~
+In function ‘f’,
+    inlined from ‘main’ at array-bounds.c:24:2:
+array-bounds.c:6:16: warning: array subscript 100 is outside array bounds of ‘int[2]’ [-Warray-bounds=]
+    6 |         a[100] = 7;
+      |         ~~~~~~~^~~
+array-bounds.c: In function ‘main’:
+array-bounds.c:22:13: note: at offset 400 into object ‘a’ of size 8
+   22 |         int a[2];
+      |             ^
+In function ‘fs’,
+    inlined from ‘main’ at array-bounds.c:25:2:
+array-bounds.c:15:16: warning: array subscript 101 is outside array bounds of ‘int[2]’ [-Warray-bounds=]
+   15 |         a[101] = 8;
+      |         ~~~~~~~^~~
+array-bounds.c: In function ‘main’:
+array-bounds.c:22:13: note: at offset 404 into object ‘a’ of size 8
+   22 |         int a[2];
+      |             ^
+alx@devuan:~/tmp$ clang -S -O2 -Weverything array-bounds.c 
+array-bounds.c:25:2: warning: array argument is too small; contains 2 elements, callee requires at least 42 [-Warray-bounds]
+   25 |         fs(a);
+      |         ^  ~
+array-bounds.c:13:13: note: callee declares array parameter as static here
+   13 | void fs(int a[static 42])
+      |             ^~~~~~~~~~~~
+array-bounds.c:6:2: warning: unsafe buffer access [-Wunsafe-buffer-usage]
+    6 |         a[100] = 7;
+      |         ^
+array-bounds.c:15:2: warning: unsafe buffer access [-Wunsafe-buffer-usage]
+   15 |         a[101] = 8;
+      |         ^
+3 warnings generated.
+</pre>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048939/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049001"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">GCC enforces both [n] and [static N]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 16:27 UTC (Tue)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1049001/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049001" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That diagnosis for [n] is wrong though; the C standard is very clear that array parameters are identical to pointer parameters, with static within the square brackets being the sole case where there is any additional meaning conveyed by the use of an array. See C99 6.7.5.3. If anything the correct behaviour would be to warn on the use of [n] in a parameter type as "this does not do what you think it does; if you don't mean [static n], [] or * would be a less misleading way to write it".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049001/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049030"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Quality of implementation </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 21:32 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1049030/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049030" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That diagnosis for [n] is wrong though;</span><br>
+<p>
+That's what we call quality-of-implementation.  It's not a bug, it's a feature.<br>
+<p>
+Quality compilers often diagnose things that the standard doesn't restrict.  That's expected.  You wouldn't want to use a compiler that diagnoses exactly what the standard requires and no more.  <br>
+<p>
+<span class="QuotedText">&gt; the C standard is very clear that array parameters are identical to pointer parameters,</span><br>
+<p>
+That's a bug in the standard.  I hope it will be fixed in ISO C2y.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049030/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1048940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: [static 1] is a non-null pointer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 13:38 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1048940/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1048940" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+[static 1] is a bad version of __attribute__((nonnull())).<br>
+<p>
+-  It uses array notation for what is really a pointer.<br>
+-  It would cause warnings in the function if it tries to access more than 1 element.  (Except that these warnings are still under development, so this won't be triggered easily.)<br>
+-  It's still a UB bomb, just like the attribute.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1048940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049027"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: [static 1] is a non-null pointer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 21:10 UTC (Tue)
+                               by <b>andy_shev</b> (subscriber, #75870)
+                              [<a href="/Articles/1049027/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="andy_shev" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049027" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have you answered to the original email thread? It seems you have a point, but I don't think people from that thread reading comments under this article.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049027/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049032"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: [static 1] is a non-null pointer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 21:34 UTC (Tue)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1049032/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049032" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yup, we're talking about it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049032/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1049193"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: [static 1] is a non-null pointer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2025 12:55 UTC (Thu)
+                               by <b>tdz</b> (subscriber, #58733)
+                              [<a href="/Articles/1049193/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="tdz" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049193" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not that I disagree, but attributes are mostly compiler-specific extensions (at least before C23). My point is there should be a way of expressing this in the C standard itself. And I know that accessing elements &gt;=N is legal. That's why [static N] is mostly an optimization hint, when it could be a lot more.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049193/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049194"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: [static 1] is a non-null pointer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2025 13:05 UTC (Thu)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1049194/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049194" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; My point is there should be a way of expressing this in the C standard itself.</span><br>
+<p>
+The standard should acknowledge that [n] has always had a meaning, and standardize it as the genuine way of expressing array parameters.  I'm working on that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049194/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1049195"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: [static 1] is a non-null pointer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2025 13:08 UTC (Thu)
+                               by <b>alx.manpages</b> (subscriber, #145117)
+                              [<a href="/Articles/1049195/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="alx.manpages" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049195" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; My point is there should be a way of expressing this in the C standard itself.</span><br>
+<p>
+About expressing nullability of parameters, that should be orthogonal to arrays.<br>
+<p>
+There's a proposal for using a qualifier for nullability:<br>
+&lt;<a href="https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3422.pdf">https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3422.pdf</a>&gt;<br>
+<p>
+However, Clang is strongly opposed to it, because they're heavily invested in their own competing features that have not worked in many years: _Nullable.  Clang claims that it will work soon, and I hope that's true...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049195/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1049002"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Weird corner of C</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 16:42 UTC (Tue)
+                               by <b>jrtc27</b> (subscriber, #107748)
+                              [<a href="/Articles/1049002/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jrtc27" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049002" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+Array parameter types are a particularly cursed corner of C. By the standard, they are confusing syntax for a pointer. But that means that you can legally assign to the array itself:
+</p>
+
+<pre><code>int get_second(int a[]) {
+    a++;
+    return *a;
+}</code></pre>
+
+<p>
+If you want to stop that, like any other variable you want to prevent assignment to, you need to mark it const. But <code>int const a[]</code> makes the <s>array elements</s> pointed-to objects const, not the pointer itself. The cursed solution that C came up with is putting the qualifiers inside the square brackets (where static can also go, as explained in the article), so you can write the following:
+</p>
+
+<pre><code>int get_second(int a[<b>const</b>]) {
+    a++; <b>// error: cannot assign to variable 'a' with const-qualified type 'int *const'</b>
+    return *a;
+}</code></pre>
+
+<p>
+Other qualifiers work there too (e.g. restrict, which you do sometimes see in the real world).
+</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049002/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049014"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Weird corner of C</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2025 19:06 UTC (Tue)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/1049014/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wahern" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049014" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Array-to-pointer decay is the monkey wrench in the C machine, notwithstanding that pointers are C's secret sauce. I wonder how things would have turned out if the committee had adopted Dennis Ritchie's array passing proposal, "Variable-Size Arrays in C", <a href="http://jclt.iecc.com/Jct22.pdf#page=5">http://jclt.iecc.com/Jct22.pdf#page=5</a>, instead of VLAs. Both proposals had to work around the unfortunate array parameter semantics in similar ways, though.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049014/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1049045"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To editor: example using `at_least` needed</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2025 3:22 UTC (Wed)
+                               by <b>zx2c4</b> (subscriber, #82519)
+                              [<a href="/Articles/1049045/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zx2c4" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049045" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would be nice if Jon would post an example that uses the new at_least macro, because people often use these LWN articles instructively, and I'd hate to have to cleanup naked uses of static.<br>
+<p>
+Details are in the commit: <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=074e16d58e6b78612c22ff611aa469ee929cc37f">https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049045/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To editor: example using `at_least` needed</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2025 17:04 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1049112/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049112" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Sorry, <tt>at_least</tt> was a late addition.  Perhaps the best example is <a href="/ml/all/20251122194206.31822-1-ebiggers@kernel.org/">this whole series of changes</a> posted by Eric Biggers.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1049128"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To editor: example using `at_least` needed</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2025 17:46 UTC (Wed)
+                               by <b>zx2c4</b> (subscriber, #82519)
+                              [<a href="/Articles/1049128/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="zx2c4" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049128" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or just patch 3/3 in the original series? It shows the error messages that a violation would create etc.<br>
+<p>
+<a href="https://lore.kernel.org/all/20251123054819.2371989-4-Jason@zx2c4.com/">https://lore.kernel.org/all/20251123054819.2371989-4-Jaso...</a><br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049128/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1049547"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">To editor: example using `at_least` needed</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 7, 2025 11:17 UTC (Sun)
+                               by <b>rurban</b> (guest, #96594)
+                              [<a href="/Articles/1049547/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rurban" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049547" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+at_least really should have been defined with an arg, like #define at_least(x) static x<br>
+instead the keyword replacement as of now. It's not flexible at all as of now<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049547/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1049166"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">bugged gcc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2025 2:14 UTC (Thu)
+                               by <b>Xeyler</b> (subscriber, #159814)
+                              [<a href="/Articles/1049166/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Xeyler" />
+                <input type="hidden" name="return" value="/Articles/1046840/#CommAnchor1049166" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That commit by Linus to remove the array size warning indicates that on several versions of gcc, various target architectures get false-positives. Very interesting! I wonder what could be causing that…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1049166/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

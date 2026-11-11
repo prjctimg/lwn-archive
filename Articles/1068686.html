@@ -1,0 +1,836 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Famfs, FUSE, and BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Famfs, FUSE, and BPF">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The famfs filesystem first showed up on the mailing lists in early 2024; since then, it has bee [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1069207/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Famfs, FUSE, and BPF</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 23, 2026</br>
+           </div>
+The famfs filesystem first <a
+href="/ml/all/cover.1708709155.git.john@groves.net/">showed up on the
+mailing lists</a> in early 2024; since then, it has been the topic of
+regular discussions at the Linux Storage, Filesystem, Memory Management and
+BPF (LSFMM+BPF) Summit.  It has also, as result of those discussions, been
+through some significant changes since that initial posting.  So it is not
+surprising that a suggestion that it needed to be rewritten yet again was
+not entirely well received.  How much more rewriting will actually be
+needed is unclear, but more discussion appears certain.
+<p>
+Famfs is designed to support large, read-mostly filesystems stored in
+shared memory.  In practice, this means huge data sets kept in <a
+href="https://en.wikipedia.org/wiki/Compute_Express_Link">CXL</a>-attached
+memory that is made available to multiple systems simultaneously.  In
+normal usage, software running on those systems will access this data by
+mapping it directly into its address space with <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>,
+so that the data is all immediately accessible without system calls, and
+without going through the system's page cache.  It is possible to perform
+normal filesystem reads and writes, though write access is only minimally
+supported.
+<p>
+In its initial form, famfs was implemented like any other standalone
+filesystem, but it included a user-space component that drew a fair amount
+of attention from the filesystem developers at <a
+href="/Articles/983105/">the 2024 LSFMM+BPF session</a>. 
+Given that some of famfs is already implemented in user space, they
+suggested, it might be better to just use <a
+href="https://docs.kernel.org/filesystems/fuse/">FUSE</a>, which was
+designed for just that kind of filesystem.  At the time, famfs creator John
+Groves said that he was unsure about whether FUSE would work, but would be
+willing to give it a try.  His concern was that famfs must operate at
+memory speeds, and could thus not afford to call into user space to resolve
+page faults.
+
+<p>
+At the 2025 LSFMM+BPF gathering, Groves <a
+href="/Articles/1020170/">returned</a> with a shiny new FUSE-based
+implementation that appeared to have solved that problem.  It introduces
+two new FUSE operations toward that goal.  <tt>GET_FMAP</tt> is invoked
+when a file is opened; the user-space server responds by providing the
+kernel with a list of memory locations and lengths, providing a map of how
+the file is laid out in shared memory.  Thereafter, the kernel is able to
+resolve page faults without having to go back to user space for more
+information. The other operation, <tt>GET_DAXDEV</tt>, provides information
+about the CXL devices on which the shared memory is hosted.
+<p>
+There did not appear to be fundamental objections to the FUSE
+implementation.  Over the following year, Groves worked on refining the
+code; when he posted <a
+href="/ml/all/0100019d43e5f632-f5862a3e-361c-4b54-a9a6-96c242a8f17a-000000@email.amazonses.com">version&nbsp;10</a>
+at the end of March, he had every reason to believe that the work, which he
+had <a
+href="/ml/linux-fsdevel/0100019c2bdca8b7-b1760667-a4e6-4a52-b976-9f039e65b976-000000@email.amazonses.com/">described</a>
+in February as having been "<q>kinda hard</q>", was close to ready for
+merging into the mainline.  But, as he discovered, merging is never certain
+until it actually happens.
+<p>
+<h4>Better done in BPF?</h4>
+<p>
+Joanne Koong, who has done a fair amount of work with FUSE over the years,
+<a
+href="/ml/all/CAJnrk1ZRTGWjNzkMxS3UkeZMmrpadJDtWKontMx2=d-smXYq=w@mail.gmail.com">asked</a>
+a seemingly simple question:
+<p>
+<blockquote class="bq">
+	I'm curious to hear your thoughts on whether you think it makes
+	sense for the famfs-specific logic in this series to be moved to a
+	bpf program that goes through a generic fuse iomap dax layer.
+</blockquote>
+<p>
+Changing the code in that way, Koong suggested, would make the FUSE logic
+more extensible and applicable to other types of filesystems.  It
+would also bring more flexibility to famfs, making it easier, for example,
+to adjust to changes to files after they have been opened, and allowing
+famfs updates to be made available more quickly to users, since they would
+not have to wait for the usual kernel release cycle.  She also <a
+href="/ml/all/CAJnrk1a06zkUmXW5EFiUmgAoFauwtzsYvnotaPH0ifVtyh7iDQ@mail.gmail.com">said</a>
+that she had posted a prototype implementation of a BPF-based famfs back in
+November, and suggested that switching over to this approach would not
+involve a huge rewrite of the famfs code.
+<p>
+The FUSE maintainer is Miklos Szeredi; he <a
+href="/ml/all/CAJfpegvVTcV89=q3L326aGQjhduBcv7PVg5QKftGLjNZmCLmaw@mail.gmail.com">entered
+the conversation</a> saying that he would prefer to avoid adding a
+famfs-specific FUSE interface if it could be avoided.  The BPF idea thus
+appealed to him; he suggested that it should be given a try before
+considering a merge of the existing famfs patches.
+<p>
+It is fair to say (and understandable) that Groves was not entirely pleased
+by this turn in the conversation.  He would, he <a
+href="/ml/all/adkDq0m5Wt9YhJ8A@groves.net">said</a>, "<q>object
+vehemently</q>" to being required to undertake this rewrite before the code
+could be merged.  The current implementation, he said, matches what had
+been asked of him two years ago.  He later <a
+href="/ml/all/ad4_jFsR951c2Mtn@groves.net">added</a> that there would be
+some real risks involved with the BPF approach, starting with the fact that
+he would have to learn how to work with BPF, and the performance impacts of
+such a change would be unknown.  The current version is already shipping to
+users, he said; it is too late to demand such changes now.
+<p>
+<h4>Possible solutions</h4>
+<p>
+The purpose of the famfs user-space component is to determine where the
+extents of a given file have been placed in memory and to inform the kernel
+of those placements.  The BPF alternative would work similarly, with user
+space providing that information in a filesystem-independent way; the BPF
+program would then provide the filesystem-specific interpretation for the
+rest of the kernel.  One possibility, for example, could be for user space
+to store the extent information in either a BPF map or an <a
+href="/Articles/961941/">arena</a>.
+<p>
+Various attempts at a solution along these lines exist already.  As Darrick
+Wong <a href="/ml/all/20260414185740.GA604658@frogsfrogsfrogs">pointed
+out</a> in the discussion, he had <a
+href="/ml/linux-fsdevel/177188736765.3938194.6770791688236041940.stgit@frogsfrogsfrogs/">posted
+one such</a> in February, based loosely on Koong's work.  In short, it
+provides access to the kernel's <a
+href="https://docs.kernel.org/filesystems/iomap/">iomap</a> layer, with BPF
+hooks to help FUSE filesystems complete the mappings.  Wong complained that
+he had not gotten any review responses, and expressed disappointment with
+the pace of reviews in the FUSE subsystem in general.  He <a
+href="/ml/all/20260414233631.GB604658@frogsfrogsfrogs">thought</a> that a
+BPF-based implementation could be upstreamed within two development cycles
+— if the relevant maintainers would accept it.  Whether that would happen,
+he suggested, is far from clear:
+<p>
+<blockquote class="bq">
+	The issues I was alluding to are BPF being used as a means to get
+	around slow/unresponsive maintainers; and the kernel community's
+	collective refusal to explore any other path to building new user
+	APIs besides designing everything generically perfectly up front in
+	the kernel UABI along with all the stress that involves.
+</blockquote>
+<p>
+Rather than trying to develop the perfect API from the beginning, he <a
+href="/ml/all/20260416224331.GD114184@frogsfrogsfrogs">later said</a>, the
+best approach might be to merge famfs in its current form, then experiment
+with alternative approaches afterward.  If the interface is carefully
+designed, it should be possible to move to a better one in the future,
+should one be found.  Others in the conversation also suggested
+that this might be the best way.  Christoph Hellwig, though, <a
+href="/ml/all/aeHrsIGagdmZJ1Fw@infradead.org">was strongly against that
+idea</a>, saying that the multitude of approaches under consideration
+showed that more thought needed to be put into designing a single
+interface.
+<p>
+Gregory Price, meanwhile, <a
+href="/ml/all/ad69tTnx5YkD4Y9K@gourry-fedora-PF4VCD3F">complained</a> that
+working software was being held back in favor of an unproven approach that
+might well offer worse performance; "<q>John is right to push back
+here</q>".  But he also suggested that the existing interface might, in
+fact, be more generic than it appears, and could be the basis for a
+longer-term solution as well:
+<p>
+<blockquote class="bq">
+	That said - I'm looking at fs/fuse/famfs.c and I'm asking myself
+	what in here is actually famfs-specific.  If you just s/FAMFS/DAX/g
+	- the file just reads like a simple DAX-iomap backend with optional
+	striping.
+<p>
+	Would it be reasonable to refactor the dax layer (and users) to
+	create an ops structure that becomes the basis for the BPF solution?
+</blockquote>
+<p>
+That led memory-management developer David Hildenbrand to <a
+href="/ml/all/f254f6fc-dc06-4612-82d7-35bb10dbd32e@kernel.org">ask</a>
+whether the BPF solution would be acceptable to the memory-management
+developers, a question that Groves <a
+href="/ml/all/aeUU8hMwPij2WvfF@groves.net">was also acutely interested
+in</a>.  If the answer is "no", Groves said, much of the discussion
+described here would be moot.  Meanwhile, he added, he had just received a
+prototype implementation from Price that could be interesting; Price then
+<a href="/ml/all/aeVy2MzucnrLlOQx@gourry-fedora-PF4VCD3F">described that
+solution</a>, which involves a BPF callback at file-open time to do the
+equivalent of the <tt>GET_FMAP</tt> call.
+<p>
+As of this writing, Groves is evaluating how well Price's prototype
+implementation will work.  It seems clear, though, that no conclusion will
+be reached in the email discussion.  The next LSFMM+BPF meeting, as it
+happens, is the first week in May.  That will be the perfect opportunity to
+lock the filesystem, memory-management, and BPF developers into the same
+room and deprive them of beer until they come up with a solution that all
+can live with.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Filesystems</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/famfs</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1068686/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1069364"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The other fam</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2026 14:17 UTC (Thu)
+                               by <b>phlogistonjohn</b> (subscriber, #81085)
+                              [<a href="/Articles/1069364/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="phlogistonjohn" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069364" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I had to look up the background on the name - this fam has nothing to do with ye olde File Alteration Monitor (FAM) but rather is a Fabric Attached Memory FS.  Gotta love TLAs :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069364/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No Beer?!?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2026 14:29 UTC (Thu)
+                               by <b>archaic</b> (subscriber, #111970)
+                              [<a href="/Articles/1069367/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="archaic" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069367" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is sometimes amazing what beer deprivation can accomplish. :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069422"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Feels soul destroying</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2026 23:31 UTC (Thu)
+                               by <b>azumanga</b> (subscriber, #90158)
+                              [<a href="/Articles/1069422/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="azumanga" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069422" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Years ago I got a similar thing in gcc, me and one bunch of devs discussed an idea, I went away, polished, tested, then when it came to merge time someone else popped up and said the whole thing was a bad is and I should have done it all a different way.<br>
+<p>
+People get to disagree of course, but it’s very depressing, you feel like you are wasting time you aren’t even getting paid for. I had previously made dozens of gcc patches and I never made another significant one after that again. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069422/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069428"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Without beer?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2026 4:21 UTC (Fri)
+                               by <b>felixfix</b> (subscriber, #242)
+                              [<a href="/Articles/1069428/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="felixfix" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069428" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Surely that would be a crime against humanity.  I suggest an alternative: lock them up with nothing but beer, and no bathroom breaks.  If you're going to commit a crime against humanity, may as well go whole hog.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069428/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069647"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">mmap and page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2026 17:21 UTC (Sat)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/1069647/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="dankamongmen" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069647" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"access this data by mapping it directly into its address space with mmap(), so that the data is all immediately accessible without system calls, and without going through the system's page cache"<br>
+<p>
+mmap(2) does not bypass the page cache as far as i'm aware.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069647/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069650"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">mmap and page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2026 19:08 UTC (Sat)
+                               by <b>gmprice</b> (subscriber, #167884)
+                              [<a href="/Articles/1069650/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gmprice" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069650" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+O_DIRECT will bypass the page cache, but it's irrelevant - FAMFS is read-only.  So mmap will map the page cache page if not mapped O_DIRECT<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069650/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069655"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">mmap and page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2026 22:59 UTC (Sat)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/1069655/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069655" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Bypassing the page cache is because it uses DAX to map CXL memory directly into user space. That is, all of the storage is addressable on these machines as memory already, so there's no need to copy it into other memory, but you want a filesystem to organize it and provide permissions for getting these pages into user space page tables. It wouldn't bypass the page cache if it was backed by a block device.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069655/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069660"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">mmap and page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2026 4:07 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1069660/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069660" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      As noted by others, it's not <tt>mmap()</tt> itself that bypasses the page cache, it's the use of DAX within famfs that brings that about.  Sorry, I sort of left out a step there.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069660/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1069696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">mmap and page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2026 13:49 UTC (Sun)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/1069696/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Paf" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069696" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It depends what you mean by bypass.  Once the memory has been faulted in, it isn’t required to make the trip through the page cache code to access it.  It is stored in the page cache and must be faulted into the userspace memory(and read from storage).  But after that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069704"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">mmap and page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2026 18:28 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1069704/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069704" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      No, the whole point of famfs is that the data is already in memory, so copying it into the page cache would only be a waste. It bypasses the page cache entirely.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069704/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1069686"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2026 9:20 UTC (Sun)
+                               by <b>j0057</b> (subscriber, #143939)
+                              [<a href="/Articles/1069686/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="j0057" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069686" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      I think the index entry should be <code>s/BFP/BPF/</code>.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069686/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1069691"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2026 11:45 UTC (Sun)
+                               by <b>jzb</b> (editor, #7867)
+                              [<a href="/Articles/1069691/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jzb" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1069691" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Fixed. However, as it says just above the comment box, we ask that people email us about typos rather than leaving it as a comment. Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1069691/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1070449"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">My two cents... </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 29, 2026 19:36 UTC (Wed)
+                               by <b>Heretic_Blacksheep</b> (guest, #169992)
+                              [<a href="/Articles/1070449/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Heretic_Blacksheep" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1070449" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+They should also be considering that many shops that otherwise might want to use famfs won't because they have security concerns about the eBPF subsystem in Linux.  <br>
+<p>
+I'm also having a problem with the gatekeeping and moving goal posts going on in with the kernel maintainers.  There are Arm architecture maintainers on record *refusing* to allow merging of ARM64 CPU features that enable more performant AMD64 emulation as if the kernel is their pet project and not the efforts of thousands and at the service of many millions.  The shifting goal posts for famfs is just evidence of more of the same.  It's one thing when projects refuse to play by the rules. It's quite another when outsiders engage in good faith then repeatedly get shot down because multiple people have too much veto power in personal fifedoms.  You end up like the Polish government back in the day where nothing could get done that didn't cater to the most powerful of the barons who could marshal or browbeat the others from using their veto or just did what they wanted to because no one else could marshal an objection to fait accompli.<br>
+<p>
+Has anyone done an analysis of how many lines of patches that go into the various distro maintained kernels that aren't/won't get upstreamed, and how many were refused by 'official' subsystem maintainers?  Sometimes they do have legit reasons to block some patch sets, but the real question is how many were blocked for specious reasons like the Arm compatibility patches were.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070449/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1070952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Famfs is not read only, but some use cases are</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2026 15:02 UTC (Sun)
+                               by <b>jagalactic</b> (subscriber, #74260)
+                              [<a href="/Articles/1070952/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jagalactic" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1070952" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+John Groves here, the author of famfs.<br>
+<p>
+I'm not sure why, but it's a common misconception that famfs is read only. That is not true. <br>
+<p>
+The reality is more complicated. The relationship of a file to its memory is fixed for the life of a file system (i.e. until you wipe it with a new mkfs.famfs). But the data in files can be writable from any node that can see a file. But if you do that, you are responsible for maintaining coherency for whatever it is that you're doing. (Famfs maintains coherency for its own metadata, but users are responsible for coherency of data in files.) <br>
+<p>
+If you use mmap(...MAP_SHARED) on conventional memory, you have the same problem and need  to use barriers/atomics/etc. to get things right. But conventional shared memory is "hardware cache coherent". Disaggregated shared memory makes those problems worse, but not impossible. <br>
+<p>
+Because the coherency stuff is complicated, I have been encouraging use cases that are primarily "publish and share" because those don't have any cache-coherency gotchas. Dump a bunch of humongous data sets into famfs files, mount the shared memory file system on multiple nodes, and run analytics on it.<br>
+<p>
+It's not the only thing that's possible, but there are actually good use cases that do this - and those can move onto famfs and use shared memory without heavy lifting. I expect some of those use cases to migrate to shared memory clusters with famfs from very expensive purpose-built architectures.<br>
+<p>
+If the data is huge, the common techniques we have are sharding or demand-paging - both of which suck, but there are cases where each works pretty well. If you have 100TB of data that needs un-sharded in-memory performance, you can order an appliance with that much memory and dump your data into it in famfs. If you're not mutating in place, apps can use the files in famfs without even knowing it's special. <br>
+<p>
+But you can't use famfs as a general purpose file system, for reasons I'll avoid ratholing on here (but they are very much covered in my many talks on YouTube, our recent IEEE paper "No Atomics, No Problem..." etc.<br>
+<p>
+(PS: I will be keeping my beer with me in my backpack during LSFMM :D)<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Famfs is not read only, but some use cases are</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2026 15:19 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1070953/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1070953" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The article pretty carefully did <i>not</i> say that famfs is read-only...did a mistake slip in there somewhere?
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070955"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Famfs is not read only, but some use cases are</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2026 15:39 UTC (Sun)
+                               by <b>jagalactic</b> (subscriber, #74260)
+                              [<a href="/Articles/1070955/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jagalactic" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1070955" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sorry, no Jon! What you wrote is great.<br>
+<p>
+Gregory Price said famfs is read-only in the comments, and there have been other publications that got that wrong!<br>
+<p>
+I appreciate your coverage of this!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070955/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Famfs is not read only, but some use cases are</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2026 23:23 UTC (Sun)
+                               by <b>gmprice</b> (subscriber, #167884)
+                              [<a href="/Articles/1070972/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gmprice" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1070972" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure, apologies, I should have been a bit more nuanced in the sense that in it's current form it's append only (no delete without heroics, no mutations in place).<br>
+<p>
+Which from the perspective of a workload mounting the system (as not the master) - the files which appear in the log are read-only.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1070991"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Famfs is not read only, but some use cases are</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2026 7:09 UTC (Mon)
+                               by <b>gmprice</b> (subscriber, #167884)
+                              [<a href="/Articles/1070991/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gmprice" />
+                <input type="hidden" name="return" value="/Articles/1068686/#CommAnchor1070991" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Self-correction:  my info here was predicated on an earlier version of famfs.   After talking with John, it's become apparent that the filesystem has evolved and in fact does not dictate this read-only nature anymore.<br>
+<p>
+Sorry for the confusion.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1070991/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

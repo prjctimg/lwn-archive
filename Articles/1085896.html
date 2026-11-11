@@ -1,0 +1,396 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Examining other network namespaces using BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Examining other network namespaces using BPF">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Jordan Rife's work involves writing BPF programs for  Cilium that interface with  Kubernetes n [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1086135/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Examining other network namespaces using BPF</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>August 5, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+<p>
+Jordan Rife's work involves writing BPF programs for
+<a href="https://cilium.io/">
+Cilium</a> that interface with
+<a href="https://kubernetes.io/">
+Kubernetes</a>
+networking. As part of that work, he wants to enable BPF programs with
+appropriate permissions to iterate through the sockets of a different network
+namespace. He led a session about the idea at the 2026
+<a href="https://events.linuxfoundation.org/lsfmmbpf/">
+Linux Storage,
+Filesystem, Memory-Management, and BPF Summit</a> where the BPF developers in
+attendance were quick to suggest a number of related alternatives.
+</p>
+
+<p>
+Socket-lb is a Cilium feature that uses the hooks for sockets associated with a
+given control group to balance connections across remote servers, while avoiding the
+per-packet overhead of network-address translation (NAT). In a setup that does not
+use socket-lb, a
+client might make a request to a frontend server that then uses NAT to route the
+connection transparently to a chosen backend server. Socket-lb improves on this
+by having the routing happen directly on the client device, still transparently
+to user space, but avoiding the extra network hop implied by NAT.
+In practice, socket-lb has some
+limitations, Rife said. If a selected backend goes away, for example, traffic
+will continue to be directed at that non-existent backend until Cilium cleans
+things up. Today, the software does that by using BPF iterators to walk through
+the available sockets and destroy them if needed.
+</p>
+
+<p>
+That works, but only within a specific network namespace, since the namespaces
+are isolated from one another and cannot see each other's sockets. In practice,
+this means that Cilium's user-space component must enter the namespace of each
+Kubernetes pod running on the host, scan its sockets, and then exit the
+namespace and move on to the next one. This adds significant overhead to the whole
+process that isn't really needed, since Cilium has administrative access to all of
+the network namespaces anyway.
+</p>
+
+<p>
+Worse, sockets aren't sorted by network namespace in the kernel, so
+every time Cilium's BPF program does its scan, it has to walk
+the entire hash table of sockets; the kernel filters sockets from
+other network namespaces before the BPF program sees them. So, Cilium ends up walking the
+list of every socket in the system once for each network namespace, which is
+inefficient. In his work, Rife said he had seen as many as 256 namespaces per computer.
+</p>
+
+<p>
+His proposed solution is simple: create a new iterator, usable by BPF programs
+with appropriate privileges, that iterates through all of the sockets on the system
+at once, even those from foreign namespaces. That way, Cilium would not need to
+change network namespaces at all; it could simply use a BPF program to
+periodically scan the whole system for stale socket-lb sockets.
+</p>
+
+<p>
+Jakub Sitnicki asked why Rife didn't keep a list of which sockets correspond to
+which backend directly, and then use those. BPF programs can store pointers to
+socket objects in
+<a href="https://www.kernel.org/doc/html/latest/bpf/map_sockmap.html">
+socket maps</a>, which can be used to store
+weak references (pointers that don't increment the socket's reference count, and
+therefore don't prevent it from being closed). So, such a scheme
+wouldn't keep sockets alive after their natural deaths, he noted. Rife
+did try that in 2025, but making it work was more complicated than
+it really should have been. In current kernels, BPF programs cannot destroy
+sockets from the context of an iterator over a socket map, because they would
+need to acquire the socket's lock. Fixing that requires rewriting a bunch of
+locking logic around access to sockets.
+</p>
+
+<p>
+One workaround would be to add a sleepable variant of
+<a href="https://elixir.bootlin.com/linux/v7.2-rc5/source/net/core/filter.c#L12653">
+<tt>bpf_sock_destroy()</tt></a>
+that would acquire the socket lock itself, which Martin Lau had suggested to
+him, he said. Ultimately, Rife had abandoned the idea, but he could come back to
+it if the whole-machine iterator he was proposing wasn't acceptable. Sitnicki
+wanted to know why the socket map iterator wasn't sleepable in the first place.
+Rife didn't know, although he speculated that there might be some challenges
+around the interaction of RCU and the socket lock. Lau clarified that many BPF
+iterators are sleepable, it is just the socket map in particular that has this problem.
+</p>
+
+<p>
+One of Rife's colleagues is working on tracking metadata for all sockets in a
+separate map, and that might also be a workaround. Yet another
+approach would be to make <tt>bpf_sock_destroy()</tt> itself work from the context
+of a socket map iterator, Rife said. That's hard to do without adding a reference count,
+and therefore some memory overhead, or changing the semantics of the iterator.
+But allowing
+sufficiently privileged BPF programs to iterate over all network namespaces is a
+much simpler solution all around, he thought.
+</p>
+
+<p>
+Daniel Borkmann mentioned that the BPF maintainers had discussed adding an
+iterator over network namespaces; perhaps references from that iterator could be
+passed to the socket map iterator as a trusted input, he suggested, which would
+let the existing socket map iterator work without requiring Cilium's user-space
+component to change network namespaces. Rife pointed out that would still end up
+walking all of the sockets on the machine multiple times, it would just do it from
+entirely within the kernel.
+</p>
+
+<p>
+Sitnicki and Lau had a brief side conversation about how the current code finds network
+namespace references, and potential improvements there. Rife agreed to look into
+it, and consult the networking maintainers, but observed that it still wouldn't
+solve his efficiency problem.
+</p>
+
+<p>
+John Fastabend noted that Cilium caches raw socket pointers in several places, because
+BPF socket maps are not expandable, "<q>which is obnoxious.</q>" Pointers to sockets stored
+in BPF socket maps are automatically cleaned up when the socket is destroyed;
+socket pointers stored as opaque values in a BPF arena are much more convenient
+to store for tracking purposes, but aren't automatically cleaned up and can't be
+dereferenced. Sitnicki pointed out that storing socket pointers in BPF arenas
+wouldn't work well for
+Rife's use case. Fastabend replied that it doesn't work well for him either, but
+there are lots of reasons to want to stash sockets somewhere more flexible. He
+suggested changing BPF socket maps to be resizeable.
+</p>
+
+<p>
+It would be nice to be able to mount sockfs (a virtual filesystem that allows
+users to manage sockets, including permissions, using the filesystem API)
+and pin sockets that way, Sitnicki
+remarked. That would avoid the need for BPF maps entirely. Lau commented that
+someone had a patch in progress that does something tangentially related to
+that, but still thought that being able to iterate over everything, as Rife
+proposed, would be useful.
+</p>
+
+<p>
+Sitnicki asked whether Rife had considered obtaining a duplicate file descriptor
+for the UDP socket backend processes that might go away, holding onto them in a
+daemon, and using those references to clean them up when needed. Rife explained
+that he'd like to do the whole thing from BPF. Fastabend wanted to know whether
+this was also a problem for TCP sockets. Borkmann explained that the normal TCP
+reset mechanism would take care of things, but only after a long-enough timeout
+that some customers preferred the faster failover provided by socket-lb, so it
+was used for both UDP and TCP.
+</p>
+
+<p>
+At that point the session devolved into a discussion about what other
+applications could potentially use a resizeable socket map, before running out
+of time. Despite the many alternatives the assembled developers raised to Rife's
+idea, none seemed hostile to it, just interested in painting the bikeshed a
+different color. As of the beginning of August, there is not yet any accepted solution to
+Rife's problem.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Networking</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1085896/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1087617"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Iterating every network namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 7, 2026 8:41 UTC (Fri)
+                               by <b>martinetd</b> (subscriber, #175633)
+                              [<a href="/Articles/1087617/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="martinetd" />
+                <input type="hidden" name="return" value="/Articles/1085896/#CommAnchor1087617" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not even sure how to iterate over all network namespaces in a general way in the first place (that's probably not a problem for k8s because they know container namespaces they created)<br>
+<p>
+For systemd-tmpfiles ( <a href="https://github.com/systemd/systemd/issues/42771">https://github.com/systemd/systemd/issues/42771</a> ), I'd have wanted to check /proc/net/unix for every namespaces to check paths used by unix sockets in all namespaces, but couldn't find any clean way to do that: it'd require looking at every /proc/*/ns/net for anonymous namespaces created by e.g. bwrap --unshare-net (and technically also /run/netns &amp; /run/user/*/netns (which is actually based on XDG_RUNTIME_DIR and cannot be guessed) for namespaces created which wouldn't have any live process in them, but in that case there can't be any live unix socket listening so it doesn't really matter)<br>
+<p>
+It'd be great to have more observability of other namespaces<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087617/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Iterating every network namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 8, 2026 13:23 UTC (Sat)
+                               by <b>grmnsftphr</b> (subscriber, #178591)
+                              [<a href="/Articles/1087874/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="grmnsftphr" />
+                <input type="hidden" name="return" value="/Articles/1085896/#CommAnchor1087874" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To my knowledge the only eBPF methods at this time is the process/task iterator that landed somewhere around 6.6ish or so. In the end that's the eBPF equivalent of your procfs/nsfs scanning and it uses CO-RE pointer chasing from the process struct. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1087893"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Iterating every network namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2026 6:02 UTC (Sun)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/1087893/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="donald.buczek" />
+                <input type="hidden" name="return" value="/Articles/1085896/#CommAnchor1087893" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <blockquote class="bq"><p>looking at every /proc/*/ns/net</p>
+</blockquote>
+<p>Out of curiosity: While this would be complete in a static system and in reality most of the time, it is not guaranteed to be complete when processes are created and exit while you walk that tree and there is no way around that problem, correct?</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087893/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1087894"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Iterating every network namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2026 6:28 UTC (Sun)
+                               by <b>martinetd</b> (subscriber, #175633)
+                              [<a href="/Articles/1087894/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="martinetd" />
+                <input type="hidden" name="return" value="/Articles/1085896/#CommAnchor1087894" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, but that's already a problem parsing /proc/net/unix if you go around killing/starting processes involved here. For example if you parse the file while the server is restarting it's possible to miss it<br>
+<p>
+But to be honest I think that's besides the point: even if we had a better iterator than /proc/*/ns/net I doubt systemd maintainers would accept "enter every namespace and check their /proc/net/unix" as a solution (I certainly wouldn't)<br>
+<p>
+Ideally rather than iterating over every namespace, what would be useful would be to have a flag in statx() to inspect the socket, or something to probe the socket file directly (someone offered a PR that'd try to connect(), but that's disruptive and could have side effects, we don't want to bother the server process)<br>
+<p>
+Anyway, it's a rather niche problem and I expect it'll stay that way for a while unless someone actually starts caring - it's much less effort to work around the problem at this point...!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087894/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1087902"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Iterating every network namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2026 13:42 UTC (Sun)
+                               by <b>IAmLiterallyABee</b> (subscriber, #144892)
+                              [<a href="/Articles/1087902/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="IAmLiterallyABee" />
+                <input type="hidden" name="return" value="/Articles/1085896/#CommAnchor1087902" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>listns(2) was added in 6.19, I believe that should do the trick.</p>
+<p>[LWN article] (https://lwn.net/Articles/1043824/)</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1087902/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,151 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Cpusets and memory policies [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Cpusets and memory policies">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="'Cpusets' are a Linux kernel mechanism that enables control over which processors a given proce [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/717387/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Cpusets and memory policies</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 22, 2017</br>
+           <hr>
+<a href="/Articles/lsfmm2017">LSFMM 2017</a>
+</div>
+"Cpusets" are a Linux kernel mechanism that enables control over which
+processors a given process is allowed to run on.  The memory policy (or
+"mempolicy") mechanism, instead, gives control over how a process's memory
+is allocated across the nodes of a NUMA system.  As Vlastimil Babka
+explained during the memory-management track of the 2017 Linux Storage,
+Filesystem, and Memory-Management Summit, these two mechanisms do not
+always play well together, with some surprising and unfortunate
+consequences.
+<p>
+Cpusets are an administrator-controlled mechanism; unprivileged processes
+cannot normally change their CPU assignments.  Mempolicies, instead, are
+under the control of the processes themselves.  If both mechanisms are used
+together, one might logically expect that memory would be allocated on the
+set of nodes defined by the intersection of the cpuset and the mempolicy.
+If that intersection is empty, "then there is space for creativity".
+But that is not what actually happens.
+<p>
+Babka put up <a href="/Articles/717801/">a pair of slides</a> showing what
+can happen.  Imagine a process running on a four-node system; initially
+both the cpuset and the mempolicy are set to nodes zero and one.  In this
+case, memory will be allocated from either of those two nodes, as one might
+expect.  If the cpuset is changed to nodes one and two, the memory
+allocations will follow to those two nodes.  But, if the cpuset is first
+reduced to a single node (node two in the example), then restored to the
+original zero and one, the result will be allocations from node zero only;
+the kernel will have lost track of the fact that the mempolicy called for
+both nodes to be used.
+<p>
+This problem was understood and addressed in the 2.6.26 kernel through the
+addition of a couple of flags to <a
+href="http://man7.org/linux/man-pages/man2/set_mempolicy.2.html">the
+<tt>set_mempolicy()</tt> system call</a>.  If the process sets its
+mempolicy with the <tt>MPOL_F_STATIC_NODES</tt> flag, that policy will not
+change when the cpuset is changed.  <tt>MPOL_F_RELATIVE_NODES</tt>,
+instead, causes the policy to move along with cpuset changes while
+remembering the original policy, so it will never exhibit the single-node
+allocation behavior described above.
+<p>
+What happens if there is no intersection between the cpuset and the
+mempolicy, as can happen, especially, with <tt>MPOL_F_STATIC_NODES</tt>?
+The answer is that it will allocate memory from the cpuset nodes.  Kirill
+Shutemov suggested that perhaps allocations should fail instead in that
+circumstance, but that was deemed to be unfriendly behavior and an ABI
+break as well.  It is better to allocate memory on the wrong node than to
+kill an otherwise working program, especially if that program did work on
+older kernels.  
+In general, it was agreed, the <tt>set_mempolicy()</tt>
+interface is broken, but it is going to be hard to fix now.
+<p>
+One serious problem with the current implementation is its behavior when
+the cpuset is being changed, forcing the mempolicy to be changed as well.
+There is a 
+period of time during that change when an empty node list
+causes the kernel to conclude that it is out of memory.  That can lead to
+spurious invocations of the out-of-memory killer, an outcome that tends to
+get a cold reception in the user community.
+<p>
+Fixing that problem seems necessary and urgent.  The mempolicy updates
+associated with cpuset changes have to be maintained, since the alternative
+is an ABI break.  For the static case, the solution is straightforward,
+since the set of nodes will not change.  In the relative case, instead, the
+remapping will need to be done on the fly; it is a solvable problem but the
+solution looks complex.  There may be no workable fix for the default case.
+<p>
+The discussion focused on the details of how a fix might work for the
+remainder of the session.  It may involve moving the list of allowed memory
+zones back into the cpuset itself, which is how mempolicies were once
+implemented many years ago.  The plan, as is so often the case, is to wait
+for a patch to appear and see how the solution looks at that time.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Cpusets</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2017</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/717797/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

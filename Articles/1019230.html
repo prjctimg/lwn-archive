@@ -1,0 +1,786 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Custom out-of-memory killers in BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Custom out-of-memory killers in BPF">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The out-of-memory (OOM) killer has long been a scary and controversial part of the Linux kernel [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1019558/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Custom out-of-memory killers in BPF</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 1, 2025</br>
+           </div>
+The out-of-memory (OOM) killer has long been a scary and controversial part
+of the Linux kernel.  It is summoned from some dark place when the system
+as a whole (or, more recently, any given control group) is running so low
+on memory that further allocations are not possible; its job is to kill off
+processes until a sufficient amount of memory has been freed.  Roman
+Gushchin has found a way to make the OOM killer even scarier: adding the
+ability to <a
+href="/ml/all/20250428033617.3797686-1-roman.gushchin@linux.dev">load
+custom OOM killers in BPF</a>.
+<p>
+The kernel, in its default configuration, will overcommit the memory
+available on the system; it will allow processes to allocate more memory
+than can be provided (that is, more than the sum of physical memory and
+swap space).  Applications routinely allocate more memory than they use;
+limiting allocations to the available memory would, as a result, cause some
+of that memory to be unused.  Overcommitting memory avoids that waste, and
+it <i>almost</i> always works out in the end.
+<p>
+The rare occasion where it doesn't work out is reminiscent of the (not even
+remotely rare enough) situation where an airline overbooks the seats on a
+flight.  When too many passengers actually show up, some unlucky person
+will lose their seat.  In the Linux world, instead, some process loses its
+memory — and, with it, the ability to run at all.  The kernel is not able
+to broadcast a request for volunteers to be killed, though, so the OOM
+killer has to apply a set of heuristics in an attempt to find the victim
+that will free the most memory while minimizing user anguish.
+<p>
+Unsurprisingly, the choices made by the OOM killer often align poorly with
+the decisions the human(s) using the computer would have made.  The kernel
+provides a set of knobs to help tune the heuristics, essentially by
+allowing some processes to volunteer (or be volunteered) to be the first
+OOM-killer targets.  In recent years, as well, there has been a lot of
+effort that has gone into user-space OOM killers; these include tools like
+<a href="https://facebookmicrosites.github.io/oomd/">oomd</a>, <a
+href="https://www.freedesktop.org/software/systemd/man/latest/systemd-oomd.service.html">systemd-oomd</a>,
+and the <a href="https://source.android.com/docs/core/perf/lmkd">Android
+lmkd</a>.
+<p>
+User-space OOM killers have some fundamental problems, though.  Since they
+run in user space, they will necessarily be slower than the kernel to
+respond to a low-memory situation, which is a problem that urgently requires
+a solution.  Running the user-space OOM killer may, itself, require
+allocating memory at the worst possible time.  User-space killers may also
+lack useful information about the state of the system that may be available
+within the kernel.  While OOM killers running in user space can make use of
+information about the specific workload running on the system, leading to
+better decisions, they can fall short in other ways.
+<p>
+Gushchin's series aims to address these problems by providing two hooks for
+BPF programs to implement the OOM-handling task, enabling OOM killers
+that benefit from user-space control while running inside the kernel.  The
+first of these hooks (even though it comes second in the series) is a hook
+that is called in response to events from the <a
+href="https://docs.kernel.org/accounting/psi.html">pressure stall
+information (PSI) subsystem</a>:
+<p>
+<pre>
+   int bpf_handle_psi_event(struct psi_trigger *t);
+</pre>
+<p>
+A program that attaches to this hook will be invoked whenever a PSI event
+triggers, indicating that a threshold has been exceeded and that memory
+pressure is causing the workload to slow down.  That program can
+use the PSI information, along with anything else it might have at hand, to
+come to its own conclusion about the state of the system.  Should the
+judgment be that the time has come to push the panic button, this program
+can declare an OOM event with a new kfunc:
+<p>
+<pre>
+    int bpf_out_of_memory(struct mem_cgroup *memcg, int order);
+</pre>
+<p>
+The <tt>memcg</tt> parameter, if non-NULL, limits the OOM event to the
+given memory control group; <tt>order</tt> describes the order of the
+allocation being attempted — which is not entirely applicable in this
+situation, since memory is not actually being allocated.  This call will
+summon the OOM killer to deal with the problem.
+<p>
+It is worth noting that the kernel is only able to handle one OOM event at
+a time; if one control group is on fire, the kernel cannot respond to OOM
+situations in any others.  In that case, <tt>bpf_out_of_memory()</tt> will
+return <tt>-EBUSY</tt>.
+<p>
+The other new hook comes into play once the OOM apocalypse has struck:
+<p>
+<pre>
+    int bpf_handle_out_of_memory(struct oom_control *oc);
+</pre>
+<p>
+This function, which will be called to answer the invocation of the OOM
+killer, should do something to address the OOM situation, returning a
+non-zero value if it succeeds in freeing some memory.  The kernel checks
+after the BPF program runs to be sure that memory was <i>really</i> freed;
+it does not just take the program's word for it.  If the BPF program is
+unable to free memory, the normal kernel OOM killer will step in to try to
+get the job done properly.
+<p>
+Since "do something" likely involves killing processes, the series provides
+a handy new kfunc to do just that:
+<p>
+<pre>
+    int bpf_oom_kill_process(struct oom_control *oc, struct task_struct *task,
+			     const char *message);
+</pre>
+<p>
+This function will bring about the untimely demise of the process indicated
+by <tt>task</tt>, updating <tt>oc</tt> to indicate whether memory was
+successfully freed.  It is worth noting that
+<tt>bpf_oom_kill_process()</tt> is made available to all BPF programs
+of the tracing type, which normally are not in the business of killing
+processes. 
+There is another new kfunc,
+<tt>bpf_get_root_mem_cgroup()</tt>, that can be used to get the root of
+the control-group hierarchy.  The OOM-killer program can then traverse that
+hierarchy in search of the best victim.
+<p>
+Of course, the OOM-killer program could also take other actions to address
+the memory problem.  Gushchin suggests deleting tmpfs files as one example.
+Or, depending on the application being run, the program could request that
+memory be freed in some other way that does not involve killing off
+processes.
+<p>
+This is an RFC patch set that is not intended to be applied in its current
+form.  As of this writing, there have been few comments.  Michal Hocko <a
+href="/ml/all/aBC7E487qDSDTdBH@tiehlicka">suggested</a> that it might make
+sense splitting <tt>bpf_handle_out_of_memory()</tt> to handle the different
+cases (global, control group, or CPUset) cases separately; he also asked
+whether real OOM handlers have been implemented with this infrastructure. 
+<p>
+It seems likely that the prospect of giving BPF programs the ability to run
+around and kill processes will make some people uncomfortable.  Of course,
+the OOM killer <i>always</i> makes people uncomfortable.  But, as long as
+this creature must exist, it may be best if it runs within the kernel.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Memory management</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Out-of-memory handling</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1019230/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1019659"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2025 14:27 UTC (Thu)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1019659/">Link</a>] (9 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019659" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+.. where you could overcommit memory, but only up to the total of the swap space and real memory.<br>
+<p>
+The reasoning was that swap was slow, but large. The equivalent of cgroups allowed the offending programs to be slowed, limiting the amount of real memory they used and therefor forcing them to swap.  That allowed the memory-hogs to be penalised for their excessive use of memory, and freed memory, and indirectly CPU, for the other program on the system.<br>
+<p>
+These days, flash disks aren't all that slow. Is it time to think about different mitigations, knowing that "disk" is still large, but not slow.<br>
+<p>
+As an example, in theory, we could use the cgroup primitives with the eBPF oom-detector to penalise just the memory hogs. Is that possible with the current eBPF and cgroups-v2?<br>
+<p>
+--dave (unix greybeard) c-b<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019659/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019668"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2025 15:27 UTC (Thu)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1019668/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ballombe" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019668" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can go back to olden times by issuing<br>
+echo 2 &gt; /proc/sys/vm/overcommit_memory<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019668/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019673"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2025 16:08 UTC (Thu)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1019673/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019673" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yup! I did that on certain production machines I manged in the past.<br>
+<p>
+Mind you, I think an oom-killer is a strange but sometimes good idea. I was looking for possible better algorithms.<br>
+Solaris, for example, had a mechanism to cap rss for a process. If it exceeded that, it had to page.<br>
+<p>
+That was one part of a general solution. That particular scheme assumed you knew how much rss to allocate to a program. Sometimes true, sometimes not (:-)) <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019673/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2025 12:49 UTC (Fri)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/1019837/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Sesse" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019837" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can set LimitRSS= on a systemd service (which uses cgroups to this effect).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019902"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2025 20:58 UTC (Fri)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1019902/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019902" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed: if I wanted the limited Solaris functionally, I'd set MemoryHigh=bytes, as per <br>
+<a href="https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files">https://docs.kernel.org/admin-guide/cgroup-v2.html#memory...</a><br>
+<p>
+Now, how can we improve on that with eBPF? (Hint: I mentioned Teamquest earlier)<br>
+<p>
+--dave<br>
+<p>
+<p>
+(When I last looked, LimitRSS wasn't implemented on Linux. Also, the ulimit/LimitXXX mechanism is the one that causes the system to return SIGSEGV/EMFILE/EFBIG/SIGXCPU/EAGAIN errors, rather than making it page.<br>
+<p>
+The MemoryXXX functions are<br>
+- MemoryMin=bytes, the amount of memory you’re guaranteed. If your usage is below this, you won’t be reclaimed/paged.<br>
+- MemoryHigh=bytes, the point at which the system starts penalising the process. If you exceed this, your process will be throttled and memory reclaimed, to avoid it being oom-killed.<br>
+ - MemoryMax=bytes, the limit. If your process exceeds this, the oom-killer will be called.)<br>
+<p>
+ <br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019902/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1019713"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2025 22:18 UTC (Thu)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/1019713/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="ringerc" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019713" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Unless you're stuck on Kubernetes, where they're incredibly hostile to the concept of swap, and will just shout-chant "cattle not pets" and "stateless stateless stateless" at you.<br>
+<p>
+Ahem.<br>
+<p>
+In reality k8s has more recently gained some limited and somewhat crippled swap support. But it's rather limited, and because it's behind a feature flag it's impossible to rely on if you have to support cloud-provider hosted k8s environments.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019713/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1020158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2025 20:22 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1020158/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1020158" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Borg and k8s are designed for use with many identical pod-equivalents (pods in k8s, allocs in Borg) as a means of horizontal scaling, preferably under the control of some kind of automation. In order for this to work well, each pod-equivalent should have predictable performance behavior, and should not abruptly get much slower when it begins to swap. Otherwise, you could get into a vicious cycle:<br>
+<p>
+1. There is momentarily too much load. Let's assume for the sake of argument that physical RAM is the limiting resource.<br>
+2. Some of your pod-equivalents begin to swap due to (by assumption) a shortage of physical RAM. If the swapping is bad enough, their performance deteriorates considerably.<br>
+3. Automation notices that your performance is failing to keep up with demand, and spawns more pod-equivalents. It believes it has the resources to afford this operation, because more swap is still available and the binpacking algorithm believes the jobs will fit into that swap.<br>
+4. This is exactly the wrong thing to do. The problem is not that you lack pod-equivalents, the problem is that you lack physical RAM. Now you have more pod-equivalents competing for exactly the same amount of physical RAM. Each pod-equivalent probably has nonzero memory overhead, so this means less RAM is available for doing useful work, and overall swapping increases.<br>
+5. GOTO 3 until you run out of swap or a human takes over and kills the excess pod-equivalents.<br>
+<p>
+If you don't support swap, then this never happens, and instead the automation reports that it is unable to scale up due to a lack of physical resources. You can then have other automation (such as load-balancing or work planning) take appropriate steps at a global level (move work to another physical location, drop lower priority work, etc.), or wake up a human and have them somehow intervene.<br>
+<p>
+You might instead "support" swap, but somehow break it out as a separate resource dimension so that horizontal autoscaling does not engage in the above behavior. But swap is not a cleanly independent resource dimension - it is derived from the difference between the virtual memory allocation and the physical memory allocation. That means a human or *vertical* autoscaler cannot directly measure a pod-equivalent's swap and physical RAM demands separately, and instead needs to measure something like the page fault rate to get a complete picture. This is not impossible, but it's significantly more complex than just measuring memory usage, and is likely prone to misbehavior under the wrong conditions (some pod-equivalents will have a ton of page faults on startup, when reading data files, etc., and you have to filter out all of that noise).<br>
+<p>
+It should also be emphasized that most autoscaling implementations will assume that resource-related metrics are linear in demand. The highly nonlinear behavior of swapping presents a difficult engineering problem in its own right (even if you could solve all of the other engineering problems I have described above).<br>
+<p>
+<span class="QuotedText">&gt;  and will just shout-chant "cattle not pets" and "stateless stateless stateless" at you.</span><br>
+<p>
+You are, of course, under no obligation to architect your systems in this manner (cattle, not pets). But it seems strange to use a tool specifically intended for that use case, and then complain that nobody is interested in contorting it into serving some other purpose instead.<br>
+<p>
+Disclaimer: As a Google SRE, I work with Borg on a daily basis, but not so much with k8s. I've done my best to use the correct k8s terminology and concepts to get myself across. I am not specifically responsible for Borg itself, so it's likely that Borg SRE would explain this differently than I do.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1020158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1019731"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2025 2:36 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1019731/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Cyberax" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019731" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That doesn't actually turn off ALL the overcommit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019731/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1019815"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2025 8:50 UTC (Fri)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1019815/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019815" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem with that idea is that it is often not the largest user of memory that is at fault for physical memory running out, e.g. you might have a database server that legitimately uses 70% of your RAM and a webserver that legitimately uses 20% of RAM but some temporary process is the one that pushes you over the 100% threshold and then the database server is the most likely to get slowed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019815/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019827"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I'm from the back-times...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2025 10:19 UTC (Fri)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/1019827/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="davecb" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019827" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Excellent!<br>
+That's probably why Solaris makes you say what "normal" is (:-))<br>
+<p>
+Of course, I probably want a computer program to measure past usage and tell me that. TeamQuest did, but that was for capacity planning.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019827/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1019670"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Userspace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2025 15:47 UTC (Thu)
+                               by <b>danobi</b> (subscriber, #102249)
+                              [<a href="/Articles/1019670/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="danobi" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019670" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Since they run in user space, they will necessarily be slower than the kernel to respond to a low-memory situation, which is a problem that urgently requires a solution.</span><br>
+<p>
+Not necessarily - oomd and friends are designed to kick in before the kernel OOM killer by looking at PSI and other metrics. It's a bit of a layered design where we prefer the kernel OOM killer to not be invoked, but still existing as a backstop.<br>
+<p>
+<span class="QuotedText">&gt; Running the user-space OOM killer may, itself, require allocating memory at the worst possible time.</span><br>
+<p>
+I think memory.min can be used to reserve memory for these situations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019670/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1019700"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">test comment</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2025 19:40 UTC (Thu)
+                               by <b>nicothieb</b> (subscriber, #101285)
+                              [<a href="/Articles/1019700/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="nicothieb" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019700" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+test comment (sorry)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019700/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1019715"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would you have memory left to be able to initialzie the BPF script?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2025 22:28 UTC (Thu)
+                               by <b>atai</b> (subscriber, #10977)
+                              [<a href="/Articles/1019715/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="atai" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019715" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you cannot create the BPF runtime or load the BPF program because of out of memory condition, then what?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019715/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019743"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">would you have memory left to be able to initialzie the BPF script?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2025 5:05 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1019743/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="corbet" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019743" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The BPF OOM program would be loaded early on, so it would be present and ready when the crisis strikes.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019743/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1019878"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Walking towards BPF overdependency </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2025 14:06 UTC (Fri)
+                               by <b>karim</b> (subscriber, #114)
+                              [<a href="/Articles/1019878/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="karim" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019878" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It sort of feels like we're slowly getting into a situation where having a "fully functional system" won't be possible without having a whole library of BPF programs running at all times.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019878/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019941"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Walking towards BPF overdependency </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2025 20:22 UTC (Sat)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1019941/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="quotemstr" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019941" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So what? Functionality in eBPF is sandboxed; functionality outside it isn't. All things being equal, wouldn't we want more eBPF?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019941/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1019946"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Walking towards BPF overdependency </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2025 23:06 UTC (Sat)
+                               by <b>Jandar</b> (subscriber, #85683)
+                              [<a href="/Articles/1019946/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Jandar" />
+                <input type="hidden" name="return" value="/Articles/1019230/#CommAnchor1019946" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; All things being equal, wouldn't we want more eBPF?</span><br>
+<p>
+Only if an out of the box linux kernel is functional. Maybe a couple of necessary eBPF programs could be within the kernel sources and optionally exposed like the vsyscall memory segment or preloaded.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1019946/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

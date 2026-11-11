@@ -1,0 +1,279 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Control group namespaces [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Control group namespaces">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Containers in Linux use both control groups (cgroups) and namespaces to  isolate a set of proc [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/620192/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Control group namespaces</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>November 19, 2014</br>
+           </div>
+<p>
+Containers in Linux use both <a href="/Articles/604609/">control groups</a>
+(cgroups) and <a href="531114.html">namespaces</a> to 
+isolate a set of processes into a virtual system at the operating
+system level (as opposed to at the hardware level as with KVM).  But,
+currently, cgroups themselves are not virtualized. 
+That leads to a number of problems for container managers (e.g. LXC,
+Docker), since processes inside the containers can see the global cgroup
+landscape.  A recent 
+patch set seeks to fix those problems by creating a new namespace for cgroups.
+</p>
+
+<p>
+Aditya Kali <a href="/Articles/618873/">posted</a> v2 of the cgroup
+namespace patch set at the end of October.  It is based on Tejun
+Heo's <a href="601840.html">unified cgroup hierarchy</a> work and is
+meant to solve several
+problems for containers.
+For example, when a task consults the 
+<tt>/proc/self/cgroup</tt>
+file, it currently sees the full cgroup path from the global cgroup hierarchy,
+which leaks 
+information about the host system.  That information makes it difficult to
+do container migration across systems (using checkpoint/restore in user
+space, aka CRIU) since all of the names would need to be unique across all
+systems 
+so that there were 
+no collisions with names on the new system.  In addition, running container-management 
+tools inside of containers (to nest them) is difficult
+because the information available is not relative to the existing container.
+</p>
+
+<p>
+The basic idea in the patch set is that a process can call <tt>unshare()</tt>
+using the 
+<tt>CLONE_NEWCGROUP</tt> flag to enter a new cgroup namespace.  Once it
+does that, it will no longer see the global cgroup hierarchy, but will
+instead see itself in the root cgroup.  In the first patch, Kali described
+how that would look:
+<pre>
+    $ cat /proc/self/cgroup
+    0:cpuset,cpu,cpuacct,memory,devices,freezer,hugetlb:/batchjobs/c_job_id1
+
+    $ ~/unshare -c  # calls unshare(CLONE_NEWCGROUP) and exec’s /bin/bash
+
+    # From within new cgroupns, process sees that its in the root cgroup
+    [ns]$ cat /proc/self/cgroup
+    0:cpuset,cpu,cpuacct,memory,devices,freezer,hugetlb:/
+</pre>
+</p>
+
+<p>
+Similarly, <tt>/proc/&lt;PID&gt;/cgroup</tt> will return a path that is relative
+to the cgroup namespace root (known as cgroupns-root).
+In addition, mounting control group filesystem (cgroupfs) within the namespace
+would make cgroupns-root be the root of
+the mounted cgroupfs.  In effect, it would be like bind-mounting the
+cgroup namespace's subtree in cgroupfs (i.e. starting at cgroupns-root) at the
+mount point. 
+Currently, mounting cgroupfs exposes the full hierarchy of existing
+cgroups, which leaks unnecessary (and confusing) information.
+</p>
+
+<p>
+The main area of discussion on the patch set (and its <a
+href="/Articles/616099/">v1 predecessor</a>) has been about which processes
+can be moved into cgroup namespaces at various levels in the hierarchy
+(e.g. below, above, or into sibling hierarchies).  The original patches
+only allowed processes to be moved into namespaces below the root of the
+cgroupns they are in, but
+that was 
+deemed too restrictive (it could lead to a situation where the root user
+could not move a process to a particular namespace, for example).  The
+current patches allow 
+suitably privileged processes to move processes to any cgroup namespace in the
+hierarchy, though it does not do any implicit movement of the process into
+a different cgroup—that must be handled by the process doing the moving.  That can lead to relative paths in
+<tt>/proc/&lt;PID&gt;/cgroup</tt> depending on the namespace of the process
+looking and that of the PID in question:
+<pre>
+    # ns is at '/groups/a', PID 4567 is in a cgroupns at '/groups/b'
+    [ns]$ cat /proc/4567/cgroup
+    0:cpuset,cpu,cpuacct,memory,devices,freezer,hugetlb:/../b
+</pre>
+</p>
+
+<p>
+With those changes in place, container managers can treat nested containers
+the same as they do the top level.  Tools for container migration can also do
+their job without having to be concerned about name collisions on the new
+system. 
+
+<p>
+So far, the reception has been fairly positive.  There has been discussion
+about various aspects of the patch set, but no one seems to be putting the
+brakes on the idea.  In fact, namespaces developer Eric W. Biederman
+<a href="/Articles/621622/">noted</a> that the patch set "<q>definitely looks like the right direction to go, and something that
+in some form or another I had been asking for since cgroups were
+merged</q>".  There is certainly more work to do, but it would seem
+likely that a new namespace for cgroups is in the kernel's future.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Control groups</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Namespaces</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/621006/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor622247"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Control group namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2014 11:08 UTC (Thu)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/622247/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="smurf" />
+                <input type="hidden" name="return" value="/Articles/621006/#CommAnchor622247" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is that the last piece of the "container-ize Linux" puzzle, or what else is missing?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/622247/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor622256"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Control group namespaces</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2014 11:42 UTC (Thu)
+                               by <b>MrWim</b> (subscriber, #47432)
+                              [<a href="/Articles/622256/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="MrWim" />
+                <input type="hidden" name="return" value="/Articles/621006/#CommAnchor622256" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The two I can think of are <a href="http://lwn.net/Articles/564854/">device namespaces</a> and something for containerizing system time. 
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/622256/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor622723"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Control group managers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 22, 2014 13:35 UTC (Sat)
+                               by <b>lbt</b> (subscriber, #29672)
+                              [<a href="/Articles/622723/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="lbt" />
+                <input type="hidden" name="return" value="/Articles/621006/#CommAnchor622723" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So "container managers can treat nested containers the same as they do the top level"<br>
+<p>
+I'm not clear if this addresses the 'single cgroup manager' problem ?<br>
+<p>
+ie that lxc and systemd both expect to have control of the top-level cgroup and can't delegate to _different_ nested managers.<br>
+Meaning I can't run lxc containers on a systemd booted machine.<br>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/622723/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

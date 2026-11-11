@@ -1,0 +1,855 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Faster firewalls with bpfilter [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Faster firewalls with bpfilter">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" From servers in a data center to desktop computers, many devices communicating on a network wi [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1020449/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Faster firewalls with bpfilter</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="GAByline">
+           <p>May 14, 2025</p>
+           <p>This article was contributed by Quentin Deslandes</p>
+           </div>
+<p>
+From
+servers in a data center to desktop computers, many devices
+communicating on a network will eventually have to filter network
+traffic, whether it's for security or performance reasons. As a result,
+this is a domain where a lot of work is put into improving performance:
+a tiny performance improvement can have considerable gains.
+<a href="https://bpfilter.io/">
+Bpfilter</a> is a
+project that allows for packet filtering to easily be done with BPF, which can
+be faster than other mechanisms.
+</p>
+
+<p>
+<a href="https://en.wikipedia.org/wiki/Iptables">
+Iptables</a> was the standard packet-filtering solution for a long time,
+but has been slowly replaced by
+<a href="/Articles/867185/">
+nftables</a>. The iptables command-line tool communicates with the kernel
+by sending/receiving binary data using the
+<a href="https://man7.org/linux/man-pages/man2/setsockopt.2.html">
+<tt>setsockopt()</tt> and
+<tt>getsockopt()</tt></a> system calls. Then, for each network packet,
+iptables will compare the data in the packet to the matching criteria
+defined in a set of user-configurable rules.
+Nftables was implemented differently: the filtering rules are
+translated into
+<a href="https://netfilter.org/">
+Netfilter</a> bytecode that is loaded into the kernel. When a network
+packet is received, it is processed by running the bytecode in a
+dedicated virtual machine.
+</p>
+
+<p>
+Nftables was in turn supplanted in some areas by BPF: custom programs
+written in a subset of the C language, compiled and loaded into the
+kernel. BPF, as a packet-filtering solution, offers a lot of
+flexibility: BPF programs can have access to the raw packet data,
+allowing the packet to continue its path through the network
+stack, or not. This makes sense, since BPF was originally intended for packet filtering.
+</p>
+
+<p>
+Each tool described above tries to solve the same problem:
+fast and efficient network-traffic filtering and redirection. They all have their
+advantages and disadvantages. One generally would not write BPF-C to filter
+traffic on their laptop and trade the performance of BPF for the
+ease of use of iptables and nftables. In the professional world,
+though, it can be worth the effort to write the packet-filtering
+logic to get as much performance as possible out of the
+network hardware at the expense of maintainability.
+</p>
+
+<p>
+Based on this observation, one might think we would welcome an
+alternative that combines the ease of use of nftables and
+performance of BPF. This is where bpfilter comes in.
+In 2018, Alexei Starovoitov, Daniel Borkmann, and David S.
+Miller
+<a href="/Articles/747551/">
+proposed bpfilter</a> as a way to transparently increase iptables
+performance by translating the filtering rules into BPF programs
+directly in the kernel ... sort of. Bpfilter was implemented as a user-mode
+helper, a user-space process started from the kernel, which allows for
+user-space tools to be used for development and prevents the
+translation logic from crashing the kernel.
+</p>
+
+<p>
+Eventually, a proof of concept was merged, and the work on bpfilter
+continued in a <a
+href="https://lore.kernel.org/bpf/20210517225308.720677-1-me@ubique.spb.ru/">first</a>
+and <a
+href="https://lore.kernel.org/all/20210829183608.2297877-1-me@ubique.spb.ru/">second</a>
+patch series by Dmitrii Banshchikov, and a <a
+href="https://lore.kernel.org/all/20221224000402.476079-1-qde@naccy.de/">third</a>
+patch series that I wrote. Eventually, in early 2023, Starovoitov and I decided to
+make bpfilter a freestanding project, <a
+href="https://lore.kernel.org/all/20231226130745.465988-1-qde@naccy.de/">removing</a>
+the user-mode helper from the kernel source tree.
+</p>
+
+<!-- p>This article won't expend too much on the history of the project, but
+instead dive into the internals of bpfilter and how the BPF programs are
+generated from high-level rules definitions. It aims to provide an
+up-to-date version of the project and what the future may bring to
+it.</p -->
+
+<h4 id="technical-architecture">Technical architecture</h4>
+<p>
+From a high-level standpoint, bpfilter (the project) can be described
+as having three different components:
+</p>
+
+<ul class="spacylist">
+<li><tt>bpfilter</tt> (the daemon): generates
+and manages the BPF programs to perform network-traffic filtering.</li>
+<li><tt>libbpfilter</tt>: a library to communicate with the
+daemon.</li>
+<li><tt>bfcli</tt>: a way to interact with the daemon from the command line.
+That's the tool one would use to create a new
+filtering rule.</li>
+</ul>
+
+<blockquote>
+<img src="../_static/images/2025/bpfilter-3-components.png"
+alt="[bpfilter's 3 main components]"
+title="bpfilter's 3 main components" width=500>
+</blockquote>
+
+<p>
+To understand how the three components interact, we'll
+follow the path of a filtering rule, from its definition by the user, to
+the filtered traffic.
+</p>
+
+<p>
+<tt>bfcli</tt> uses a custom domain-specific language to define the
+filtering rules (see the <a
+href="https://bpfilter.io/usage/bfcli.html">documentation</a>). The command-line
+interface (CLI)
+is responsible for taking the rules defined by the user and
+sending them to the daemon. <tt>bfcli</tt> was created as a way to
+easily communicate with the daemon, so new features can be tested
+quickly without the requirement for a dedicated translation layer.
+Hence, <tt>bfcli</tt> supports all of the features bpfilter has to
+offer.
+</p>
+
+<p>
+It's also possible to use iptables, as long as it integrates the
+patch provided in bpfilter's source tree. This patch adds support for
+bpfilter (using the –bpf option), so the rules are sent to bpfilter to
+be translated into a BPF program instead of sending them to the kernel.
+Currently, when used through the iptables front end, bpfilter supports filtering on IPv4 source and
+destination address, and IPv4 header protocol field.
+<a href="https://www.man7.org/linux/man-pages/man8/iptables-extensions.8.html">
+Modules</a> are not yet
+supported.
+</p>
+
+<p>
+Nftables support is a bit more complicated. A proof of concept was
+merged last year, but bpfilter has evolved a lot since then to introduce new
+features, and the translation layer is broken. The challenge
+comes from the format used to define the rules: nftables sends Netfilter
+bytecode to the kernel, the proof of concept sends this bytecode to
+bpfilter instead, which has to transform it into its internal data
+format. The other bpfilter developers and I
+expect to refactor it in 2025 and create a generic-enough
+framework to easily expand nftables support.
+</p>
+
+<p>
+Depending on the source of the request, the format of the data is
+different: iptables sends binary structures, nftables sends bytecode,
+and <tt>bfcli</tt> sends different binary structures. The rules need to be
+translated into a generic format so that bpfilter can process every rule
+similarly.
+</p>
+
+<p>
+The front end is also responsible for bridging gaps between the CLI
+and the daemon's expectations: iptables has counters for the number of packets
+and bytes processed by each rule, but bpfilter only creates such counters when
+requested, so the iptables front end is in charge of doing so.
+</p>
+
+<p>
+Not all front ends are created equal, though. Iptables can only use
+BPF Netfilter hooks, which map to iptables's tables; it can't request
+for an
+<a href="https://en.wikipedia.org/wiki/Express_Data_Path">express data path</a>
+(XDP) program to be created. <tt>bfcli</tt> on the other hand, is
+designed to support the full extent of the daemon's features.
+</p>
+
+<p>
+The logical format used by bpfilter to define filtering rules is
+similar to the one used by iptables and nftables: a chain contains one
+or more rules to match network traffic against, and a default action if
+no rule is matched (a "policy"). Filtering rules contain zero or more
+matching criteria; if all criteria match the processed packet, the
+verdict is applied. In the daemon, a chain will be translated into a
+single BPF program, attached to a hook. That program is structured like this:
+</p>
+
+<!-- p>
+When it comes to code generation in bpfilter, there are three main
+data structures: <tt>bf_chain</tt> for the chain, <tt>bf_program</tt>
+for the BPF program (and the related BPF objects), and <tt>bf_cgen</tt>
+which provides a context to generate the program from the chain.
+</p -->
+
+<blockquote>
+<img src="../_static/images/2025/bpfilter-program-layout.png" alt="bpfilter logo"
+alt="[Layout of a BPF program generated by bpfilter]"
+title="Layout of a BPF program generated by bpfilter"
+width=350>
+</blockquote>
+
+<p>
+At the beginning, the BPF program is not much more than a buffer of
+memory to be filled with
+<a href="https://elixir.bootlin.com/linux/v6.14.4/source/include/uapi/linux/bpf.h#L77">
+<tt>bpf_insn</tt></a> structures. All of the generated
+BPF programs will be structured similarly: they start with a
+generic prologue to initialize the run-time context of
+the program and save the program's argument(s) on the stack. Then the
+program type prologue: depending on the chain, the
+arguments given to the program are different, and we need to continue
+initializing the run-time context with program-type-specific information.
+This section will contain different instructions if the program is meant
+to be attached to XDP or one of the other places a BPF program can be attached
+to the kernel's networking subsystem.
+</p>
+
+<p>
+Following that are the
+filtering rules, which are translated into bytecode
+sequentially. The first matching rule will terminate the program.
+Finally, there is the common epilogue containing the policy of
+the chain. Eventually, bpfilter will generate custom functions in the
+BPF programs to avoid code duplication, for example to update the packet
+counters. Those functions are added after the program's exit
+instruction, but only if they are needed.
+</p>
+
+<p>
+Throughout the programs, there are times we need to interact with
+other BPF objects (e.g. a map), even though those objects do not exist
+yet. For example, a rule might need to update its counters when it
+matches a packet. While counters are stored in a map, it doesn't
+exist yet at the time the bytecode is generated. Instead, a "fixup"
+instruction is added, which is an instruction to be updated later, when
+the map exists and its file descriptor can be inserted into the
+bytecode. Fixups are used extensively to update a map file descriptor, a
+jump offset, or even a call offset.
+</p>
+
+<p>
+When the chain has been translated into BPF bytecode, bpfilter will
+create the required map and update the program accordingly (processing the
+fixups described above). Different maps are created depending on the
+features used by the chain: an array to store the packet counters,
+another array to store the log messages if something goes wrong, a hash
+map to filter packets based on a set of similarly formatted data,
+etc.
+</p>
+
+<p>
+Then the program is loaded, and the verifier will ensure the bytecode
+is valid. If the verification fails due to a bug in bpfilter,
+the program is unloaded, the maps
+are destroyed, and an error is returned. On success, the program and its
+maps are now visible on the system.
+</p>
+
+<p>
+Finally, bpfilter attaches the program to its hook using a
+<a href="https://github.com/isovalent/ebpf-docs/blob/master/docs/linux/syscall/BPF_LINK_CREATE.md">
+BPF link</a>.
+Using links allows for atomic replacement of the program if it has to be
+updated.
+</p>
+
+<h4 id="performance">Performance</h4>
+
+<p>
+When it comes to filtering performance, the main factor is: how big
+is the ruleset? In other words, how many rules can we define before the
+performance deteriorates? There are ways to mitigate this issue, but you
+can't get away from it completely. Thanks to BPF, bpfilter can raise
+this limit, allowing bigger rulesets before the performance starts to
+drop, as we can see below.
+</p>
+
+<blockquote>
+<img src="../_static/images/2025/bpfilter-benchmark.png" alt="bpfilter logo" width=500
+alt="[Benchmark results]"
+title="Benchmark results">
+</blockquote>
+
+<p>
+The benchmark presented is synthetic, but it demonstrates the impact
+of the number of rules on the filtering rate for a 10G network link
+(9300Mb/s baseline). Note the horizontal log scale — bpfilter handles twice as
+many rules as iptables and eight times as many as nftables before seeing a drop
+off in performance. All of the filtering rules are attached to the
+pre-routing hook, and the added rules filter out additional IP addresses.
+</p>
+
+<h4 id="current-status-and-future-development-plans">Future plans</h4>
+<p>
+From a user perspective, all of the features currently supported by
+bpfilter are documented on <a
+href="https://bpfilter.io/">bpfilter.io</a>. The project
+is evolving quickly, and hopefully bugs are being fixed faster than they are
+introduced.
+</p>
+
+<p>
+The project roadmap is meant to be as transparent as possible, so it is
+available on the project's <a
+href="https://github.com/facebook/bpfilter/milestone/2">GitHub
+repository</a>. The main highlights for the first half of 2025 would be
+<a href="https://github.com/facebook/bpfilter/issues/182">
+proper support for nftables</a>,
+<a href="https://github.com/facebook/bpfilter/issues/187">
+integration of user-provided (and compiled)
+BPF programs</a>, and
+<a href="https://github.com/facebook/bpfilter/issues/185">
+generic sets</a>.
+</p>
+
+<p>
+Free feel to try the project and provide feedback, I would happily
+address it. You can also jump into the code and contribute if that's
+what you like. I'm always available to answer questions and mentor any
+contributor.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/bpfilter</a></td></tr>
+            <tr><td><a href="../Archives/GuestIndex/index.html">GuestArticles</a></td><td><a href="../Archives/GuestIndex/index.html">Deslandes, Quentin</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1017705/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1021226"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">nftables sets ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2025 19:23 UTC (Wed)
+                               by <b>champtar</b> (subscriber, #128673)
+                              [<a href="/Articles/1021226/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="champtar" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021226" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For the benchmark, did you try to use a single nftables rule with an nftables set ?<br>
+Same for iptables + ipset.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021226/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1021405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">nftables sets ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2025 21:12 UTC (Thu)
+                               by <b>qdeslandes</b> (guest, #131161)
+                              [<a href="/Articles/1021405/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="qdeslandes" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021405" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, but if you have a single rule in your firewall to filter on a set of IPs, you won't notice a difference in performance. The difference will be more visible as the ruleset grows.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1021228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2025 19:31 UTC (Wed)
+                               by <b>npws</b> (subscriber, #168248)
+                              [<a href="/Articles/1021228/">Link</a>] (5 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="npws" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021228" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+nftables is not meant to be used with a huge linear ruleset, but it encourages people to use sets, maps, dynamic expressions etc. to exploit structure in rulesets for better performance. So I'd be interested in which of these features are supported by bpfilter and how performance comparisions look when used *properly*.<br>
+<p>
+Another important metric, for some people at least, is update performance. Is my assumption correct, that every update requires a full rebuild of the ruleset? How do counters and other stateful objects deal with updates?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1021230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2025 19:35 UTC (Wed)
+                               by <b>npws</b> (subscriber, #168248)
+                              [<a href="/Articles/1021230/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="npws" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021230" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Actually one more question, was this benchmark done using multiqueue and multiple cores, or just a single core? If the later, how does bpfilter fare with multicore?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1021406"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2025 23:54 UTC (Thu)
+                               by <b>qdeslandes</b> (guest, #131161)
+                              [<a href="/Articles/1021406/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="qdeslandes" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021406" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; nftables is not meant to be used with a huge linear ruleset, but it encourages people to use sets, maps, dynamic expressions etc. to exploit structure in rulesets for better performance. So I'd be interested in which of these features are supported by bpfilter and how performance comparisions look when used *properly*.</span><br>
+<p>
+Absolutely, that is why I mentioned the benchmark is synthetic. The purpose of the benchmark is to show the main point of bpfilter: generating faster rules, and as the ruleset grows, it's even more visible. Feature wise, bpfilter supports sets but overall, it's far from the extensive set of features provided by nftables.<br>
+<p>
+Now, the thing when it comes to benchmarking firewalls is that there is no single ruleset that can be used to summarise and rank all the technologies available. bpfilter supports sets, which I benchmarked against nftables, and there is no noticeable difference: it's only a few BPF instructions, and a few netfilter instructions, there isn't enough to provide meaningful results. When I looked into how firewalls are benchmarked, most (if not all) of the results I've found simply increase the ruleset size. <br>
+<p>
+<span class="QuotedText">&gt; Another important metric, for some people at least, is update performance. Is my assumption correct, that every update requires a full rebuild of the ruleset? How do counters and other stateful objects deal with updates?</span><br>
+<p>
+If you send a single chain to the daemon, not the whole ruleset will be rebuilt, only that chain. Then, the existing BPF program for that chain will be atomically replaced on the host. Ideally, the unchanged rules wouldn't be regenerated, and the unmodified BPF maps wouldn't be destroyed/recreated, there are plans for it, but it's mostly a matter of priorities. The same goes with the counters.<br>
+<p>
+<span class="QuotedText">&gt; Actually one more question, was this benchmark done using multiqueue and multiple cores, or just a single core? If the later, how does bpfilter fare with multicore?</span><br>
+<p>
+The benchmark was single core, I haven't run a benchmark with multicore setup.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021406/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1021460"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2025 8:06 UTC (Fri)
+                               by <b>hailfinger</b> (subscriber, #76962)
+                              [<a href="/Articles/1021460/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hailfinger" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021460" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Now, the thing when it comes to benchmarking firewalls is that there is no single ruleset that can be used to summarise and rank all the technologies available. bpfilter supports sets, which I benchmarked against nftables, and there is no noticeable difference: it's only a few BPF instructions, and a few netfilter instructions, there isn't enough to provide meaningful results. When I looked into how firewalls are benchmarked, most (if not all) of the results I've found simply increase the ruleset size.</span><br>
+<p>
+One of the main challenges in benchmarking firewall rule sets is that people disagree on what and how to measure. If you measure a rule structure which suits the in-kernel representation of your favourite firewalling framework, you're obviously going to have a performance advantage. I think the nf-HiPAC benchmarks were designed to use rulesets exercising worst-case performance for their own implementation as opposed to best-case performance, but that seems to be an outlier.<br>
+<p>
+It all depends on whether that framework is optimized for linear rules, trees, sets or single-rule multi-matches. Accelerating single matches will help, but often the improvements in algorithmic complexity (e.g. with a whole-ruleset compiler or even manual ruleset rewrites focused on optimal structure) yield dramatic performance benefits for large rule sets even if single matches are slow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021460/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1021456"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2025 7:48 UTC (Fri)
+                               by <b>hailfinger</b> (subscriber, #76962)
+                              [<a href="/Articles/1021456/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hailfinger" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021456" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There have been numerous attempts at improving packet filtering performance and usability over the years, but none seem to have captured the market. There also is nf-HiPAC <a href="https://www.hipac.org/">https://www.hipac.org/</a> which tried to solve this 20 years ago, apparently with really nice performance and iptables-compatible rule handling.<br>
+<p>
+Then there's bpf-iptables <a href="https://github.com/mbertrone/bpf-iptables">https://github.com/mbertrone/bpf-iptables</a> .<br>
+<p>
+A performance comparison between nf-HiPAC and bpfilter would be highly interesting. The challenge is to find some hardware which works well with Linux 2.6.14 (last version officially supported by nf-HiPAC) and has a 10 Gigabit ethernet interface.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021456/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1021461"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2025 8:02 UTC (Fri)
+                               by <b>npws</b> (subscriber, #168248)
+                              [<a href="/Articles/1021461/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="npws" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021461" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IIRC, one of the design goals of nftables was to support performing nf-HIPAC like transformations in the userspace frontend. But apparently nobody has gotten around to actually implement that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021461/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1021241"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The PF in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2025 21:01 UTC (Wed)
+                               by <b>fman</b> (subscriber, #121579)
+                              [<a href="/Articles/1021241/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fman" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021241" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Goodness gracious. BPF can actually do packet filtering ..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021241/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1021243"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">nftables support</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2025 22:03 UTC (Wed)
+                               by <b>hailfinger</b> (subscriber, #76962)
+                              [<a href="/Articles/1021243/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="hailfinger" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021243" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have you investigated the possibility of parsing nftables rules directly instead of translating nft bytecode?<br>
+Nftables had some corner cases (in the past, not sure about the latest release) where functionally identical rules had differing effects. That may have been a parser bug or an implementation bug in the kernel, but it's hard to know without inspecting the generated nft bytecode in detail. If you're planning to run regression tests for bpfilter-backed nftables vs. classic nftables, that might be relevant.<br>
+<p>
+I really like nftables syntax because it allows specifying multiple conditions (e.g. port 80+443) in a single rule, simplifying rulesets greatly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021243/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1021410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">nftables support</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2025 21:50 UTC (Thu)
+                               by <b>qdeslandes</b> (guest, #131161)
+                              [<a href="/Articles/1021410/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="qdeslandes" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021410" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Have you investigated the possibility of parsing nftables rules directly instead of translating nft bytecode?</span><br>
+<p>
+I thought about it lately, it would be simpler than translating the bytecode.<br>
+<p>
+<span class="QuotedText">&gt; Nftables had some corner cases (in the past, not sure about the latest release) where functionally identical rules had differing effects. That may have been a parser bug or an implementation bug in the kernel, but it's hard to know without inspecting the generated nft bytecode in detail. If you're planning to run regression tests for bpfilter-backed nftables vs. classic nftables, that might be relevant.</span><br>
+<p>
+That's good to know, thanks!<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1021274"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rules count</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2025 6:53 UTC (Thu)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/1021274/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="wtarreau" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021274" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The number of rules doesn't count as much as their ability to be properly organized and/or to replace many other ones.<br>
+Some firewalls will for example require 10 rules to allow 10 ports, or even 20 rules for 10 ports + logging, while others will use a multiport match (or a set) and can accept and log at once.<br>
+<p>
+In addition, the branching mechanisms in iptables/nftables allow to build a policy as a tree, something that some other products do not support at all. So one rule of one solution doesn't equal one rule in another solution.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021274/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1021355"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Number of filtering rules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2025 13:20 UTC (Thu)
+                               by <b>cytochrome</b> (subscriber, #58718)
+                              [<a href="/Articles/1021355/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cytochrome" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021355" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Very interesting article. I have only written firewall rules for simple home and academic networks and don't have an appreciation for the filtering rate vs number of rules plot presented by the author. For example, is 1024 filtering rules currently at the top end of expected use cases? What might be a typical number of rules for a complex network with many zones, services, and applications? Thank you.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021355/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1021415"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Number of filtering rules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2025 23:55 UTC (Thu)
+                               by <b>qdeslandes</b> (guest, #131161)
+                              [<a href="/Articles/1021415/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="qdeslandes" />
+                <input type="hidden" name="return" value="/Articles/1017705/#CommAnchor1021415" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are no real typical numbers, I've seen servers with a few filtering rules, while some other need to filter on thousands or hundreds of thousands of IPs. The size of the ruleset depends on so many factors that there isn't a single generic figure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1021415/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

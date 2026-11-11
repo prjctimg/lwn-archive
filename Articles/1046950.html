@@ -1,0 +1,225 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>BPF and io_uring, two different ways [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="BPF and io_uring, two different ways">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="BPF allows programs uploaded from user space to be run, safely, within the kernel.  The io_urin [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1047222/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>BPF and io_uring, two different ways</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 20, 2025</br>
+           </div>
+BPF allows programs uploaded from user space to be run, safely, within the
+kernel.  The io_uring subsystem, too, can be thought of as a way of loading
+programs in the kernel, though the programs in question are mostly a
+sequence of I/O-related system calls.  It has sometimes seemed inevitable
+that io_uring would, like many other parts of the kernel, gain BPF
+capabilities as a way of providing more flexibility to user space.  That
+has not yet happened, but there are currently two patch sets under
+consideration that take different approaches to the problem.
+<p>
+An io_uring "program" is built by placing a series of entries in a
+submission queue managed in a ring buffer shared between the kernel and
+user space.  Each submission-queue entry (SQE) describes a system call to
+be performed, and may make use of special buffers and file descriptors
+maintained within io_uring itself.  Each SQE is normally executed
+asynchronously, but it is possible to link a series of SQEs so that each is
+only executed after the successful completion of the previous one.  The
+result of each operation is stored in a completion-queue entry (CQE) in a
+second shared ring.  Using io_uring, an application can keep many streams
+of I/O going concurrently with a minimum of system calls.
+<p>
+The io_uring linkage mechanism enables simple sequences of operations, such
+as creating a file, writing a buffer to that file, and closing the file.
+It does not offer much flexibility; one operation cannot pass information
+to the next or change how subsequent operations may execute.  So it is not
+surprising that adding BPF support is seen as a way of filling that gap.
+So far, though, no attempts at adding that support have been seriously
+considered for merging into the mainline.
+<p>
+<h4>BPF operations</h4>
+<p>
+In early November, Ming Lei posted <a
+href="/ml/all/20251104162123.1086035-1-ming.lei@redhat.com">a patch set</a>
+adding BPF support to io_uring in the form of a new operation,
+<tt>IORING_OP_BPF</tt>, that can be placed in the submission queue.  The
+linkage mechanism can be used, for example, to cause a BPF program to be
+run between two other io_uring operations.  The programs themselves can be
+set up as, essentially, new io_uring operations.
+<p>
+Specifically, the patch creates a new <a href="/Articles/811631/">struct
+ops program type</a> for defining BPF operations.  A user-space program
+will fill in and register a <tt>uring_bpf_ops</tt> structure:
+<p>
+<pre>
+    struct uring_bpf_ops {
+	unsigned short		id;
+	uring_io_prep_t		prep_fn;
+	uring_io_issue_t	issue_fn;
+	uring_io_fail_t		fail_fn;
+	uring_io_cleanup_t	cleanup_fn;
+    };
+</pre>
+<p>
+The <tt>id</tt> is an operation ID; only the bottom eight bits are used,
+meaning that a program can establish up to 256 separate BPF-based
+operations.  The rest of the fields are BPF programs that will implement
+the functions required by io_uring to set up, execute, and clean up after
+I/O operations.  There are a couple of new kfuncs provided for those
+programs to obtain the request data from an SQE and to store a result of
+the operation in the proper CQE.
+<p>
+Once the operation has been set up, io_uring SQEs can make use of it with
+an <tt>IORING_OP_BPF</tt> operation specifying the appropriate ID.
+Two buffers can be passed to a BPF operation in each request; a new kfunc
+has been added to allow BPF programs to bulk-copy data between buffers.
+One of the use cases targeted by this work is to make it easy to copy data
+between user space and in-kernel buffers that are not readily accessible
+from user space; this feature would evidently be helpful for the
+increasingly capable <a href="903855.html">ublk io_uring-based block
+driver subsystem</a>.
+<p>
+The number of review comments on this work has been relatively small.
+Stefan Metzmacher <a
+href="/ml/all/94f94f0e-7086-4f44-a658-9cb3b5496faf@samba.org">said</a>:
+"<q>This sounds useful to me</q>".  But Pavel Begunkov <a
+href="/ml/all/891f4413-9556-4f0d-87e2-6b452b08a83f@gmail.com">was rather
+more negative</a>, saying that attempts to add BPF operations to io_uring
+in the past did not work well.  The performance of BPF programs in that
+context, he said, is poor due to the associated io_uring overhead.  He has
+a different approach, he added, that seems more promising.
+<p>
+<h4>Hooking into the control loop</h4>
+<p>
+Shortly thereafter, Begunkov posted <a
+href="/ml/all/cover.1763031077.git.asml.silence@gmail.com">a new
+version</a> of a series he <a href="847951.html">has been working on
+sporadically</a> to add BPF support to io_uring in a different way.  Rather
+than add a new operation type, this series adds a new hook into the
+io_uring completion loop, allowing a BPF program to be run as operations
+finish.  This implementation, he said, can improve performance by moving
+CQE processing from user space into the kernel.  It also, he said, could
+eventually allow for the removal of the io_uring linkage mechanism, which
+he called "<q>a large liability</q>" due to the complexity it adds,
+entirely.
+<p>
+This series, which shows some signs of having been prepared in a hurry,
+also sets up a struct ops hook.  It adds a single callback which, according
+to <a
+href="/ml/all/5bcb51a2d391e7dfb732c5cdbd152dfbd021b51b.1763031077.git.asml.silence@gmail.com">the
+changelog</a>, should be called <tt>handle_events()</tt>, but is actually:
+<p>
+<pre>
+    int (*loop)(struct io_ring_ctx *ctx, struct iou_loop_state *ls);
+</pre>
+<p>
+The <tt>ctx</tt> field gives information about the submission and
+completion queues, while the <tt>iou_loop_state</tt> parameter can be used
+to control how often <tt>loop()</tt> is to be called, determined by the
+number of available CQEs and a timeout.  When this program is called, it
+can look at the completed operations, if any, and possibly enqueue new
+operations in response.
+<p>
+There is a pair of new kfuncs to go along with this mechanism.  Pointers to
+the various parts of the ring buffer can be had with
+<tt>bpf_io_uring_get_region()</tt> (though Begunkov says that this
+interface is likely to be replaced in a future version), and
+<tt>bpf_io_uring_submit_sqes()</tt> can be used to submit new operations.  
+Using these kfuncs, a BPF program could replace links by waiting for
+operations of interest to complete, then submitting the next operation that
+should follow, perhaps using information from the operations that have
+already completed.
+<p>
+Lei, having looked at Begunkov's patches, <a
+href="/ml/all/aQ4WTLX9ieL5J7ot@fedora">said</a> that they do not solve the
+problem as well as his operation-based approach.  The key difference Lei
+pointed out is that, with <tt>IORING_OP_BPF</tt>, the bulk of the
+application logic, including the creation of SQEs, remains in user space.
+With Begunkov's series, instead, much of the application logic must be
+pushed into the kernel, necessitating a lot of communication between user
+space and the kernel that has the potential to hurt performance.  Begunkov
+<a
+href="/ml/all/9b59b165-1f57-4cb6-ae62-403d922ad4da@gmail.com">answered</a>
+that the communication can be handled efficiently using a <a
+href="/Articles/1019885/">BPF arena</a>, and that his approach provides a
+greater level of flexibility to handle more types of applications.
+<p>
+Neither developer appears to have convinced the other.  Lei <a
+href="/ml/all/aRVcAFOsb7X3kxB9@fedora">intends</a> to continue work on
+<tt>IORING_OP_BPF</tt>, while Begunkov is likely to do the same with his
+patch.  Both developers have said that there might be room in the kernel
+for both approaches, though one might reasonably expect resistance from the
+wider BPF community to adding what appears to be redundant functionality.
+A third possibility — that io_uring and BPF remain unintegrated as they
+have for years — remains a possibility as well.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/io_uring</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">io_uring/BPF support</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1046950/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

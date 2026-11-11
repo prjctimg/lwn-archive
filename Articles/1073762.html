@@ -1,0 +1,242 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Representing the true signatures of kernel functions [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Representing the true signatures of kernel functions">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" Optimizing compilers can, under some circumstances, infer when a parameter to a function is no [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1074951/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Representing the true signatures of kernel functions</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>June 1, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+<p>
+Optimizing compilers can, under some circumstances, infer when a parameter to a
+function is not needed, and remove it. This is all well and good until the
+kernel's tracing or BPF subsystems need information on how to call the function
+or where its arguments are stored.
+Alan Maguire and Yonghong Song spoke at the 2026
+<a href="https://events.linuxfoundation.org/lsfmmbpf/">
+Linux
+Storage, Filesystem, Memory-Management, and BPF Summit</a> about their work on
+recording information regarding changed function signatures in the kernel's BTF debugging
+information, to better support tracing such functions.
+</p>
+
+<p>
+Song opened with three examples of ways that an optimizing compiler can
+transform a function's signature, each taken from the actual kernel. Here are
+simplified versions; the full examples can be seen in the
+<a
+href="https://drive.google.com/file/d/1_u-DEDDKq7Lu4eVkQb_tBOm7n-xs68GW/view">slides</a>.
+Firstly, an argument can simply be removed in its entirety:
+</p>
+
+<pre>
+    int something(int flags);
+    // becomes
+    int something();
+</pre>
+
+<p>
+Alternatively, if a function takes a structure as an argument, but only uses
+some of its fields, those fields can be extracted from the structure and passed
+on their own:
+</p>
+
+<pre>
+    typedef struct {
+        int field1;
+        int field2; // Not used
+    } structure;
+
+    void something(structure foo);
+    // becomes
+    void something(int field1);
+</pre>
+
+<p>
+Finally, if a function takes a pointer to a structure but does not mutate the structure,
+it can be passed by value instead. This can be worthwhile on its own
+merits if the structure is small (avoiding an extra load from memory),
+but it can also enable opportunities for the previous optimization to
+apply.
+</p>
+
+<pre>
+    void something(structure *flags);
+    // becomes
+    void something(structure flags);
+</pre>
+
+<p>
+Any code that is intended to accurately capture how optimized functions in the
+kernel are called needs to be able to handle these three cases.
+Together, they cover a large portion of the functions present
+in the kernel for which signature changes occur. The remaining functions are
+outliers in terms of complexity, and best addressed by follow-up work.
+</p>
+
+<a href="/Articles/1075066">
+<img src="../_static/images/2026/yonghong-song-small.png" class="rthumb"
+alt="[Yonghong Song]" title="Yonghong Song" />
+</a>
+
+<p>
+The DWARF debugging information format already has a way to represent these
+kinds of transformations, so when Song and Maguire started on this work in 2025,
+they thought of reusing that encoding. DWARF is intended to play a subtly
+different role, however: it represents the signatures of functions as they are
+in the source code, not as they are after optimization. Specifically, the DWARF
+data for a function argument describes how to find its value at
+run time. The tracing subsystem needs a different piece of information:
+what the type of an argument is at run time, so that it can reconstruct
+a representation of it for printing, or so that tracepoints can refer
+to and change arguments by name in a safe way. The DWARF maintainers
+rejected an extension to DWARF for that purpose on the grounds that the format
+is only intended for debugging information, however.
+</p>
+
+<p>
+The necessary information on an optimized function's "true" signature (as
+Song calls it) is technically present in DWARF, but not in a usable way. Thus
+his current approach: teach the poke-a-hole (pahole) utility to reverse engineer
+the kernel's DWARF data and extract the true function signatures.
+</p>
+
+<p>
+The core idea is to take the architecture's ABI, figure out how function
+arguments defined in the source code would be passed without optimization, and
+then check the DWARF information for discrepancies. The
+<tt>DW_AT_calling_convention</tt> annotation records what calling convention a
+given function uses; when Clang changes a function's signature during
+optimization, it sets the annotation to <tt>DW_CC_nocall</tt> to indicate that
+the function is called with a non-standard calling convention. Then, pahole
+walks through the DWARF information to find arguments that are passed in
+different registers than expected (or that are not passed at all) in order to
+reconstruct the changes to the signature. By focusing
+pahole's attention on functions that have the appropriate annotation, the process of
+reverse engineering the kernel's DWARF information can be made faster.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Out of 69,103 total kernel functions, 875 currently have their signatures
+changed by optimization. 532 of those are not currently represented in the
+kernel's BTF information at all, and 343 are represented incorrectly, Song said. With Song
+and Maguire's patches, only 18 total functions won't be able to be
+represented. Unfortunately, DWARF doesn't record whether function
+return values are changed in the same way as arguments, and there are problems
+with handling arguments passed on the stack, so there could still be problems
+with return values or functions with more than six arguments. Future work should
+be able to address both of those.
+</p>
+
+<a href="/Articles/1075066#alan">
+<img src="../_static/images/2026/alan-maguire-small.png" class="rthumb"
+alt="[Alan Maguire]" title="Alan Maguire" />
+</a>
+
+<p>
+At that point, Maguire stepped up to speak about the GCC side of things. GCC
+indicates functions that have had their signatures changed by generating a new
+symbol name, but the same broad approach works for binaries it creates as well.
+José Marchesi warned that the symbol name is not a reliable indicator — some
+transformed functions do not receive a changed name, according to one of the
+other GCC maintainers.
+Marchesi didn't know the details, however, and encouraged Maguire to reach
+out to them to ask.
+</p>
+
+<p>
+Another complication that Maguire has run into with GCC is functions that are
+inlined differently in separate call locations. Partially inlined functions
+have long been a source of complication for the kernel's BTF. Maguire went into
+more detail about the particulars of the problem and his potential solution in a
+session later in the conference.
+</p>
+
+<p>
+Song raised the idea that, in the future, compilers could generate appropriate
+BTF information directly, without going via DWARF. The advantage is that
+compilers know exactly how they are changing function signatures, so there would
+be no risk of information lost in translation. Alexei Starovoitov liked the
+idea, since it would mean that the kernel community would not need to fight the
+DWARF standards, but wasn't sure how realistic it was. Ideally, a change to BTF would
+also work for Rust code (which implies it should work for link-time-optimized
+kernels as well, since <tt>CONFIG_RUST</tt> implies <tt>CONFIG_LTO</tt>).
+Starovoitov worried about the complexity, especially of
+deduplicating BTF declarations, but did think that extending BTF to handle more
+of the complexity was important.
+As the session wound down, the audience broke into scattered discussion about
+the particulars. 
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1073762/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

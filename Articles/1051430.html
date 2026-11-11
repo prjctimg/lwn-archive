@@ -1,0 +1,869 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Lessons from creating a gaming-oriented scheduler [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Lessons from creating a gaming-oriented scheduler">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="At the 2025 Linux Plumbers Conference (LPC), held in Tokyo in mid-December, Changwoo Min led a  [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1051995/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Lessons from creating a gaming-oriented scheduler</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>January 7, 2026</br>
+           <hr>
+<a href="../Archives/ConferenceIndex/index.html">LPC</a>
+</div>
+<p>
+At the <a href="https://lpc.events/event/19/">2025 Linux Plumbers
+Conference</a> (LPC), held in Tokyo in mid-December, Changwoo Min led a <a
+href="https://lpc.events/event/19/contributions/2150/">session</a> on what
+he has learned while developing the
+"<a
+href="https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_lavd#scx_lavd">latency-criticality
+aware virtual deadline</a>" (LAVD) scheduler, which is aimed at gaming
+workloads.  The session was part of the <a
+href="https://lpc.events/event/19/sessions/225/#20251213">Gaming
+on Linux</a> microconference, which is a new entrant into LPC; organizers
+hope to see it return <a href="https://lpc.events/event/20/">next year in
+Prague</a> and, presumably, beyond.  LAVD uses the <a
+href="922405.html">extensible scheduler class</a> (sched_ext) and has
+the primary goal of minimizing <a
+href="https://www.gameslearningsociety.org/what-is-game-stuttering/">stuttering</a>
+in games;
+it is implemented in a combination of BPF and Rust.
+</p>
+
+<p>
+Min said that he has been developing LAVD as part of his work at Igalia on
+<a href="https://store.steampowered.com/steamos">SteamOS</a> and the <a href="https://store.steampowered.com/steamdeck">Steam Deck</a>.
+The name of the scheduler is a bit of a mouthful, but it is focused on
+making Windows games run better on Linux.  SteamOS (and the Steam
+application for Linux) use <a href="https://www.winehq.org/">Wine</a> and
+the <a
+href="https://github.com/ValveSoftware/Proton?tab=readme-ov-file#introduction">Proton</a>
+compatibility layer.  Most of the scheduling decision-making code for LAVD is
+written in BPF, with a thin, Rust-based user-space piece.
+</p>
+
+<p>
+Some additional
+information about sched_ext and LAVD can be found in an <a
+href="991205.html">article</a> from last year's LPC.  In addition,
+there were sessions on LAVD as part of the <a
+href="https://lpc.events/event/19/sessions/229/#20251212">sched_ext
+microconference</a> this year, including one about <a href="https://lpc.events/event/19/contributions/2099/">adapting LAVD to be the default
+scheduler</a> for Meta's production fleet.
+</p>
+
+<p>
+Most of his experience that has shaped LAVD is based on Windows
+games and their needs on Linux.  The session was meant to raise awareness
+of some missing pieces of tooling that could be used to help better support
+Linux gaming.  He hoped to start some discussion of ways to gather better
+performance information from games and to reliably benchmark them to
+improve scheduling.
+</p>
+
+<h4>Gaming workloads</h4>
+
+<p>
+There are two things to target in a scheduler for gaming, he said,
+performance and energy consumption.  Gaming is unique because it has "<q>a
+widely accepted, universal performance metric, which is
+frames-per-second</q>" (or FPS).  There are two types of FPS measures:
+average and the "low 1%" or minimum FPS.  The average is a measure of
+application 
+throughput, while the low 1% measures 99th percentile latency, which is
+what causes stuttering.  So the goal is to provide high average FPS while
+keeping the low 1% as high as possible so that the gamer does not get
+angry—it is the most important
+aspect for the gaming experience.
+</p>
+
+<a href="/Articles/1052995/">
+<img src="../_static/images/2026/lpc-min-sm.png" border=0 hspace=5 align="right"
+alt="[Changwoo Min]" title="Changwoo Min" width=218 height=280>
+</a>
+
+<p>
+Many gaming devices, such as the Steam Deck, are powered by batteries, so
+energy efficiency is important.  The underlying hardware often uses
+processors that have a mix of different types of cores (big, medium, and
+little) with different energy-use characteristics.  For games, there are
+usually multiple tasks, but some of them can be run on the slower, more
+energy-efficient cores. Most of the tasks are fairly short running, around
+1ms, though there are a few that run for 2-3ms or more.  There are also
+tasks that run for less than 100µs, which means there is more flexibility
+in terms of their task placement, he said.
+</p>
+
+<p>
+In his view, the scheduler can make three separate decisions that affect
+performance.  It chooses which task runs first; if latency-critical tasks
+are delayed, it can lead to a "<q>cascading delay or the UI jank or the
+stuttering</q>", which affects the user experience.  The scheduler also
+determines how long a task should run; the time slice chosen needs to
+balance between long enough to benefit from a warm cache, while not so long
+that tasks monopolize the processor.  Beyond that, the scheduler chooses
+which CPU to use for each task; the cost of making that decision also
+affects latency and energy efficiency.  Quick decisions reduce
+scheduler overhead, but may increase the other costs because of a bad
+decision that is made; a problem can also occur if the scheduler
+overhead gets too high because it is trying to make a better decision.
+</p>
+
+<p>
+Understanding gaming workloads is critical to developing scheduling
+policies that are optimized for games.  When he started out, Min was not
+confident that he could come up with a gaming-optimized scheduler, so he set
+out to measure the workloads to see if there were some characteristics that
+were shared, which the scheduler could use.  So he developed <a
+href="https://github.com/Igalia/vapormark">VaporMark</a>—the name refers to
+Steam—which analyzes data collected using "<tt>perf sched record</tt>".
+"<q>After collecting huge amounts of data, post-processing it for an hour or
+two, it shows some reports.</q>" 
+</p>
+
+<blockquote>
+<a href="/Articles/1052993/">
+<img src="../_static/images/2026/lpc-vapormark-sm.png" border=0 class="photo"
+alt="[VaporMark slide]" title="VaporMark slide">
+</a>
+</blockquote>
+
+<p>
+He showed a sample VaporMark report (seen above from his <a
+href="https://lpc.events/event/19/contributions/2150/attachments/1951/4162/Steps_Towards_a_Gaming_Optimized_Schedule-lpc2025.pdf">slides</a>).
+It is a useful report, he said, that shows information like the typical run-time
+duration of each task and can allow determining whether statistically valid
+predictions can be made about upcoming durations.  It provides insight into
+why and how tasks are being scheduled for the game.
+</p>
+
+<p>
+The key finding that came out of his analysis is perhaps somewhat obvious:
+a single high-level action, such as moving a character on-screen and
+emitting a sound based on a key-press event, requires that many tasks work
+together.  Some of the tasks are threads in the game process, but others
+are not because they are in the game engine, kernel, and device drivers;
+there are often 20 or 30 tasks in a chain that all need to collaborate.
+Finding tasks with a high waker or wakee frequency and prioritizing them is
+the basis of the LAVD scheduling policy.
+</p>
+
+<h4>More tools</h4>
+
+<p>
+VaporMark was useful for understanding the high-level properties of the
+game, but once he finished a prototype of LAVD, he found that it was
+inadequate for further work.  He tried <a
+href="https://perfetto.dev/">Perfetto</a>, which was better, especially for
+doing "<q>microscopic analysis to find out the pathological scheduling
+behaviors</q>".  It did not solve his analysis problems, though, perhaps
+because he is not a Perfetto expert, Min said.
+</p>
+
+<p>
+Part of the problem for both VaporMark and Perfetto is that the problems he
+wants to analyze occur rarely.  For example, a game may run smoothly most
+of the time, but have a latency spike every five minutes or so that results
+in a drop in the FPS rate. "<q>How should I catch this?</q>"  He was not
+able to find a way to trigger on the problem so that his trace showed what
+led to it; instead he used brute-force methods of sampling every ten
+seconds, hoping to catch the problem occurring. "<q>The correlation between
+the high-level view and the microscopic view is just something missing</q>" in
+the tool set.
+</p>
+
+<p>
+Track co-organizer David Vernet noted that Perfetto does have ways to track
+more than just CPU time, such as memory use, but that it is sampling-based,
+so it may not provide all of the details that Min is looking for.  Another
+attendee wondered about tracing the latency of key-press events, which is
+important to certain types of games, especially those favored by
+professional gamers.  That analysis may require more of a view into the
+game engine than is available, but he wondered if LAVD had done anything to
+minimize that latency.  Min said that LAVD did not focus on that, but that
+he thought that its policies would naturally prioritize the tasks involved
+in key-press handling.
+</p>
+
+<p>
+Vernet noted that some games, such as Civilization VI, have CPU-intensive
+tasks that may need to be handled differently.  Some of the workloads where
+he works (Meta) have similar characteristics and 
+he wondered if Min had done
+any analysis 
+of the whole chain of tasks from an initial wakeup to the last task
+completing its work and then using that to derive deadlines and frame
+rates.  Min said that he had not, but that it was an area he wanted to look
+into; for example, there may be ways to use information from the GPU to
+help make better CPU-scheduling decisions.
+</p>
+
+<p>
+An attendee raised the issue of choosing which CPU to run a wakee on and
+whether it makes sense to move tasks to other CPUs based on their
+relationships.  Min said that making those decisions is "<q>a pretty tricky
+thing</q>". He has been looking at the timeline-management aspect of the
+scheduler, but there are other resources to consider, such as cache
+locality and memory distance.  There is a need for a tool to generate a
+"<q>more holistic view of the resource contention</q>"; it might be
+possible to do that with Perfetto, but it still remains to be done.
+</p>
+
+<h4>And benchmarks</h4>
+
+<p>
+Another problem he has encountered while working on the scheduler is that
+benchmarking games is "<q>super hard</q>".  In order to show that a new
+scheduling policy is better (or worse) than an old one, a "<q>reliably
+reproducible benchmark is absolutely necessary</q>", but games lack that,
+unlike other domains, such as databases, that have standard benchmarks.
+Fortunately, some games, such as Cyberpunk 2077, Far Cry, and Forza
+Horizon, have an in-game benchmark, which is useful; others, like
+Counter-Strike, allow replaying recorded game sequences, which also helps.
+</p>
+
+<p>
+Unfortunately, it is not clear how representative the results from those
+games are with respect to other games that lack those abilities; for
+example, some users have complained that LAVD does not work well with the
+games using the Unreal engine.  Another problem is that games are updated
+frequently so any data gathered can quickly age out; comparing results
+before and after a 2GB game update "<q>does not make any sense</q>", he
+said.  The in-game benchmarks sometimes rely on the performance of external
+resources, such as the game server, as well.
+</p>
+
+<p>
+Even when reliable benchmark results are available, it is difficult to
+correlate observed FPS changes with the scheduler change(s) that caused
+them.  So, microbenchmarks are of interest as well, but most of the ones he
+has found for schedulers (e.g. <a
+href="https://github.com/ColinIanKing/stress-ng?tab=readme-ov-file#stress-ng-stress-next-generation">stress-ng</a>
+and <a href="https://wiki.linuxfoundation.org/realtime/documentation/howto/tools/hackbench">hackbench</a>)
+are focused on stressing schedulers and measuring the scheduling overhead.
+That is useful, but improving those numbers does not always lead to better
+game performance.
+</p>
+
+<p>
+There are some microbenchmarks that mimic specific workloads; one example is <a
+href="https://kernel.googlesource.com/pub/scm/linux/kernel/git/mason/schbench">schbench</a>,
+which is meant to reproduce the scheduling characteristics of production
+web-server workloads.  There is a need for something like that to mimic
+gaming workloads, he said.  Vernet asked how that kind of benchmark might be
+built; would it use existing game engines or somehow incorporate <a
+href="https://en.wikipedia.org/wiki/AAA_(video_game_industry)">AAA
+games</a>?  Min said that he was not sure how to approach it; one problem
+is that the most important games and engines to consider changes based on
+market share.
+</p>
+
+<p>
+One thing that could help is a suite of benchmarks.  He noted that <a
+href="https://github.com/parsa-epfl/cloudsuite?tab=readme-ov-file#cloudsuite-40">CloudSuite</a>
+provides a set of representative cloud applications packaged into a
+benchmark suite.  A collection of games could perhaps be turned into a
+"gamesuite" for scheduler testing; it would augment a few microbenchmarks
+that run for a short time to give quick feedback.  The in-game benchmarks
+often only give the average FPS, "<q>which is useful but not ideal</q>";
+they lack the low 1% and
+minimum FPS information that is also really needed.
+</p>
+
+<p>
+André Almeida, who was the other track organizer, suggested
+using <a
+href="https://github.com/flightlessmango/MangoHud?tab=readme-ov-file#mangohud">MangoHud</a>
+to gather more FPS data; Min concurred, but said that MangoHud needs to be
+carefully configured.  When using it in "batch" mode, the logging from
+MangoHud can interfere with the game, which can cause stuttering.  A
+gamesuite could potentially have a recommended MangoHud configuration along
+with a set of representative games to run.
+</p>
+
+<h4>Locks</h4>
+
+<p>
+His focus has largely been on Windows games, which use the
+synchronization primitives of that underlying operating system.  For Linux,
+those are emulated by the Wine layer using futexes, but there is still work
+to be done.  Most of the tasks in a Windows game are short-running and
+computation-intensive, so it is important to avoid situations where locking
+prevents a task from quickly completing.  That means avoiding lock-holder
+preemption (or priority inversion)—when a lock holder is scheduled out, but
+a newly scheduled task needs the lock so it cannot progress.  The work that
+Almeida has been doing to <a href="/Articles/823513/">rework the
+futex API</a> will also help with priority inversion, Min said.
+</p>
+
+<p>
+In the
+kernel, <a href="/Articles/934114/">proxy execution</a> seems to him to be
+the right approach, but it does not help with user-space futexes.  LAVD
+attempts to track tasks and futexes to determine when to provide a longer
+time slice to a task in order to give it time to release a lock; that is not a
+complete solution to the problem, however.  Meanwhile, Wine is moving to
+using the <a
+href="https://docs.kernel.org/userspace-api/ntsync.html">ntsync driver</a>,
+which is designed to better support the Windows NT synchronization
+primitives.  Eventually, ntsync and proxy execution should help alleviate
+these kinds of problems, he thought.
+</p>
+
+<p>
+Almeida noted that, on the fast path, the kernel does not know which task
+holds a futex, so it does not have that information for making scheduling
+decisions.  He has heard that FreeBSD programs always inform the kernel
+about the futex owner so that it can avoid priority inversion.  The cost of
+a system call is high, though, so requiring that could be problematic.
+There was some discussion of other Windows lock types and whether those
+were supported well in Linux; the upshot seemed to be that those are built
+on top of the futex interface, so fixing futexes should take of care of
+most problems for
+Windows locks—at least for games.
+</p>
+
+<p>
+An attendee asked whether LAVD used the same scheduler for all games on the
+Steam Deck.  Min said that LAVD is a single scheduler, though there are
+some tuning knobs that can be changed with command-line parameters.  The
+attendee wondered if it made sense to consider something like
+"<q>profile-guided scheduling</q>" where a game's profile could be used to
+set parameters for the scheduler.  For the most part, the profiles would
+only need to be engine-specific, since most games use an off-the-shelf or
+internal engine that governs their performance characteristics.  Min agreed
+that it sounded like an interesting approach, but it was not one he has
+explored.
+</p>
+
+<p>
+In a followup question, he wondered about reproducible game testing; if
+there is no network server involved, are there elements beyond the
+generation of random numbers that need to be constrained in order to
+reproduce a game run?  Min said that random numbers were the main
+impediment to determinism for a game, but there are some other factors at
+play too.  If a game runs too fast, it may cause the CPU to overheat and be
+throttled; that will obviously change the characteristics as well.
+</p>
+
+<p>
+The session ended with a bit of discussion about using the <tt>WF_SYNC</tt>
+(or <tt>WF_CURRENT_CPU</tt>) flag to indicate tasks that will return to
+sleep immediately after waking.  That can help the kernel make better
+scheduling decisions and is used on Android that way.  Interested readers
+may want to consult the <a
+href="https://www.youtube.com/watch?v=5F-vQgv4sI0">YouTube video</a> of the
+session for the finer details.
+</p>
+
+<p>
+[ I would like to thank our travel sponsor, the Linux Foundation, for
+assistance with my travel to Tokyo for Linux Plumbers Conference. ]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/CPU scheduling</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Scheduler/Extensible scheduler class</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Linux Plumbers Conference/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1051430/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1053108"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">syscall vs. shared memory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2026 18:51 UTC (Wed)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/1053108/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mb" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1053108" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;He has heard that FreeBSD programs always inform the kernel about the futex owner so that it can avoid </span><br>
+<span class="QuotedText">&gt;priority inversion. The cost of a system call is high, though, so requiring that could be problematic.</span><br>
+<p>
+Does it have to be a syscall, though?<br>
+Can't this simply be a piece of per thread shared memory that the kernel scheduler can look into before doing the scheduling decision for this task?<br>
+Some kind of list of futexes currently held.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053108/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1053110"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">syscall vs. shared memory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2026 19:46 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1053110/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1053110" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The way FreeBSD handles it (in <a href="https://man.freebsd.org/cgi/man.cgi?query=_umtx_op"><tt>_umtx_op</tt></a>, which is the FreeBSD equivalent of futexes) is by having the userspace object that the futex points at be something the kernel understands.
+<p>The rough equivalent in Linux land is priority-inheritance futexes, where the futex word is guaranteed to be the TID of the thread that owns the futex, or 0. But priority-inheritance futexes have other behaviours that ordinary futexes don't, so they aren't a direct 1:1 replacement.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053110/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1053134"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Check out systing for looking at resource contention</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2026 21:22 UTC (Wed)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/1053134/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jlayton" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1053134" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Josef Bacik wrote this tool last year, which is pretty nice for discovering resource contention in a more holistic way:<br>
+<p>
+    <a href="https://github.com/josefbacik/systing">https://github.com/josefbacik/systing</a><br>
+<p>
+It generates traces that can be viewed with Perfetto's visualization tools.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053134/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1053281"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The tension between external and internal schedulers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2026 15:06 UTC (Thu)
+                               by <b>jcpunk</b> (subscriber, #95796)
+                              [<a href="/Articles/1053281/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jcpunk" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1053281" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right there at the end, I think this may perfectly demonstrate the tension between external and internal schedulers.<br>
+<p>
+Having a predefined set of values for the sched_ext knobs is great for games - where engine updates can radically change the runtime behavior. This would let users quickly adapt to changes in their favored software.<br>
+<p>
+But it moves logic out of the builtin schedulers by design.  Thankfully work here is also going into the kernel on futex work.<br>
+<p>
+Fast moving proprietary software without defined benchmarks isn't exactly a great "in kernel" target, but as sched_ext increases its talent pool, I do worry folks will fragment off and we'll lose the tight feedback loop we've enjoyed for years in the task optimization space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053281/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1053663"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Workload?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2026 15:25 UTC (Sun)
+                               by <b>cgwaldman</b> (subscriber, #9061)
+                              [<a href="/Articles/1053663/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="cgwaldman" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1053663" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Gaming workload" made me smile.  Isn't it a "playload"?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1053663/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1054079"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 14, 2026 0:19 UTC (Wed)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1054079/">Link</a>] (7 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054079" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Part of the problem for both VaporMark and Perfetto is that the problems he wants to analyze occur rarely. For example, a game may run smoothly most of the time, but have a latency spike every five minutes or so that results in a drop in the FPS rate. "How should I catch this?" He was not able to find a way to trigger on the problem so that his trace showed what led to it; instead he used brute-force methods of sampling every ten seconds, hoping to catch the problem occurring. </span><br>
+<p>
+This reminded me this <a href="https://bravenewgeek.com/everything-you-know-about-latency-is-wrong/">https://bravenewgeek.com/everything-you-know-about-latenc...</a> (2015)<br>
+<p>
+<span class="QuotedText">&gt; This is partly a tooling problem. Many of the tools we use do not do a good job of capturing and representing this data. For example, the majority of latency graphs produced by Grafana, such as the one below, are basically worthless. [...] Gil says, “The number one indicator you should never get rid of is the maximum value. That is not noise, that is the signal. The rest of it is noise.” To this point, someone in the workshop naturally responded with “But what if the max is just something like a VM restarting? That doesn’t describe the behavior of the system. It’s just an unfortunate, unlikely occurrence.” By ignoring the maximum, you’re effectively saying “this doesn’t happen.” If you can identify the cause as noise, you’re okay, but if you’re not capturing that data, you have no idea of what’s actually happening.</span><br>
+<p>
+Maybe what would help is some sort of knob that treats "relevant" latency spikes as kernel panics dumping as much information as possible. Like the "test failure" that it is.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054079/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1054293"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 15, 2026 9:12 UTC (Thu)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1054293/">Link</a>] (6 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054293" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I feel for something like a VM restart you would want to throw away data based on some better indicator than just the maximum value.<br>
+<p>
+I could see e.g. throwing away all the abnormally high values after a entering a level in a game up to a maximum time threshold or all the abnormally high values during a "stop the world" auto-save but that should not just be based on the fact that those are high values.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054293/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1054524"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 15, 2026 19:51 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1054524/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="marcH" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054524" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I could see e.g. throwing away all the abnormally high values after a entering a level in a game up to a maximum time threshold</span><br>
+<p>
+I think most gamers don't want that either, so I don't think that's a good example. When they don't have any resources to continuously prefetch levels, games make a deliberate pause rather than stuttering.<br>
+<p>
+<span class="QuotedText">&gt; or all the abnormally high values during a "stop the world" auto-save </span><br>
+<p>
+If you mean that there are points in time where the game should be focused on throughput and stop caring about latency then yes I very much agree. No one cares about the latency of displaying progress bars.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054524/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1054592"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 16, 2026 9:10 UTC (Fri)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/1054592/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="taladar" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054592" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was thinking of eliminating those situations where the game freezes because it is busy loading or saving for a second or two, you probably don't want to treat FPS-values in that time the same as the ones in normal operation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054592/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1054594"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 16, 2026 9:19 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/1054594/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Wol" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054594" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I think most gamers don't want that either, so I don't think that's a good example. When they don't have any resources to continuously prefetch levels, games make a deliberate pause rather than stuttering.</span><br>
+<p>
+I don't play games, but what would that do to you if you were playing a multi-player FPS? Very good way of getting killed, I would have thought.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054594/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1054599"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 16, 2026 10:12 UTC (Fri)
+                               by <b>rschroev</b> (subscriber, #4164)
+                              [<a href="/Articles/1054599/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rschroev" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054599" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would think you're not going to go from one level to another while in an active shooting session. In any multi-player real-time game I would think the game would be designed in such a way that any delay like that is the same for all players, preferable in-between actual gameplay sessions and not during them. My multi-player FPS experience is limited to Quake III Arena though, I have no experience at all how modern games do it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054599/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1054619"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 16, 2026 12:38 UTC (Fri)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/1054619/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="excors" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054619" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I understand it, they use a combination of synchronous and asynchronous loading, and are careful to design the whole game around IO bandwidth/latency limitations.<br>
+<p>
+As a simple example, Overwatch (~12-player team-based FPS) made sure each level was small enough to fit in RAM, so you get a loading screen when starting the match but it never needs to stream more of the level from disk while playing. Artists can creatively reuse textures and props within a level to keep the size down without the limitations becoming too obvious.<br>
+<p>
+Overwatch also allows players to switch between different characters during a match, and there are too many to pre-load every possible model and animation into RAM. But you can only switch while in your team's spawn room at the edge of the map, and it'll be a few seconds before you get into combat with the enemy team, so there should be plenty of time for everyone to asynchronously load your new model before it matters. Since the levels aren't being streamed from disk, the developers knew the full IO bandwidth could be used for loading player models, and they calculated it would be fast enough on all supported platforms. (Then they ported to Switch which wasn't really fast enough, so you'd often see an enemy as a generic floating orb before their model loaded.)<br>
+<p>
+Destiny has large seemingly-continuous worlds that you can cross without loading screens - but they're actually a series of small levels connected by long twisty corridors. When you're in a corridor, it unloads the level behind you and loads the level in front of you (and also connects to a new P2P multiplayer session). If you go really fast through the corridor, sometimes you'll be stopped by an invisible wall because it hasn't finished loading yet, but there's no combat inside corridors so that doesn't really matter. (<a href="https://gdcvault.com/play/1022247/Shared-World-Shooter-Destiny">https://gdcvault.com/play/1022247/Shared-World-Shooter-De...</a> p32-)<br>
+<p>
+On the more sophisticated end, Fortnite supports large open worlds, and automatically splits the world into cells and streams them in/out of memory as the player moves around. Distant cells may still be visible, so they're replaced with a low-detail version. The engine also prioritises loading geometry over textures: you might enter an area that looks very blurry but is still perfectly playable, until it finishes asynchronously loading the high-res textures. There are no performance guarantees, but they test it and tune it to make sure the streaming is fast enough in practice to not cause issues for players. (<a href="https://dev.epicgames.com/documentation/en-us/fortnite/streaming-and-hlods-in-unreal-editor-for-fortnite">https://dev.epicgames.com/documentation/en-us/fortnite/st...</a>)<br>
+<p>
+(Non-multiplayer games can use a lot more tricks to avoid noticeable loading pauses, e.g. Jak and Daxter made the player trip over if they were running too fast for it to keep up. Many games have slow door-opening animations, enclosed elevators, players squeezing through narrow gaps, spaceships going into warp mode, etc, which can be extended until the next area is loaded. Pauses and stuttering are both bad and should be avoided.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054619/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1054641"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Everything You Know About Latency Is Wrong</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 16, 2026 13:58 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1054641/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1051430/#CommAnchor1054641" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      For a game, you probably want to consider the values based on game state, not on time thresholds. Having separate sets of values for "loading screen", "cut scene", "interactive menu", and "user controlling character" is probably more useful than thresholding values from "game running".
+<p>My rationale for thinking this way is that what you're really trying to get at is "how does this affect the user experience" - and the latency values for "makes it bad" are very different between "loading screen" (where a high latency event means a progress bar stalls for a bit" and "user controlling character" (where a high latency event means that the user feels like their control inputs are ignored).
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1054641/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

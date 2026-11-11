@@ -1,0 +1,324 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>BPF loop verification with scalar evolution [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="BPF loop verification with scalar evolution">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" The BPF verifier has, in the course of wrestling with the difficult problem of statically anal [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1076255/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>BPF loop verification with scalar evolution</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Daroc Alden</b><br>June 9, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+<p>
+The BPF verifier has, in the course of wrestling with the difficult problem of
+statically analyzing loops, grown special support for many kinds of loops over its
+history, but its fundamental approach to simple <tt>for</tt> loops has not
+changed.
+When it encounters a loop, it evaluates it, iteration by iteration, until reaching
+an exit condition — a process that can cause the verifier to mistakenly hit the
+limit on the number of allowed instructions where a better implementation
+would not.
+Eduard Zingerman
+spoke at the 2026
+<a href="https://events.linuxfoundation.org/lsfmmbpf/">
+Linux Storage, Filesystem, Memory-Management, and BPF Summit</a>
+about his in-progress work on improving the verifier's treatment of loops, especially nested
+loops.
+</p>
+
+<p>
+His ultimate goal, as explained in his
+<a href="https://drive.google.com/file/d/1IUvZz8d2arWFmG2Bf1H4FZp6yXowQJ4u/view">slides</a>,
+is to enable the verifier to handle typical <tt>for</tt> and <tt>while</tt>
+loops in a single pass, without needing to iterate over the loop. To accomplish this, he
+plans to use a technique called
+<a href="https://gcc.gnu.org/onlinedocs/gccint/Scalar-evolutions.html">
+scalar evolution</a> to calculate the range of
+values that variables can possibly take on inside the loop, and then check
+whether the loop body is safe with the values in that range.
+</p>
+
+<p>
+Of course, BPF bytecode does not retain the convenient labeling of loops that
+the C source code has; the first step of Zingerman's analysis is to detect where
+loops are by looking for backward jumps. This analysis is complicated by the
+fact that loops can be nested, and by the fact that his code needs to identify
+several different parts of the loop.
+</p>
+
+<a href="/Articles/1076206">
+<img src="../_static/images/2026/eduard-zingerman-lsfmmbpf-small.png" class="rthumb"
+alt="[Eduard Zingerman]" title="Eduard Zingerman" />
+</a>
+
+<p>
+A loop is made up of a header, back edge, latch, and exit, he explained. The
+header sets up entry into the loop, the back edge jumps backward to begin the
+next iteration,
+the latch controls whether the loop continues or terminates, and the
+exit handles the code leaving the loop. Sometimes, a loop can have
+multiple headers. These are called irreducible loops, and pose a problem for
+many kinds of analysis. Luckily, they're fairly rare in non-pathological code,
+Zingerman said.
+</p>
+
+<p>
+In order to identify these parts of loops, his prototype code builds up a
+<a href="https://en.wikipedia.org/wiki/Dominator_(graph_theory)">
+dominator tree</a> — a data structure that records which instructions are always
+executed before which other instructions, regardless of the control flow that
+happens between them. In the example code below, label A is said to dominate
+label B, because A always happens before B, even though there is code involving
+a conditional jump between them.
+</p>
+
+<pre>
+    A: foo();
+
+    if (bar()) {
+        ...
+    } else {
+        ...
+    }
+
+    B: baz();
+</pre>
+
+<p>
+Starting from a loop's back edge, his code walks up the dominator
+tree to find a conditional jump that leads out of the loop. The condition of
+that jump is the loop's latch, since it controls whether the loop is exited.
+</p>
+
+<p>
+Once a loop's latch has been identified, the code looks at the registers
+involved in computing the latch's condition, and can often infer a maximum
+number of times that the loop can execute. Nested loops are processed from
+innermost to outermost, to avoid complicating the logic needed to place a bound
+on the number of loop iterations.
+</p>
+
+<p>
+John Fastabend thought that there were many loops
+where an inner loop changes an outer loop's variables, and that this would cause
+problems with Zingerman's innermost-to-outermost evaluation of loops. Zingerman
+agreed that this was a problem, but said that he had an unimplemented solution
+for it in mind.
+</p>
+
+<p>
+Finding how many times a loop can execute is only half the battle, however. The
+code still needs to calculate the values that the variables involved in the loop can
+take on. In general, that is a complex task. In a majority of cases, however,
+the changes made to a variable in a loop are simple. For example,
+consider a loop that adds four to a variable every iteration. The value of the
+variable is always four times the loop iteration plus its starting value.
+</p>
+
+<p>
+Zingerman's code identifies these kinds of relationships by symbolically
+executing the loop body, and finding those variables that, on every control-flow
+path, return to the header with the same symbolic value. Once this analysis is
+done, the verifier can take the possible ranges of those variables into account
+when analyzing the loop body.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Zingerman has considered two alternatives. Currently, the fact that not all
+variables can be handled by this approach means that the verifier will sometimes
+have to explore a large number of potential exits from the loop. That could be
+fixed by only using his scalar-evolution technique when all of the loop variables
+can be inferred in this way, and falling back to iteration-by-iteration
+exploration for other cases. Alternatively, the variables that can't be handled
+could have their existing inferred information thrown away, forcing the verifier
+to consider all possible values inside the loop. That would let the verifier
+handle all loops in one pass, no matter how complicated, but might require
+redundant bounds checks inside the loop that could, in theory, be omitted.
+Currently, the programmer would have to add those bounds checks, but if Alexei
+Starovoitov's <a href="1075067.html">plans</a> for the future of BPF come
+to fruition, the verifier might be changed to add those bounds checks itself.
+Fastabend and Starovoitov were supportive of the second option.
+<p/>
+
+<p>
+There are other limitations of the current prototype that don't come from the
+approach. Right now, the code doesn't handle registers that are spilled to or
+restored from the stack, for example. Fastabend suggested that one way to handle
+that would be to create an infinite stack of registers for use during the
+symbolic-execution path. Zingerman said that he had considered the technique,
+but wanted to try a simpler approach first. As long as the loop's iterator
+isn't spilled to the stack, which is fairly rare with LLVM, it doesn't cause
+too many problems.
+</p>
+
+<p>
+So far, his code has caused some improvements and some regressions. Those
+regressions are likely bugs, he said, but there may be some unexpected
+interactions with other parts of the verifier to track down. Fastabend asked how
+the changes impacted the time it takes to load a BPF program. Zingerman hasn't
+made rigorous measurements, but said that it shouldn't add much.
+</p>
+
+<p>
+Starovoitov said that the static stack-liveness analysis that was added to the
+verifier a while ago was initially a source of worry, because it added an extra
+five passes and a ton of extra work. When measured, the end result was faster load times and
+lower memory usage. The time the verifier takes to load a BPF program is
+dominated by the main verifier pass, he explained, and basically anything that
+causes that to do less work will be a performance improvement.
+</p>
+
+<p>
+That marked the end of the session, but the work will continue.
+Zingerman does have more plans for
+improvements to the scalar-evolution pass. If all goes according to plan,
+it should support stack manipulations, signed integer operations, and more
+complicated loops before it is proposed for addition to the kernel.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1076121/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1077265"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this actually safe?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2026 1:23 UTC (Wed)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/1077265/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="foom" />
+                <input type="hidden" name="return" value="/Articles/1076121/#CommAnchor1077265" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems pretty brave to add effectively an entire optimizing compiler inside the trusted computing base as a "verifier". Is it even possible for such a thing to not have any security-relevant bugs in it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1077265/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1079403"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Is this actually safe?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 24, 2026 18:19 UTC (Wed)
+                               by <b>sammythesnake</b> (guest, #17693)
+                              [<a href="/Articles/1079403/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sammythesnake" />
+                <input type="hidden" name="return" value="/Articles/1076121/#CommAnchor1079403" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've often found myself perplexed at the general BPF verifier approach.<br>
+<p>
+Why is there so much time &amp; effort spent trying to reconstruct (i.e. *guess*) high level[1] stuff like for loops rather than have the semantics available on the original code available to the verifier - perhaps represented in the bytecode? Having a couple of codes that represent standard loops, or even more general iterators seems like a no brainer to my uninformed mind.<br>
+<p>
+Why is having this whole (increasingly complex and hairy) verification process *in kernel* so important? Some means o for an administrator to sign a BPF as "safe" again seems utterly sensible to me. Keep all the complexity out of kernel space, and the verification can be done once instead of every time the program is loaded. If an admin wants to miss the point by signing unsafe BPF programs, let them keep the pieces!<br>
+<p>
+The verifier could even evolve separately from the kernel - a new, updated verifier could certify programs to run on a kernel that predates the latest improvements &amp; bug fixes, for example. The admin could set policy requiring a certain version of the verifier separately from the kernel version, perhaps.<br>
+<p>
+If *signing* isn't acceptable, perhaps there's some way for a more sophisticated user-space verifier to add something like a zero knowledge proof. The verifier could potentially *check* the safety claim more quickly/safely than it can be produced. An external verifier wouldn't need to be restricted by kernel resources etc. It could be aided by access to the source code, it could add invariant hints to the bytecode, simplifying the proof, making it tractible to a stripped down in-kernel verifier.<br>
+<p>
+I see so many possibilities that the current approach seems to run screaming away from!<br>
+<p>
+Presumably there are some really persuasive reasons why nothing I've thought of is sane, but nothing comes to mind for me...<br>
+<p>
+[1] ...for sufficiently trivial definitions of "high level"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1079403/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

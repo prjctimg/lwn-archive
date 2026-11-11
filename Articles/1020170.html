@@ -1,0 +1,353 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A FUSE implementation for famfs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A FUSE implementation for famfs">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The famfs filesystem is meant to provide a shared-memory filesystem for large data sets that ar [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1020449/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A FUSE implementation for famfs</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>May 8, 2025</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2025/">LSFMM+BPF</a>
+</div>
+<p>
+The <a
+href="https://github.com/cxl-micron-reskit/famfs/blob/master/README.md">famfs</a>
+filesystem is meant to provide a shared-memory filesystem for large data
+sets that are accessed for computations by multiple systems.  It was
+developed by John Groves, who led a combined filesystem and
+memory-management session at
+the 2025 Linux Storage, Filesystem, Memory
+Management, and BPF Summit (LSFMM+BPF) to discuss it.  The session was a
+follow-up to <a href="983105.html">the famfs session at last year's
+summit</a>, but it was also meant to discuss whether the kernel's <a
+href="https://docs.kernel.org/filesystems/dax.html">direct-access</a> (DAX)
+mechanism, which is used by famfs, could be replaced in the filesystem
+by using other kernel features.
+</p>
+
+<p>
+Groves said that he works for a company that makes memory; what it is
+trying to do is "<q>make bigger problems fit in memory through pools of
+disaggregated memory</q>" as an alternative to <a
+href="https://en.wikipedia.org/wiki/Shard_(database_architecture)">sharding</a>. He
+comes from a physics background where they would talk about two kinds of
+problems: those that fit in memory and those that do not.  That's still
+true today, even though there is lots more memory available.
+</p>
+
+<p>
+For the most part, famfs is targeting read-only or read-mostly use cases, at
+least "<q>for sane people</q>".   For crazy people, though, it is possible
+to handle shared-writable use cases; the overhead for ensuring
+coherency will not make users happy, however.  It turns out that many
+analytics use cases simply need shared read-only access to the data once it
+is loaded.
+</p>
+
+<p>
+David Howells asked what he meant by "disaggregated"; Groves said he did
+not want to use the term "<a
+href="https://en.wikipedia.org/wiki/Compute_Express_Link">CXL</a>", but
+that is the best example of disaggregated memory, which means it is not
+private to a single server.  There are other ways to provide that, but CXL
+is the most practical choice currently.  Linux can provide ways to access
+disaggregated memory, but it cannot manage it like regular
+system RAM.
+</p>
+
+<a href="https://lwn.net/Articles/1020436/">
+<img src="../_static/images/2025/lsfmb-groves-sm.png" border=0 hspace=5 align="left"
+alt="[John Groves]" title="John Groves" width=247 height=260>
+</a>
+
+<p>
+There are some other differences between system RAM and "special-purpose
+memory" (SPM), which is the category disaggregated memory falls into.
+System RAM is not shareable between systems, while SPM is.  The <a
+href="https://www.kernel.org/doc/html/latest/admin-guide/RAS/main.html">reliability,
+availability, and serviceability</a> (RAS) "<q>blast radius</q>" for system
+RAM includes the kernel, while, for SPM, it is only the applications that
+are affected by an outage, since the kernel does not directly use the
+memory.  When using system RAM, no device abstraction is needed as the
+memory is simply presented as a contiguous range, but he would argue that any
+time two systems (or subsystems) need to agree on the handling of the
+contents of memory, a device abstraction is required.
+</p>
+
+<p>
+Famfs is "<q>an append-only log-structured filesystem</q>" with a log that
+is stored in memory.  It prohibits truncate and delete operations, though
+filesystems can simply be destroyed if needed; that is done to avoid having
+to handle clients with stale metadata.  He is currently working on two
+separate implementations: one is a kernel filesystem that he talked about
+last year and the other is a <a
+href="https://github.com/libfuse/libfuse?tab=readme-ov-file#libfuse">Filesystem
+in Userspace</a> (FUSE) version.  The latter was suggested in last year's
+session and he has it working, but had not yet posted it; a month later, on
+April 20, he <a
+href="/ml/all/20250421013346.32530-1-john@groves.net/">posted RFC patches
+for FUSE famfs</a>.
+</p>
+
+<p>
+Despite the fact that CXL is not commercially available, at least without
+having connections in the industry, there are already users of famfs.  He
+is "<q>getting, sometimes cagey, feedback from hyperscalers</q>" and
+analytics companies are also using it.  Famfs allows users to rethink how
+much of the data set they can put in memory;  putting a 64TB data frame
+into memory that can be shared among compute nodes is valuable even if the
+access is slower.  No one likes to do sharding, Groves said, but they do it
+because they have to.
+</p>
+
+<p>
+The FUSE port of famfs adds two new FUSE messages.  The first is
+<tt>GET_FMAP</tt>, which retrieves the full mapping from a file to its DAX
+extents that gets cached in system memory.  That means that all active files
+can be handled quickly since their metadata is cached in memory.
+The other new message is <tt>GET_DAXDEV</tt>, which retrieves the DAX device
+information.  It is used if the file map refers to DAX devices that are not
+yet known to the FUSE server.
+</p>
+
+<p>
+The famfs FUSE implementation in the kernel provides read, write, and <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>
+capabilities, along with fault handling.  There are some small <a href="https://github.com/libfuse/libfuse/pull/1200">patches for
+<tt>libfuse</tt></a> to handle the new messages as well.  Famfs disables
+the <tt>READDIRPLUS</tt> functionality, which returns <a
+href="https://www.man7.org/linux/man-pages/man2/stat.2.html"><tt>stat()</tt></a>
+information for multiple files, because it does not provide the needed file-map
+information.
+</p>
+
+<p>
+He has been asked if famfs could use memfd (from <a
+href="https://man7.org/linux/man-pages/man2/memfd_create.2.html"><tt>memfd_create()</tt></a>)
+or <a href="/Articles/949277/">guest_memfd</a> instead of DAX; he believes
+the answer is "<q>probably not</q>", but wanted to discuss it with
+attendees.  Using a DAX device allows errors with the memory to be
+returned, which famfs uses, though it is not yet plumbed
+into the FUSE version.  Previously, he supported both persistent memory (pmem)
+and DAX devices as the backing store for famfs, but it was confusing, so he
+dropped pmem support.  Using memfd is not workable, since it operates on
+system RAM and not SPM, he said.
+</p>
+
+<p>
+There is some information out there about using guest_memfd with DAX,
+Groves said, or maybe it is all just an AI hallucination.  David Hildenbrand
+said that there were ideas floating around about that; guest_memfd is just
+a file, not a filesystem, but perhaps the allocator could be changed to use
+SPM, instead of system RAM.  Groves thought that would defeat the use case
+for famfs; it is important that the SPM be accessible from all of the
+systems in a cluster, which a DAX device can provide and it did not sound
+like guest_memfd could do so.
+</p>
+
+<p>
+There are a number of different kinds of use cases that benefit from the
+famfs approach, Groves said.  For example, providing parallel access to an
+enormous <a href="https://rocksdb.org/">RocksDB</a> database.  Another,
+that kernel developers may not be aware of, is data frames for <a
+href="https://arrow.apache.org/">Apache Arrow</a>, which provides a
+memory-efficient layout for data that makes it easily accessible from CPUs
+and GPUs for analytics workloads.  Famfs can be used for "<q>ginormous
+Arrow data frames that multiple nodes want to <tt>mmap()</tt></q>" with
+full isolation between the different files in the filesystem.
+</p>
+
+<p>
+Matthew Wilcox said that he was not going to repeat his criticisms of CXL,
+which are well-known, he said and Groves acknowledged with a chuckle.  The
+approach taken with famfs is reasonable for an experiment, Wilcox
+continued, but his concern is that there are already several shared-storage
+filesystems in the kernel, such as <a
+href="https://www.kernel.org/doc/html/latest/filesystems/ocfs2.html">OCFS2</a>
+and <a
+href="https://www.kernel.org/doc/html/latest/filesystems/gfs2.html">GFS2</a>,
+why not adapt one of those for the famfs use cases?  Groves said he is not
+a cluster-filesystem expert but the main difference is that famfs is backed
+by memory not storage; reads are done in increments of cache lines, not
+pages.  If, for example, the application is chasing pointers through the
+data, each new access just requires a read of a cache line.
+</p>
+
+<p>
+As the session wound down, there was some discussion of problems that
+Groves had reported that resulted in spurious warnings from the kernel.  He
+said that he thinks those problems are fixable, and that pmem does not have
+the same kinds of problems.  He hopes to be able to apply the pmem solution
+to famfs.
+</p>
+<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Compute Express Link (CXL)</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">DAX</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Filesystems/famfs</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2025</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1020170/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1020578"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-coherent shared memory?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 8, 2025 23:36 UTC (Thu)
+                               by <b>DemiMarie</b> (subscriber, #164188)
+                              [<a href="/Articles/1020578/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="DemiMarie" />
+                <input type="hidden" name="return" value="/Articles/1020170/#CommAnchor1020578" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would it make sense to use shared memory in a non-cache-coherent mode with explicit flushes?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1020578/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1020579"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-coherent shared memory?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2025 0:15 UTC (Fri)
+                               by <b>gmprice</b> (subscriber, #167884)
+                              [<a href="/Articles/1020579/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="gmprice" />
+                <input type="hidden" name="return" value="/Articles/1020170/#CommAnchor1020579" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's hard because write order isn't guaranteed and explicit flushes that go all the way to the backing media (not just buffers attached to one head) presently don't exist.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1020579/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1020963"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-coherent shared memory?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2025 14:00 UTC (Tue)
+                               by <b>jagalactic</b> (subscriber, #74260)
+                              [<a href="/Articles/1020963/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jagalactic" />
+                <input type="hidden" name="return" value="/Articles/1020170/#CommAnchor1020963" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Greg is correct that write order is usually not guaranteed by hardware currently. But when we think about cache coherency it's tempting to always think about the fine-grained multi-writer cases, which are hard - and already have a high performance cost on existing systems. So without sharing disaggregated memory, we already try to avoid these use cases due to the performance cost.<br>
+<p>
+But a lot of work flows do what you might call "publish and share", where the publisher needs to flush the processor cache as a last step of publishing, and then there are no hard cache problems because data is not mutated in place while it's shared. This is compatible with a lot of data analytics flows as well as sharing in-memory databases read-only. In fact, it's consistent with how an important subset of databases - the log-structured merge tree (LSM) variants - work, even in writable mode. <br>
+<p>
+LSMs write out searchable indexes (often called SST files) which - after the initial write - are read-only until they eventually get merged into new SSTs and get unlinked. Putting SSTs in shared memory (e.g. via famfs) is a pretty nice use case.<br>
+<p>
+Mind you, today there are not yet any databases that can directly create files in famfs, due to its pre-allocation requirement - but 1) files can be copied into famfs for sharing, and 2) there are multiple ways famfs and/or apps could adapt to relax famfs' create procedure in future work...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1020963/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

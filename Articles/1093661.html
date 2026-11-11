@@ -1,0 +1,203 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Adding BPF to blk-iocost [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Adding BPF to blk-iocost">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The scheduling of block I/O requests has long been a challenge for operating-system kernels.  F [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="LWN: Comments on &quot;Adding BPF to blk-iocost&quot;" href="https://lwn.net/headlines/1093661/">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1093435/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Adding BPF to blk-iocost</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 15, 2026</br>
+           </div>
+The scheduling of block <span class="nobreak">I/O</span> requests has long
+been a challenge for operating-system kernels.  For many years, the
+performance characteristics of rotating drives meant that putting
+considerable resources into request ordering was worthwhile.  In a world
+with fast, solid-state drives, scheduling is more concerned with enforcing
+fairness between competing users while being fast enough to keep up with
+drives that can perform millions of <span class="nobreak">I/O</span>
+operations per second.  The blk-iocost <span class="nobreak">I/O</span>
+controller was designed for the solid-state world and generally performs
+well, but there is always a desire to do better.  <a
+href="/ml/all/20260914073356.791518-1-cui.tao@linux.dev">This patch
+series</a> from Tao Cui aims to make blk-iocost more flexible by enabling
+the loading of a BPF program to make cost decisions.
+<p>
+The blk-iocost controller was first <a href="/Articles/792256/">covered
+here in 2019</a>, when it was still known as "io.weight"; it was <a
+href="/Articles/966618/">revisited</a> in 2024.  To summarize, it works by
+allocating a percentage of a block device's bandwidth to each control
+group.  Every requested <span class="nobreak">I/O</span> operation is then
+evaluated and an associated cost, expressed in terms of how much of the
+device's time the operation is expected to take, is assigned.  Each device
+has a virtual clock ("vtime"), as does each control group; executing an
+<span class="nobreak">I/O</span> operation advances the requesting group's
+vtime by the assigned cost.  Operations are only dispatched to the device
+when the group's vtime is far enough behind the drive's vtime to
+accommodate them.
+<p>
+See <a href="https://dl.acm.org/doi/epdf/10.1145/3503222.3507727">this
+paper</a> for more details on how blk-iocost works.  One key point is that
+its operation is split into two parts.  The calculation of the cost for
+each operation uses a number of pre-computed parameters in order to be as
+efficient as possible and not slow down the <span
+class="nobreak">I/O</span> operations themselves.  A separate "planning"
+phase, which runs every few milliseconds, adjusts the weights of all of the
+control groups in order to reallocate bandwidth from groups that are not
+using their full allocation to others that are more busy.  The planning
+phase also tweaks the rate at which the drive's vtime advances in an
+attempt to keep the drive fully busy — but not so busy that response time
+begins to suffer.
+<p>
+Cui's cover letter describes how the current cost model works and its
+shortcomings.  To summarize: requests that are deemed to be sequential are
+assigned a relatively low cost, while those that look random are assigned a
+much higher (112x) cost.  Sequential access is faster, even on
+solid-state drives, so a group that is performing mostly sequential
+operations should be entitled to more of them than groups performing random
+operations.
+<p>
+The problem, Cui says, is that the heuristics for determining the
+randomness of any given request do not work well for all workloads.  A
+group that has two processes performing sequential operations can, if those
+operations are interleaved, appear to be doing random <span
+class="nobreak">I/O</span>; the controller will penalize that group,
+causing its <span class="nobreak">I/O</span> performance to suffer.
+Meanwhile, random operations within a sufficiently small window can be
+judged to be sequential, leading to an unfair boost for the relevant group.
+Additionally, some devices can behave differently depending on the type or
+the placement of an <span class="nobreak">I/O</span> operation, but
+blk-iocost does not take that into account.  Given the range of devices and
+technologies out there, it may not even be possible for a single,
+general-purpose controller to take all of the relevant factors into
+account.
+<p>
+The solution, as always it seems, is to enable the loading of a BPF program
+so that the cost calculation can be customized.  Cui's patch set only
+addresses the cost-calculation part of the controller; the planning portion
+is unchanged.
+<p>
+Specifically, the series enables the loading of a new type of <a
+href="/Articles/811631/">struct_ops program</a> built around this
+structure:
+<p>
+<pre>
+    struct iocost_model_ops {
+	u64 (*calc_cost)(u64 opf, u64 nbytes, sector_t sector,
+			 struct blkcg *blkcg, u64 model_flags);
+	void (*blkcg_online)(struct blkcg *blkcg);
+	void (*blkcg_offline)(struct blkcg *blkcg);
+
+	/* model name, used to select the model through io.cost.model */
+	char name[16];
+    };
+</pre>
+<p>
+The core of this structure, and the only required operation, is
+<tt>calc_cost()</tt>, which calculates the cost of an <span
+class="nobreak">I/O</span> request.  The <tt>opf</tt> parameter is a set of
+flags describing the request, including whether it is a read or a write,
+whether a cache flush is needed, and so on.  <tt>nbytes</tt> is the size of
+the request, <tt>sector</tt> is the location of the desired blocks on the
+drive, <tt>blkcg</tt> is the block control group that controls the
+requesting process, and <tt>model_flags</tt> may contain a single flag,
+<tt>IOCOST_COST_F_MERGE</tt>, indicating that the current request is being
+merged into another that already existed.  The return value is the cost
+that will be assigned to this request.
+<p>
+The other two functions, <tt>blkcg_online()</tt> and
+<tt>blkcg_offline()</tt>, are optional; if they exist, they will be called
+when this controller is added to (or removed from) a control group,
+allowing the BPF program to manage any housekeeping it may need.
+Loading the program does not, in itself, attach the new cost function to
+any devices; that is done by writing to the <tt>io.cost.model</tt> file in
+the control-group directory using the <tt>name</tt> provided in the
+<tt>iocost_model_ops</tt> structure.
+<p>
+Included in the patch set is <a
+href="/ml/all/20260910125817.223354-5-cui.tao@linux.dev">an example
+program</a> that attempts to improve performance for control groups that
+contain multiple processes performing sequential <span
+class="nobreak">I/O</span>.  It uses a BPF map to keep track of each <span
+class="nobreak">I/O</span> stream that it observes; if a request looks
+sequential within any of the tracked streams, it is charged as a sequential
+request.  The example program is able to track up to four independent
+streams, though the number of streams actually tracked will be lower if
+there is also random <span class="nobreak">I/O</span> being done.
+<p>
+This is still early-stage work, in its third RFC revision.  The interface
+has evolved considerably since the posting of <a
+href="/ml/all/20260908100143.47598-1-cui.tao@linux.dev/">the first
+version</a> on September&nbsp;8.  So it would not be surprising to see
+further changes before this feature is merged.  Eventually, though, a
+version of this work does seem likely to be accepted, adding yet another
+place where BPF can be used to modify the operation of a core kernel
+subsystem.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">BPF/Control groups</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Control groups/I/O bandwidth controllers</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1093661/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

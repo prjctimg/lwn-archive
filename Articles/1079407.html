@@ -1,0 +1,978 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Limiting negative dentries [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Limiting negative dentries">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="A number of problems related to negative directory entries (dentries) were the topic of a files [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1080836/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Limiting negative dentries</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>July 3, 2026</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2026/">LSFMM+BPF</a>
+</div>
+<p>
+A number of problems related to negative directory entries (dentries) were
+the topic of a filesystem-track session at
+the 2026 <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a>.  Negative dentries are
+used to indicate that a file of a given name does not exist in a directory;
+it is an optimization that short-circuits the lookup of the file name when
+the answer is already known.
+
+Miklos Szeredi led a
+session that discussed
+some problems that come from having too many negative dentries for a
+directory. 
+</p>
+
+<p>
+He began by noting that Ian Kent had reported a problem with hundreds of
+millions of negative dentries for a directory; in that case, the <a
+href="https://elixir.bootlin.com/linux/v7.1.2/source/fs/notify/fsnotify.c#L62"><tt>fsnotify_set_children_dentry_flags()</tt></a>
+call was made, which will iterate over all of the dentries in the directory and cause a soft lockup.  A
+related issue is that the reference count field of the <a
+href="https://elixir.bootlin.com/linux/v7.1.2/source/include/linux/dcache.h#L114"><tt>d_lockref</tt></a>
+lock 
+in <a
+href="https://elixir.bootlin.com/linux/v7.1.2/source/include/linux/dcache.h#L93"><tt>struct
+dentry</tt></a> can overflow if enough dentries are created, Szeredi said.
+It is not negative-dentry-specific, but it would be hard to create
+two-billion positive dentries for a directory.  Kent had also mentioned
+that the hash chains may grow too long when there are so many negative
+dentries, but Szeredi is not sure that is a real problem.
+</p>
+
+<!-- middle-ad -->
+
+<p>
+Amir Goldstein had previously suggested moving the negative dentries to the end of the
+<a href="https://elixir.bootlin.com/linux/v7.1.2/source/include/linux/dcache.h#L124"><tt>d_children</tt></a> list in <tt>struct dentry</tt>, Szeredi said.  That
+would allow iterators like <tt>fsnotify_set_children_dentry_flags()</tt> to
+stop when they reach the first negative dentry.  Chuck Lever was concerned
+that the order of child dentries might be exposed via <a
+href="https://man7.org/linux/man-pages/man2/getdents.2.html"><tt>getdents()</tt></a>,
+thus moving the negative dentries might cause reordering in a way that
+would break users of <tt>getdents()</tt>; Szeredi did not think that would be a
+problem, however.  An alternative might be to add calls to <a
+href="https://elixir.bootlin.com/linux/v7.1.2/source/include/linux/sched.h#L2143"><tt>cond_resched()</tt></a>
+into the code that walks the <tt>d_children</tt> list, Szeredi said; that would be more
+complex but would also address any soft lockups that are caused by positive
+dentries, not just those from negative dentries.
+</p>
+
+<p>
+Jan Kara was also concerned that moving negative dentries to the end might cause
+ordering problems if one of those dentries is changed to a positive dentry
+when a file is created.  Some of the child-walking iterators depend
+on not missing any entries, he believes, so there could be problems
+inserting the updated dentry into the <tt>d_children</tt> list. "<q>I am
+not saying it's impossible, I am just not sure whether there will not be
+some catch.</q>"  Szeredi said that he thought the iterators' locking would
+prevent those kinds of problems as long as the dentry update also used that
+lock. 
+</p>
+
+<p>
+David Howells raised the idea of switching the data structure used to track
+the children to something more suited to handling massive numbers of
+negative dentries.  He did not have a concrete suggestion for what that data
+structure might be, however.  Christian Brauner said that "<q>in principle
+there is nothing stopping us from changing the data structure</q>", though
+it would require agreement from others.
+</p>
+
+<p>
+Brauner asked about a <a href="/ml/all/20260331012925.74840-1-raven@themaw.net/">patch set from Kent</a> that would limit the number of
+dentries that could accumulate for the children of a directory.  Brauner
+thinks that some kind of heuristic limit on dentries should be explored,
+separate from possible limits on negative dentries.   That could perhaps
+lead to a "<q>meaningful heuristic that isn't just a sysfs file</q>" to
+better manage negative dentries.  The problem with the accumulation of too
+many negative dentries has been around for ten years or more, he said; it
+is time to fix it.
+</p>
+
+<p>
+There is an opportunity to add to the existing <a
+href="https://www.kernel.org/doc/html/latest/admin-guide/sysctl/fs.html#dentry-negative">sysfs
+knob (<tt>dentry-negative</tt>)</a>, Brauner said.  The current default is
+"<q>we will swamp your RAM with all of the dentries that we want</q>",
+which is fine for some workloads.  Other users have complained about
+accumulating negative dentries, which is why <tt>dentry-negative</tt> can
+be set to one to cause <a
+href="https://man7.org/linux/man-pages/man2/unlink.2.html"><tt>unlink()</tt></a>
+to remove the dentry rather than turn it into a negative one.  That does
+not solve the negative-dentry problem for everyone, however, so more
+options may be needed.  
+</p>
+
+<p>
+Szeredi pointed out that user space would have to be in charge of managing
+that. "<q>Yes, that's my solution for everything</q>", Brauner said to
+laughter. It is often the case that user space is better placed to
+determine these kinds of things, he continued. "<q>Pushing everything out
+to user space, a la BPF, isn't a great solution always, but for a lot of
+that stuff we see that it actually works.</q>"   He pointed to the
+out-of-memory (OOM) killer as an example where the kernel really cannot
+make a sensible choice for all workloads so user space is better placed to
+do so.
+</p>
+
+<p>
+Jeff Layton agreed that policy choices should be left to user space.  However, Ted Ts'o
+noted that doing so is in tension with "<q>decades of experience that users never
+change the defaults</q>"; he suggested that sophisticated users have a knob
+available, but that the default work well for the common case.  He thought
+that perhaps a limit of 1,000 negative dentries per directory would be
+sufficient for "<q>all sane workloads</q>", but surely "<q>my
+imagination is failing me</q>".  He would like to find out about workloads
+where that limit would be a problem in order to understand what other
+options might make sense.
+</p>
+
+<p>
+The overflow of the reference count for the per-dentry lock, which came up
+as part of the too-many-dentries problem, is  serious, Brauner said.  It
+requires two-billion dentries, Kara said, so it is hard to hit.  Brauner
+wondered if there could be some kind of built-in limit so that it could not
+happen.  Layton asked if the count was actually overflowing, but Szeredi said it
+was a theoretical problem, not one that has been reported.
+</p>
+
+<p>
+Goldstein asked whether the superblock shrinkers prioritized negative
+dentries for eviction and reclaiming.  Layton said that they probably do not since the
+dentries are maintained on a least-recently used (LRU) basis.  Goldstein
+wondered if that should change.  While Kara thought that perhaps it should,
+Szeredi pointed out that the problems occur on systems with too much memory
+so that the shrinkers are not being run at all.
+</p>
+
+<p>
+There was some unfocused talk about ways to limit the count and avoid the
+overflow as time ran out on the session.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Dentry cache</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, Memory-Management and BPF Summit/2026</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/1079407/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor1081200"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">what workflow creates so many negative dentries?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 16:22 UTC (Fri)
+                               by <b>jepler</b> (subscriber, #105975)
+                              [<a href="/Articles/1081200/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jepler" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081200" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm trying to imagine why this would occur with a non-pathological program. C compilers when searching an include path could create thousands, possibly... But doesn't software mostly try to open files that exist?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081200/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081205"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">what workflow creates so many negative dentries?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2026 18:37 UTC (Fri)
+                               by <b>jake</b> (editor, #205)
+                              [<a href="/Articles/1081205/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jake" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081205" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I'm trying to imagine why this would occur with a non-pathological program.</span><br>
+<p>
+It seems I failed to work in a link to a previous LSFMM+BPF session on negative dentries, which I meant to do: <a href="894098.html">https://lwn.net/Articles/894098/</a><br>
+<p>
+That has some information on workloads that end up with huge numbers of negative dentries.  As do some of the links from it (and links from those links :)  It is a longstanding problem as can be seen in our index entry: <a href="../Kernel/Index/index.html">https://lwn.net/Kernel/Index/#Dentry_cache</a><br>
+<p>
+jake<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081205/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081220"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">what workflow creates so many negative dentries?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 11:54 UTC (Sat)
+                               by <b>mokki</b> (subscriber, #33200)
+                              [<a href="/Articles/1081220/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mokki" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081220" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I saw the soft lockups from negative dentries regularly 15 years ago. It was on a huge (at the time) build machine.<br>
+It just repeated endlessly: git checkout, build, rm -rf<br>
+Each round left all the files as negative dentries.<br>
+And when the system finally ran out of memory it basically locked up for minutes and would not clear most of the dentries.<br>
+I had to run a cron job in th background to flush then regularly<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081220/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">what workflow creates so many negative dentries?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2026 0:29 UTC (Sun)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1081219/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="mathstuf" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081219" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I'm trying to imagine why this would occur with a non-pathological program.</span><br>
+<p>
+Content-addressed storage caches could do this.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">what workflow creates so many negative dentries?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 3:46 UTC (Tue)
+                               by <b>whack</b> (subscriber, #184251)
+                              [<a href="/Articles/1081553/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="whack" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081553" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I ran into this in production on Kubernetes. Symptoms were that pods (processes) were being evicted for no clear reason, but Kubernetes said it was due to memory pressure.<br>
+<p>
+The problem? Negative dentries filling the filesystem cache!<br>
+<p>
+Turns out, the blame was a health check a script for that process. It called curl every few seconds to check for health, and curl was adding 5mb to the cache (negative dentries!) every time it ran. It took a while but then suddenly poof! Process evicted due to using too much memory.<br>
+<p>
+It’s a bug that still shows as open. Here’s two comments I made on it with extra details:<br>
+<p>
+Report: <a href="https://github.com/kubernetes/kubernetes/issues/43916#issuecomment-525579040">https://github.com/kubernetes/kubernetes/issues/43916#iss...</a><br>
+Workaround: <a href="https://github.com/kubernetes/kubernetes/issues/43916#issuecomment-530195877">https://github.com/kubernetes/kubernetes/issues/43916#iss...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">preempt_lazy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 11:24 UTC (Sat)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/1081218/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="meyert" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081218" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe stupid question regarding cond_resched() isn't that something PREEMPT_LAZY is supposed to solve?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">preempt_lazy?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 19:59 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1081250/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081250" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      You need to hold a lock to walk the list, so it would be cond_resched_lock() except that if you drop the lock you might lose your place so it really becomes
+<pre>
+If (need_resched()) {
+       insert_dcache_cursor();
+       spin_unlock();
+       cond_resched();
+       spin_lock();
+       remove_cursor();
+}
+</pre>
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081251"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why list negative children?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 20:10 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1081251/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081251" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I thought keeping negatives at the end of the child list would be good too, until I looked at the code.<br>
+The children list is an hlist so there is only a pointer to head, not to tail. So you can only add to the head.<br>
+<p>
+So next thought: why put negative dentries on the children list at all? I cannot think of any good reason.<br>
+<p>
+Leaving them off wouldn't solve all the problems, but it would solve one important one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081251/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why list negative children?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 21:10 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1081254/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="willy" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081254" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When you rm a directory, you can delete all its negative dentry children too<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081259"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why list negative children?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 21:52 UTC (Sat)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/1081259/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="sdalley" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081259" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does this happen automatically on directory deletion these days? Or is there a simple step one can take from user space to ensure it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081259/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081261"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why list negative children?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 22:27 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1081261/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081261" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; When you rm a directory, you can delete all its negative dentry children too</span><br>
+<p>
+Yes, that is a slight advantage of listing the negative children, but is it worth the cost?<br>
+<p>
+I imagine that the sibling linkage would be used to keep negative dentries on a per-superblock list which allows them to be purged at unmount time.  This could also serve as an lru list which  might be purged more proactively.<br>
+Most of the dentries on this list are uninteresting, but we cannot be sure which.  Certainly the children of a deleted parent are definitely uninteresting so the proactive purge would get rid of them more forcefully, but do we need more than that.<br>
+<p>
+I can imagine removing a directory tree  might create a great many negative dentries which might tip the balance.  We could get an approximate count of these based on the remaining refcount on a directory when it is deleted, and use that to expedite the purge.<br>
+<p>
+Or we could possibly keep the negative-children chain in the directory inode, possibly unioned with i_devices and i_linklen.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081261/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1081253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are negative dentries the right abstraction in the first place?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2026 20:56 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1081253/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="NYKevin" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081253" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Whenever I hear about negative dentries, the first thing I think of is a bloom filter. A bloom filter isn't quite the right data structure for this problem, or at least I don't think it is, but it's surprisingly close.<br>
+<p>
+A bloom filter is a probabilistic data structure with two operations: insert and query. You insert keys (usually strings), and can later query for whether a given key was inserted. The filter will return either "maybe" or "no." This isn't useful as a direct substitute for negative dentries, because (assuming the keys represent non-existing dentries) both answers require us to take the slow path. We would need a data structure that returns "maybe" or "yes" (so that we can skip the slow path on a "yes").<br>
+<p>
+Unfortunately, all of the materials I found on the web suggest that the closest equivalent to such an "inverse Bloom filter" is some kind of cache, which is exactly what negative dentries already are.<br>
+<p>
+So then the question is whether we're allowed to make more substantial refactors. For example, we might give each directory a lazily-initialized bloom filter. Initially, the directory would use negative dentries as in the current design. If the directory is ever fully scanned, however, we would take the opportunity to initialize the bloom filter with all of the *positive* dentries we find on disk, then delete all of its negative dentries and consult the bloom filter instead of looking for negative dentries. We would then need to keep the bloom filter up to date by inserting newly created dentries as we go. If the filter gets too full, we would erase it and go back to using negative dentries until it can be re-initialized. As a bonus, newly-created directories are initially empty, and can be initialized with an empty bloom filter immediately.<br>
+<p>
+Obviously, there are serious concurrency hazards to this approach. My assumption is that the filesystem is capable of guarding against those hazards without a serious performance penalty (because it already must do so for regular read-write conflicts anyway). But I might be wrong about that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081273"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are negative dentries the right abstraction in the first place?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2026 6:43 UTC (Sun)
+                               by <b>fraetor</b> (subscriber, #161147)
+                              [<a href="/Articles/1081273/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="fraetor" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081273" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'd be somewhat concerned about potential impact on reading positive dentries, especially given that should be the common case. The cost of a bloom filter lookup should be small. but without looking at the code I assume the reading of dentries is already very optimised.<br>
+<p>
+The other problem I see is how to delete a dentrie, as you can't remove something from a bloom filter without rebuilding it entirely. While the probabilistic nature of a bloom filter means you would need to handle that case anyway (its the maybe), a common use case for a negative dentrie would be for a small number of entries queried very frequently, which would lose the performance benefit if deleted. But perhaps these frequently queried files wouldn't have existed in the first place.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081273/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081555"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 10:40 UTC (Tue)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/1081555/">Link</a>] (8 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Fowl" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081555" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I’m imaging the implementation is probably not simple, but would setting a limit at some ratio of positive entires work? Surely finding the negative entry gets harder than not finding the actual file at some point? Does a directory with 10 files need them at all?<br>
+<p>
+Keeping counts might be difficult, but it doesn’t need to be precise - even just a few buckets maybe.<br>
+<p>
+I guess there’d a potential for a “cliff” (instead of gradual performance degradation) at reaching any limit at all if there’s not been one before. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081555/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081556"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 12:25 UTC (Tue)
+                               by <b>Klaasjan</b> (subscriber, #4951)
+                              [<a href="/Articles/1081556/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Klaasjan" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081556" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just to confirm: I had essentially the same question (but was afraid to ask; not a kernel hacker)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081556/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081646"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 13:48 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/1081646/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="paulj" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081646" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have the same question. Why is the answer not a limit on the -dentry cache list, given there exists some number of entries beyond which the -dentry cache list apparently has a /greater/ cost than just doing the lookup?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081646/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1082159"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 10, 2026 10:36 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/1082159/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="neilbrown" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1082159" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The number of negative dentries is not the problem. The problems are:<br>
+- iterating over positive children can be slow<br>
+- refcount on parent from negative children can exceed 32bits<br>
+- freeing a large number of (negative) dentries may not free much memory due to fragmentation, and may cause excessive memory bus traffic (if I've understood that one properly)<br>
+<p>
+Reducing the number of negative dentries is a large and inappropriate hammer. <br>
+<p>
+Negative dentries can be on a separate list. They can have an indirect ref on the parent. They can, on second reference, be moved to a separate pool of pages of negative dentries (negative dentries do not have ling term references so ate relatively easy to move). These pages can be freed whole, reducing fragmentation.<br>
+<p>
+So we can address each actual problem rather addressing something that loosely correlates with the problems.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1082159/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1081645"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 15:29 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1081645/">Link</a>] (4 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081645" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The motivating use case for negative dentries is something like the C include path; you write <tt>#include &lt;stdio.h&gt;</tt> in your source code, and your compiler searches multiple directories for <tt>stdio.h</tt>. In the case of a default Fedora 44 gcc, there's three before you add any library search paths, in the following order:
+<ol>
+<li>Your cwd for <tt>&quot;&quot;</tt> includes, but not <tt>&lt;&gt;</tt> includes.
+<li><tt>/usr/lib/gcc/x86_64-redhat-linux/16/include</tt> - 141 files on my system
+<li><tt>/usr/local/include</tt> - empty
+<li><tt>/usr/include</tt> - 270 files.
+</ol>
+<p>Most header files are going to be found in <tt>/usr/include</tt> - <tt>/usr/lib/gcc/x86_64-redhat-linux/16/include</tt> is only for headers whose content is machine-specific, and <tt>/usr/local/include</tt> is for cases where you installed a package outside the system package manager's control.. On top of that, you have additional directories added by <tt>-I</tt> and similar options (including those added by things like pkg-config).
+<p>This gets worse for C++, which changes to the following list:
+<ol>
+<li>Your cwd for <tt>&quot;&quot;</tt> includes, but not <tt>&lt;&gt;</tt> includes.
+<li><tt>/usr/lib/gcc/x86_64-redhat-linux/16/../../../../include/c++/16</tt> - 137 files.
+<li><tt>/usr/lib/gcc/x86_64-redhat-linux/16/../../../../include/c++/16/x86_64-redhat-linux</tt> -  3 files
+<li><tt>/usr/lib/gcc/x86_64-redhat-linux/16/../../../../include/c++/16/backward</tt> - 8 files
+<li><tt>/usr/lib/gcc/x86_64-redhat-linux/16/include</tt>
+<li><tt>/usr/local/include</tt>
+<li><tt>/usr/include</tt>
+</ol>
+<p>So, we need something that's going to quickly return "not present" for all the directories that are earlier in the search path than <tt>/usr/include</tt> when we search for (say) <tt>stdio.h</tt> or <tt>zlib.h</tt>, or the directory <tt>vulkan</tt>, but that's not going to consume a lot of resources. Negative dentries are <em>supposed</em> to be that thing - so the question is how many negative dentries are reasonable to record before it'd be cheaper to just do a full lookup.
+<p>In turn, that means that the "right" number of negative dentries for directories in the search path for the C compiler before <tt>/usr/include</tt> is a function of the number of files in <tt>/usr/include</tt>, and not any function of the number of files in those directories. If you have a lot of libraries installing headers in there, then the right number can be quite large.
+<p>And related to that is cache management policy; while positive dentries are limited to the number of directory entries by definition, which dentries we should remove once we have too many dentries is itself a question that needs considering - are you better off removing the negative dentry that tells you that <tt>zlib.h</tt> is not found in <tt>/usr/lib/gcc/x86_64-redhat-linux/16/include</tt>, or the positive dentry that tells you that <tt>omp.h</tt> is found there? The right answer depends on whether you're compiling code that uses GOMP heavily, or code that uses Zlib heavily.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081645/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081695"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 16:01 UTC (Tue)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/1081695/">Link</a>] (3 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="kleptog" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081695" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ISTM what is relevant is the amount of time a dentry is in the cache. Deleting a negative dentry means the next lookup will take longer. So that's the time being saved that needs to be weighed against the extra memory usage and CPU cost of keeping the entry.<br>
+<p>
+I would think that if a negative dentry hasn't been hit in the last minute you can probably toss it. The example posted above where the negative dentries are using up 1GB of memory per minute while never being referenced for me feels like the memory costs far outweighs the benefits.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081695/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081697"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 17:15 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1081697/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="farnz" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081697" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The same applies to positive dentries, too - while they don't have the cache size explosion potential of negative dentries (being bounded by the number of entries in the directory), it seems wasteful to keep a positive dentry for <tt>omp.h</tt> that's never referenced again, when you could use the cache space for a negative dentry for <tt>limits.h</tt> that's being referenced every 90 seconds.
+<p>It does feel like the necessary change is to have a size limit on the dentry cache (so that it can't be multiple gigabytes in size), and to have a cache replacement policy that accounts for many dentries never being reused - a split LRU (like the active/inactive lists for page cache), or a LFUDA type policy.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081697/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1081710"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 18:28 UTC (Tue)
+                               by <b>jmgao</b> (subscriber, #104246)
+                              [<a href="/Articles/1081710/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="jmgao" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081710" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I would think that if a negative dentry hasn't been hit in the last minute you can probably toss it.</span><br>
+<p>
+The compiler include use case is going to be pretty disconnected from any wall-clock time, since the iteration time of an edit-compile-test loop is going to be highly variable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081710/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1081712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Positive to negative ratio </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2026 19:10 UTC (Tue)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/1081712/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="rgmoore" />
+                <input type="hidden" name="return" value="/Articles/1079407/#CommAnchor1081712" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>The issue with compiling is when you have to compile many individual .c files, each of which has the same set of includes.  It makes sense to cache that information so you don't have to perform the same expensive file checks again for each .c file.  When you get into the test and edit steps of the loop, you can safely flush the cache. It's going to be a really long time before you need to look that information up again, and the cache will repopulate as soon as you compile one file.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1081712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2026, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,151 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Memory control group fairness [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Memory control group fairness">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="Control groups running with the memory controller (known as 'memory control groups' or 'memcgs' [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/684573/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Memory control group fairness</h1>
+</div>
+<div class="ArticleText"><main>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 27, 2016</br>
+           <hr>
+<a href="/Articles/lsfmm2016/">LSFMM 2016</a>
+</div>
+Control groups running with the memory controller (known as "memory control
+groups" or "memcgs") allow the system administrator to regulate memory use
+by groups of processes.  Getting this controller working well has been a
+long process, though, and, as Vladimir Davydov made clear during his
+session at the 2016 Linux Storage, Filesystem, and Memory-Management
+Summit, the job is not done yet.
+<p>
+The main problem that remains, according to Vladimir, is fairness.  When
+the system is under memory pressure, all memcgs are scanned and trimmed in
+proportion to their configured limits.  But, if one process is creating
+lots of inactive pages — by streaming through a large file, for example —
+it will claim space from the others.  This is not a useful result; it is
+causing needed pages to be pushed out in favor of pages that will never be
+
+<a href="/Articles/684929/"><img
+src="../_static/images/conf/2016/lsfmm/VladimirDavydov-sm.jpg" width=200 height=250
+alt="[Vladimir Davydov]" title="Vladimir Davydov" border=0 hspace=3
+vspace=3 align="left"></a>
+
+used again.  Unless other processes in the group touch their pages just as
+quickly as the streamer, they will lose those pages.
+<p>
+Johannes Weiner said that this behavior is only a problem if memory is
+overcommitted on the system.  But it tends to come up with workloads like
+virtualization, for which the entire point is to overcommit the system's
+resources.
+<p>
+One possible solution would be to adjust each process's memory limits
+dynamically depending on how much memory pressure is created by each.  It
+is not clear how that pressure would be detected and quantified, though.
+<p>
+Another possibility is to store the time that each page was added to the
+LRU list, and to track the oldest page on each list.  The system could try
+to achieve an approximate balance of ages.  A control-group parameter could
+configure a minimum age for pages in the list.  Only the active list would
+be affected by this parameter, so it would tend to protect actively used
+pages over the streamer's pages, which are in the inactive list.
+<p>
+Johannes said that the hard and soft memory limits implemented by memory
+control groups should be used for this purpose; their whole reason for
+existence, after all, is to route memory pressure.  If the streaming
+process's limits are set to a relatively low value, it will be trimmed
+accordingly.  The problem is that setting these limits appropriately is not
+an easy task; there would really need to be a system daemon charged with
+doing that.
+<p>
+It was suggested that the <a href="/Articles/495543/">refault distance</a>
+work could help in this case.  Refault distance is essentially a
+measurement of a process's working set; it tells how long a process's pages
+tend to stay paged out before being brought back into working memory.  This
+measurement is a bit too one-sided for this task, though; it can tell when
+to increase a group's limits, but not when to shrink them.
+<p>
+Another possibility is the <a href="/Articles/524742/">vmpressure
+mechanism</a>, which is meant to notify processes when memory starts to get
+tight.  Michal Hocko said, though, that vmpressure only works well on small
+systems; on larger systems, pressure tends to look high even when the
+situation is not that severe.
+<p>
+Johannes said that it might be possible to track how much time processes
+spend waiting for memory.  If a process spends, say, over 10% of its
+execution time waiting for pages to be faulted back in, its memory limits
+need to be expanded.  The kernel has no such metric at the moment, though,
+so it's not possible to tell how "healthy" the workload is.  Rik van Riel
+suggested that the same metric could be used to shrink working sets if the
+wait time goes below a low watermark.
+<p>
+Vladimir concluded the session by saying that he would start by trying to
+use the facilities that are available now and add a daemon to try to tweak
+the memory limits on the fly.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Control groups/Memory controller</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Memory management/Control groups</a></td></tr>
+            <tr><td><a href="../Archives/ConferenceIndex/index.html">Conference</a></td><td><a href="../Archives/ConferenceIndex/index.html">Storage, Filesystem, and Memory-Management Summit/2016</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/684926/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

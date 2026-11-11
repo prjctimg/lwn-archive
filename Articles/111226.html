@@ -1,0 +1,372 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>On not getting burned by kmap_atomic() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="On not getting burned by kmap_atomic()">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="'High memory,' on a Linux system is, by definition, memory which is not normally mapped into th [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="../_static/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn-v1?user=186587">
+<style>div.MakeALink { display: none }</style>
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/logo/barepenguin-70.webp" class="logo"
+                 border="0" alt="LWN.net Logo">
+            <span class="logo">LWN<br>.net</span>
+            <span class="logobl">News from the source</span></a>
+            <a href="/" aria-label="Return to the front page">
+            <img src="../_static/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="../current/index.html">Weekly Edition</a></li><li><a href="../Archives/index.html">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="../Kernel/index.html">Kernel</a></li><li><a href="../Security/index.html">Security</a></li><li><a href="../Calendar/index.html">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="../op/FAQ.lwn">LWN FAQ</a></li><li><a href="../op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/110566/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><!-- no top ad served --></div>
+<div class="topnav-container">
+<b><a href="/MyAccount/">prjctimg</a></b> | <b><a href="/Login/logout">Log out</a></b> | (<b>GSoC 2026 Mentors</b>)</div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>On not getting burned by kmap_atomic()</h1>
+<div class="Byline">[Posted November 16, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText"><main>
+"High memory," on a Linux system is, by definition, memory which is not
+normally mapped into the kernel's virtual address space.  It is a mechanism
+which enables 32-bit architectures to make use of more physical memory than
+would otherwise be possible.  When the kernel needs to directly manipulate
+the contents of a high-memory page, it must explicitly create a virtual
+address for it.  The traditional functions for creating and removing those
+addresses are:
+<p>
+<pre>
+    void *kmap(struct page *page);
+    void kunmap(struct page *page);
+</pre>
+<p>
+
+These functions work as intended, but they can be expensive to use.  The
+virtual address space they use is limited, and shared across all
+processors.  As a result, each <tt>kmap()</tt> and <tt>kunmap()</tt> invocation
+requires a global
+TLB flush.  Often, however, high memory does not need to be mapped for
+long periods of time, and does not need to be shared across processors.  To
+improve performance in such situations, the notion of an "atomic kmap" was
+added:
+<p>
+<pre>
+    void *kmap_atomic(struct page *page, enum km_type type);
+    void kunmap_atomic(void *address, enum km_type type);
+</pre>
+<p>
+Atomic kmaps use a very small set of predefined virtual "slots," which are
+not shared across processors.  The <tt>type</tt> argument specifies which
+slot is to be used, with the callers taking responsibility for not stepping
+on each others' toes.  Slots are dedicated to specific purposes - two for code called
+in user context, two for interrupt handlers, two for page table management,
+etc.  In practice, it all works out; conflicts over atomic kmap slots don't
+happen. 
+<p>
+
+Another problem <i>has</i> come up, however, and that has led to a small
+change in the prototypes of the atomic kmap functions in the -mm kernel.  The
+regular kmap functions have a symmetrical interface in that both take a
+<tt>struct page&nbsp;*</tt> argument.  <tt>kunmap_atomic()</tt>, instead,
+takes a <tt>void&nbsp;*</tt> argument - the kernel virtual address to be
+unmapped.  It is a common mistake, however, to pass in the associated
+<tt>struct page</tt> pointer instead.  Since the argument type is
+<tt>void&nbsp;*</tt>, the compiler does not complain, and the discovery of
+the problem does not come until (possibly much) later.
+<p>
+
+The solution is straightforward: redefine the function as follows:
+<p>
+<pre>
+    char *kmap_atomic(struct page *page, enum km_type type);
+    void kunmap_atomic(char *address, enum km_type type);
+</pre>
+<p>
+With this change, the compiler will issue a warning whenever somebody tries
+to pass a <tt>struct page</tt> pointer to <tt>kunmap_atomic()</tt>.  
+<p>
+
+The patch has generated a surprising number of follow-on fixes, mostly to
+suppress warnings caused by the change.  Many <tt>kunmap_atomic()</tt>
+calls now explicitly cast the address argument to the <tt>char&nbsp;*</tt>
+type.  In the end, though, the result should be one more potential mistake
+which can be caught before it burns somebody - as long as programmers
+don't "fix" warnings by casting <tt>struct page</tt> pointers.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">Debugging</a></td></tr>
+            <tr><td><a href="../Kernel/Index/index.html">Kernel</a></td><td><a href="../Kernel/Index/index.html">kmap_atomic()</a></td></tr>
+            </table><br clear="all">
+<table align="right"><tr><td>
+           <form action="/Articles/111226/comment" method="post">
+           <input type="submit" value="Post a comment"></form>
+           </td></tr></table>
+           <br clear="all">
+           <p>
+           <p><a name="Comments"></a>
+<a name="CommAnchor111550"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">char *?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 18, 2004 7:35 UTC (Thu)
+                               by <b>Ross</b> (guest, #4065)
+                              [<a href="/Articles/111550/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="Ross" />
+                <input type="hidden" name="return" value="/Articles/111226/#CommAnchor111550" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      So virtual addresses are now a pointer to a char, though they will probably<br>
+not be used as such and will require casting to another pointer type.  Yuck!<br>
+That's like the old K&amp;R way of writing generic pointers which was rightfully<br>
+considered to be evil.  Isn't there a better way?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/111550/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor111642"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On not getting burned by kmap_atomic()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 18, 2004 14:31 UTC (Thu)
+                               by <b>meuh</b> (guest, #22042)
+                              [<a href="/Articles/111642/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="meuh" />
+                <input type="hidden" name="return" value="/Articles/111226/#CommAnchor111642" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <p>
+int kmap_atomic(struct page *page, enum km_type type, void **adress);<br>
+void kunmap_atomic(struct page *page, enum km_type type, void *address);<br>
+<p>
+Symmetrical, but more text to type, strictness has a cost.<br>
+The main drawback is the higher stack usage for the arguments.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/111642/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor111707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On not getting burned by kmap_atomic()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 18, 2004 18:05 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/111707/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="iabervon" />
+                <input type="hidden" name="return" value="/Articles/111226/#CommAnchor111707" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      So how come kunmap() takes the page, and kunmap_atomic() doesn't? In there a good reason it wouldn't work due to the difference created by the _atomic?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/111707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor111898"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another reason for kmap_atomic()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2004 19:55 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/111898/">Link</a>] (2 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="giraffedata" />
+                <input type="hidden" name="return" value="/Articles/111226/#CommAnchor111898" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      The article misses the real purpose of kmap_atomic(), which is evident in its name.  kmap() can sleep, waiting for a virtual address range to be available.  Some callers aren't able to sleep where they call kmap().
+<p>
+kmap_atomic() uses reserve pools of virtual address ranges (page table entries) so that it is always atomic (or fails immediately if the reserve pool is empty).  The reason there are multiple pools (chosen by kmap's second argument) is to avoid deadlock.  The kmap() succeeding is sometimes a prerequisite to page table entries getting freed up.
+<p>
+Example: Someone does a kmap.  System needs to swap out a high memory page to free up a page table entry for the kmap.  The swap device can't access high memory, so the device driver has to copy the page to a low memory page "bounce buffer".  To do that, it has to kmap both pages.  The one reserved bounce buffer PTE slot keeps this from causing a deadlock.
+<p>
+Since these kmappers are always using the same small set of page table entries, it makes an ideal place for a performance improvement with per-cpu page table entries.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/111898/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor223350"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another reason for kmap_atomic()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 22, 2007 8:50 UTC (Thu)
+                               by <b>pbreuer</b> (guest, #43542)
+                              [<a href="/Articles/223350/">Link</a>] (1 responses)
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="pbreuer" />
+                <input type="hidden" name="return" value="/Articles/111226/#CommAnchor223350" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      Are you SURE kmap can sleep? This is said also by Rubini in LDD (<a rel="nofollow" href="http://www.xml.com/ldd/chapter/book/ch13.html">http://www.xml.com/ldd/chapter/book/ch13.html</a> "kmap returns a kernel virtual address for any page in the system. For low-memory pages, it just returns the logical address of the page; for high-memory pages, kmapcreates a special mapping. Mappings created with kmap should always be freed with kunmap; a limited number of such mappings is available, so it is better not to hold on to them for too long. kmap calls are additive, so if two or more functions both call kmap on the same page the right thing happens. Note also that kmap can sleep if no mappings are available.").<br>
+<p>
+However, I see no way it can. In kernel 2.6.17, for example, in highmem.h<br>
+<p>
+static inline void *kmap(struct page *page) { return page_address(page); }<br>
+<p>
+and page_address() is defined in mm.h:<br>
+<p>
+#define page_address(page) ((page)-&gt;virtual)<br>
+<p>
+or<br>
+<p>
+#define page_address(page)                                              \<br>
+        __va( (((page) - page_zone(page)-&gt;zone_mem_map) &lt;&lt; PAGE_SHIFT)  \<br>
+                        + page_zone(page)-&gt;zone_start_paddr)<br>
+<p>
+<p>
+OK, so you think page_zone() might sleep? No. That's also in mm.h:<br>
+<p>
+static inline zone_t *page_zone(struct page *page)<br>
+{<br>
+        return zone_table[page-&gt;flags &gt;&gt; ZONE_SHIFT];<br>
+}<br>
+<p>
+so I don't see a sleep.<br>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/223350/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor705001"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another reason for kmap_atomic()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 29, 2016 21:11 UTC (Sat)
+                               by <b>slugsur</b> (guest, #110919)
+                              [<a href="/Articles/705001/">Link</a>] 
+      </p>
+      
+              <form method="post" action="/MyAccount/commfilters/addfilter">
+                <input type="hidden" name="username" value="slugsur" />
+                <input type="hidden" name="return" value="/Articles/111226/#CommAnchor705001" />
+                <input type="submit" name="Submit" value="Mute user" />
+              </form>
+      </div>
+      </summary>
+      <div class="FormattedComment">
+274  <br>
+kmap calls kmem_high for high memory which calls lock_kmap<br>
+<p>
+*/<br>
+275 void *kmap_high(struct page *page)<br>
+276 {<br>
+277         unsigned long vaddr;<br>
+278 <br>
+279         /*<br>
+280          * For highmem pages, we can't trust "virtual" until<br>
+281          * after we have the lock.<br>
+282          */<br>
+283         lock_kmap();<br>
+284         vaddr = (unsigned long)page_address(page);<br>
+285         if (!vaddr)<br>
+286                 vaddr = map_new_virtual(page);<br>
+287         pkmap_count[PKMAP_NR(vaddr)]++;<br>
+288         BUG_ON(pkmap_count[PKMAP_NR(vaddr)] &lt; 2);<br>
+289         unlock_kmap();<br>
+290         return (void*) vaddr;<br>
+291 }<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/705001/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+
+</main></div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<!-- no side ad served -->
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
