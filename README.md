@@ -26,7 +26,11 @@ Common options:
 Progress is stored in `_meta/` so runs are resumable and idempotent.
 
 ### Automated scraping (GitHub Actions)
-`scrape.yml` runs every 30 minutes and commits updates back to the repo. It expects a Netscape-format `cookies.txt` in the repository root (pushed/refreshed manually when it expires) and uses conservative defaults (`--max-pages 10 --delay 5 --jitter 3`).
+`scrape.yml` runs every 30 minutes and commits updates back to the repo. Subscriber cookies are provided via the repository secret **`LWN_COOKIES`** (Netscape `cookies.txt` content); the workflow materializes it at runtime and never commits it. It uses conservative defaults (`--max-pages 10 --delay 5 --jitter 3`). Set/refresh the secret with:
+
+```bash
+gh secret set LWN_COOKIES < /path/to/cookies.txt -R prjctimg/lwn-archive
+```
 
 ## TUI Reader (`lwn-reader`)
 
@@ -89,6 +93,6 @@ cargo build --release --manifest-path reader/Cargo.toml
 
 ## Notes
 
-- Subscriber content requires your own LWN subscription and cookies; the scheduled workflow only scrapes while valid cookies are present.
+- Subscriber content requires your own LWN subscription and cookies. For CI scraping, store them in the `LWN_COOKIES` GitHub Actions secret (do not commit `cookies.txt`); the scheduled workflow only scrapes while valid cookies are present.
 - Article pages are saved as `Articles/<id>.html` with links/assets rewritten for offline viewing. See `_meta/state.json` and `_meta/manifest.jsonl` for progress.
 - This is a personal-archival tool: keep crawl rates polite.
