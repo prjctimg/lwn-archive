@@ -1,0 +1,95 @@
+name: Release archive + reader
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2026.11.15). Required for manual runs."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine tag
+        id: vars
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="snapshot-$(date -u +'%Y%m%d-%H%M%S')"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Build reader binary
+        run: |
+          mkdir -p dist
+          cargo build --release --manifest-path reader/Cargo.toml
+          cp reader/target/release/lwn-reader dist/lwn-reader
+          chmod +x dist/lwn-reader
+          strip dist/lwn-reader 2>/dev/null || true
+          file dist/lwn-reader || true
+
+      - name: Prepare bundle
+        run: |
+          set -euo pipefail
+          STAGE="bundle/lwn-archive"
+          mkdir -p "$STAGE"
+          # Copy archive content (tracked snapshot) excluding VCS/build junk
+          rsync -a --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'reader/target' \
+            --exclude 'reader/lwn-reader' \
+            --exclude 'bundle' \
+            --exclude 'dist' \
+            --exclude '_meta/scrape.lock' \
+            --exclude '_meta/scheduler.log' \
+            --exclude '__pycache__' \
+            --exclude '*.tmp' \
+            ./ "$STAGE/"
+          # Include reader binary, install script, readme at bundle root and inside archive
+          cp dist/lwn-reader "$STAGE/lwn-reader"
+          cp README.md "$STAGE/README.md"
+          cp install.sh "$STAGE/install.sh"
+          chmod +x "$STAGE/install.sh" "$STAGE/lwn-reader"
+          mkdir -p dist
+          tar -czf "dist/lwn-archive-reader-${TAG}.tar.gz" -C bundle lwn-archive
+          # Publish manifest separately for incremental client updates
+          if [ -f _meta/manifest.jsonl ]; then cp _meta/manifest.jsonl dist/manifest.jsonl; fi
+          sha256sum dist/* > dist/SHA256SUMS.txt || true
+          ls -lh dist
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: LWN Archive ${{ steps.vars.outputs.tag }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.vars.outputs.tag, 'snapshot') }}
+          files: |
+            dist/lwn-archive-reader-${{ steps.vars.outputs.tag }}.tar.gz
+            dist/lwn-reader
+            dist/manifest.jsonl
+            dist/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
